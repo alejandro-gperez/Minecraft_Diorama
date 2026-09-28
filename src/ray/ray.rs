@@ -63,7 +63,7 @@ mod tests {
 
     #[test]
     fn rejects_near_zero_direction() {
-        assert_eq!(Ray::try_new(Vec3::ZERO, Vec3::new(1.0e-4, 0.0, 0.0)), None);
+        assert_eq!(Ray::try_new(Vec3::ZERO, Vec3::new(1.0e-7, 0.0, 0.0)), None);
     }
 
     #[test]

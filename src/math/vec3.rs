@@ -38,8 +38,9 @@ impl Vec3 {
 
     pub fn try_normalized(self) -> Option<Self> {
         let length_squared = self.length_squared();
+        let minimum_length_squared = NORMALIZATION_EPSILON * NORMALIZATION_EPSILON;
 
-        if !length_squared.is_finite() || length_squared <= NORMALIZATION_EPSILON {
+        if !length_squared.is_finite() || length_squared <= minimum_length_squared {
             return None;
         }
 
@@ -173,9 +174,17 @@ mod tests {
     }
 
     #[test]
-    fn rejects_zero_and_near_zero_normalization() {
+    fn rejects_zero_and_vectors_below_normalization_threshold() {
         assert_eq!(Vec3::ZERO.try_normalized(), None);
-        assert_eq!(Vec3::new(1.0e-4, 0.0, 0.0).try_normalized(), None);
+        assert_eq!(Vec3::new(1.0e-7, 0.0, 0.0).try_normalized(), None);
+    }
+
+    #[test]
+    fn normalizes_vectors_above_normalization_threshold() {
+        assert_eq!(
+            Vec3::new(1.0e-4, 0.0, 0.0).try_normalized(),
+            Some(Vec3::new(1.0, 0.0, 0.0))
+        );
     }
 
     #[test]
