@@ -1166,6 +1166,66 @@ Only implement work belonging to the current phase unless the user explicitly re
 
 When Phase 1 is accepted as complete, this section may be updated to Phase 2 in a dedicated documentation commit.
 
+## Phase 1: Core Raytracer
+
+**STATUS: COMPLETE**
+
+Phase 1 established and validated:
+
+- custom 3D vector mathematics;
+- normalized 3D rays;
+- robust slab-based ray-AABB intersection;
+- outward geometric surface normals;
+- orbital 3D camera with zoom;
+- perspective primary-ray generation;
+- CPU-owned framebuffer;
+- simple closest-hit scene traversal;
+- basic debug shading;
+- deterministic background rendering;
+- PPM image export;
+- isolated Raylib presentation/input layer;
+- dirty rendering;
+- interactive camera orbit and zoom;
+- CPU render timing;
+- automated mathematical, geometric, camera, scene, rendering, and presentation-boundary tests.
+
+Phase 1 has passed automated validation, manual interactive testing, and a dedicated architecture/documentation audit.
+
+Do not reopen or redesign Phase 1 systems without a concrete correctness issue or an explicit architectural requirement from a later phase.
+
+## Current Phase
+
+**CURRENT PHASE: PHASE 2 - MATERIALS, TEXTURES, LIGHTING**
+
+Phase 2 introduces the visual surface system while preserving all Phase 1 architectural boundaries.
+
+Phase 2 work should focus on:
+
+- separation between block identity and optical material behavior;
+- CPU-side texture representation;
+- Minecraft-inspired pixel textures;
+- cube-face UV mapping;
+- material parameters;
+- basic direct lighting;
+- shadows;
+- visually distinct surface behavior.
+
+Do not implement Phase 3 raytracing effects early.
+
+In particular, Phase 2 must NOT prematurely implement:
+
+- recursive reflection;
+- refraction;
+- normal mapping;
+- emissive lighting;
+- skybox/environment mapping.
+
+Those belong to Phase 3.
+
+Likewise, do not implement Phase 4 performance architecture or Phase 5 procedural EggWars world generation early.
+
+Incremental phase boundaries remain intentional.
+
 ---
 
 # 30. Definition of Done for Any Change
