@@ -44,6 +44,37 @@ This is a specialized CPU raytracer optimized for this particular voxel-heavy di
 
 Every engineering decision should respect that scope.
 
+## Diorama Interaction Model
+
+This project is an interactive raytraced diorama, not a playable Minecraft or EggWars game.
+
+There is no player-controlled entity inside the scene.
+
+The user exists conceptually outside the diorama and interacts with it exclusively through the orbital camera.
+
+The application may support:
+
+- orbiting the camera around the diorama;
+- changing camera elevation;
+- zooming toward or away from the diorama;
+- presentation/debug controls where useful.
+
+The application must NOT introduce gameplay systems such as:
+
+- a controllable player or avatar;
+- first-person movement;
+- walking or flying through the world;
+- player collision;
+- jumping;
+- combat;
+- inventory;
+- block placement or destruction;
+- EggWars gameplay mechanics.
+
+Environmental objects such as arrows, weapons, opened chests, destroyed defenses, bridges, and missing eggs are static storytelling elements representing the aftermath of a past battle.
+
+Do not implement player/gameplay systems unless the project requirements are explicitly changed.
+
 ---
 
 # 2. Non-Negotiable Constraints
@@ -1155,6 +1186,7 @@ Unless explicitly changed by the user, these decisions are settled:
 - Do not procedurally recreate final Minecraft block textures unless this decision is explicitly changed.
 - Procedural generation requirements apply to terrain/world generation, not to recreating block texture artwork.
 - Texture architecture must support different textures per cube face where required, especially for blocks such as grass with distinct top, side, and bottom appearances.
+- The project is an interactive diorama, not a playable game; user interaction is limited to the external orbital camera and presentation/debug controls, with no player-controlled entity inside the scene.
 
 Do not casually reopen these decisions.
 
