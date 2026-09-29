@@ -1,5 +1,6 @@
 use super::Color;
 
+/// CPU-owned row-major pixels kept independent from any presentation API.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Framebuffer {
     width: usize,

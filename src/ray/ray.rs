@@ -1,5 +1,6 @@
 use crate::math::Vec3;
 
+/// A ray with a finite origin and a normalized direction.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Ray {
     origin: Vec3,

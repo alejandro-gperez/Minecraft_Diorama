@@ -31,6 +31,10 @@ impl Aabb {
         self.max
     }
 
+    /// Finds the nearest valid surface in the requested interval using slab clipping.
+    ///
+    /// A ray whose origin is strictly inside the box reports the exit surface, so callers
+    /// always receive a forward-facing boundary hit rather than an artificial entry point.
     pub fn intersect(&self, ray: Ray, t_min: f32, t_max: f32) -> Option<AabbHit> {
         if t_min.is_nan() || t_max.is_nan() || t_min > t_max || !ray.origin().is_finite() {
             return None;

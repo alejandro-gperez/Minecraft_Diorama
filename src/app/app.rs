@@ -1,3 +1,8 @@
+//! Raylib presentation boundary for the CPU-generated framebuffer.
+//!
+//! The renderer and scene remain independent of Raylib. This module owns only the window,
+//! input, timing, texture transfer, and the dirty flag that avoids rerendering idle frames.
+
 use std::{io, path::Path, time::Instant};
 
 use raylib::prelude::{

@@ -36,6 +36,10 @@ impl Vec3 {
         self.length_squared().sqrt()
     }
 
+    /// Returns a unit vector, or `None` for non-finite and numerically degenerate input.
+    ///
+    /// The explicit failure keeps zero-length directions from turning into NaNs in camera,
+    /// ray, and intersection calculations.
     pub fn try_normalized(self) -> Option<Self> {
         let length_squared = self.length_squared();
         let minimum_length_squared = NORMALIZATION_EPSILON * NORMALIZATION_EPSILON;
