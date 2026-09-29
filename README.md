@@ -94,6 +94,30 @@ output/phase1.ppm
 
 The `output/` directory is ignored by Git so generated renders remain local debugging artifacts.
 
+## Texture Assets
+
+Original PNG files under `assets/source/` are development inputs. The CPU raytracer does not
+decode PNG at runtime. Prepare the 16×16 binary P6 PPM assets used by the renderer with:
+
+```bash
+scripts/prepare_assets.sh
+```
+
+The script validates every source dimension, uses macOS `sips` only for offline PNG decoding,
+and writes runtime files under `assets/textures/`. Its Python helper uses only the standard
+library and performs deterministic PPM conversion and tint arithmetic.
+
+The grass top uses the supplied Minecraft grass colormap with the classic Plains parameters:
+temperature `0.8`, rainfall `0.4`, and Minecraft's humidity-times-temperature lookup. This
+selects colormap coordinate `(50, 173)`, RGB `(145, 189, 89)` or `#91BD59`. The source
+`grass_side.png` already contains green grass over dirt, so it is preserved without tinting the
+dirt pixels. Lava uses only the first 16×16 frame of the 16×320 source strip; animation remains
+optional future polish.
+
+PPM cannot preserve alpha. Offline conversion composites transparent glass texels against white,
+retaining the cyan edge pattern as RGB; physical transparency remains a material property for a
+later raytracing phase. Raylib is not used to load or sample surface textures.
+
 ## Performance
 
 CPU raytrace duration and presentation FPS are separate measurements. The application rerenders
