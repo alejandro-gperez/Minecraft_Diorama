@@ -32,7 +32,8 @@ The current implementation includes:
 - separate CPU render timing and presentation FPS diagnostics;
 - automated unit tests for the mathematical and geometric foundation;
 - CPU-owned, arbitrary-size textures with deterministic nearest-neighbor sampling;
-- validated material properties and compact IDs shared by scene objects.
+- validated material properties and compact IDs shared by scene objects;
+- face-aware, local AABB UV coordinates propagated directly from slab intersections.
 
 ## Architecture
 
@@ -106,9 +107,9 @@ complexity.
 
 ## Testing
 
-The current suite contains 97 tests covering vector arithmetic and normalization, ray invariants,
+The current suite contains 102 tests covering vector arithmetic and normalization, ray invariants,
 AABB construction and edge cases, camera basis/ray generation/orbit limits, textures, materials,
-scene closest-hit behavior, framebuffer and color conversion, PPM output, and
+cube-face UV orientation, scene closest-hit behavior, framebuffer and color conversion, PPM output, and
 presentation-independent camera and RGBA conversion helpers.
 
 ## Project Constraints

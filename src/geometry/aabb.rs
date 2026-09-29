@@ -1,5 +1,7 @@
 use crate::{math::Vec3, ray::Ray};
 
+use super::{CubeFace, Uv};
+
 // Avoid unstable reciprocal distances for directions effectively parallel to a slab.
 const PARALLEL_DIRECTION_EPSILON: f32 = 1.0e-8;
 
@@ -14,6 +16,9 @@ pub struct AabbHit {
     pub t: f32,
     pub position: Vec3,
     pub normal: Vec3,
+    pub face: CubeFace,
+    /// Absent only when a dimension required by the selected face is exactly degenerate.
+    pub uv: Option<Uv>,
 }
 
 impl Aabb {
@@ -49,37 +54,38 @@ impl Aabb {
             direction.x,
             self.min.x,
             self.max.x,
-            Vec3::new(-1.0, 0.0, 0.0),
-            Vec3::new(1.0, 0.0, 0.0),
+            CubeFace::NegativeX,
+            CubeFace::PositiveX,
         ) || !interval.clip_axis(
             origin.y,
             direction.y,
             self.min.y,
             self.max.y,
-            Vec3::new(0.0, -1.0, 0.0),
-            Vec3::new(0.0, 1.0, 0.0),
+            CubeFace::NegativeY,
+            CubeFace::PositiveY,
         ) || !interval.clip_axis(
             origin.z,
             direction.z,
             self.min.z,
             self.max.z,
-            Vec3::new(0.0, 0.0, -1.0),
-            Vec3::new(0.0, 0.0, 1.0),
+            CubeFace::NegativeZ,
+            CubeFace::PositiveZ,
         ) {
             return None;
         }
 
         if self.strictly_contains(origin) {
-            return hit_in_range(ray, interval.exit_t, interval.exit_normal, t_min, t_max);
+            return self.hit_in_range(ray, interval.exit_t, interval.exit_face, t_min, t_max);
         }
 
-        if let Some(hit) = hit_in_range(ray, interval.entry_t, interval.entry_normal, t_min, t_max)
+        if let Some(hit) =
+            self.hit_in_range(ray, interval.entry_t, interval.entry_face, t_min, t_max)
         {
             return Some(hit);
         }
 
         if interval.entry_t < t_min {
-            return hit_in_range(ray, interval.exit_t, interval.exit_normal, t_min, t_max);
+            return self.hit_in_range(ray, interval.exit_t, interval.exit_face, t_min, t_max);
         }
 
         None
@@ -93,14 +99,53 @@ impl Aabb {
             && point.z > self.min.z
             && point.z < self.max.z
     }
+
+    fn hit_in_range(
+        &self,
+        ray: Ray,
+        t: f32,
+        face: CubeFace,
+        t_min: f32,
+        t_max: f32,
+    ) -> Option<AabbHit> {
+        if !t.is_finite() || t < t_min || t > t_max {
+            return None;
+        }
+
+        let position = ray.at(t);
+        Some(AabbHit {
+            t,
+            position,
+            normal: face.normal(),
+            face,
+            uv: self.uv_for_face(position, face),
+        })
+    }
+
+    fn uv_for_face(&self, position: Vec3, face: CubeFace) -> Option<Uv> {
+        let local_x = || normalized_coordinate(position.x, self.min.x, self.max.x);
+        let local_y = || normalized_coordinate(position.y, self.min.y, self.max.y);
+        let local_z = || normalized_coordinate(position.z, self.min.z, self.max.z);
+
+        let uv = match face {
+            CubeFace::PositiveX => Uv::new(1.0 - local_z()?, 1.0 - local_y()?),
+            CubeFace::NegativeX => Uv::new(local_z()?, 1.0 - local_y()?),
+            CubeFace::PositiveY => Uv::new(local_x()?, local_z()?),
+            CubeFace::NegativeY => Uv::new(local_x()?, 1.0 - local_z()?),
+            CubeFace::PositiveZ => Uv::new(local_x()?, 1.0 - local_y()?),
+            CubeFace::NegativeZ => Uv::new(1.0 - local_x()?, 1.0 - local_y()?),
+        };
+
+        Some(uv)
+    }
 }
 
 #[derive(Clone, Copy)]
 struct SlabInterval {
     entry_t: f32,
     exit_t: f32,
-    entry_normal: Vec3,
-    exit_normal: Vec3,
+    entry_face: CubeFace,
+    exit_face: CubeFace,
 }
 
 impl SlabInterval {
@@ -108,8 +153,8 @@ impl SlabInterval {
         Self {
             entry_t: f32::NEG_INFINITY,
             exit_t: f32::INFINITY,
-            entry_normal: Vec3::ZERO,
-            exit_normal: Vec3::ZERO,
+            entry_face: CubeFace::NegativeX,
+            exit_face: CubeFace::PositiveX,
         }
     }
 
@@ -119,55 +164,61 @@ impl SlabInterval {
         direction: f32,
         slab_min: f32,
         slab_max: f32,
-        min_normal: Vec3,
-        max_normal: Vec3,
+        min_face: CubeFace,
+        max_face: CubeFace,
     ) -> bool {
         if direction.abs() <= PARALLEL_DIRECTION_EPSILON {
             return origin >= slab_min && origin <= slab_max;
         }
 
-        let (near_t, far_t, near_normal, far_normal) = if direction > 0.0 {
+        let (near_t, far_t, near_face, far_face) = if direction > 0.0 {
             (
                 (slab_min - origin) / direction,
                 (slab_max - origin) / direction,
-                min_normal,
-                max_normal,
+                min_face,
+                max_face,
             )
         } else {
             (
                 (slab_max - origin) / direction,
                 (slab_min - origin) / direction,
-                max_normal,
-                min_normal,
+                max_face,
+                min_face,
             )
         };
 
         if near_t > self.entry_t {
             self.entry_t = near_t;
-            self.entry_normal = near_normal;
+            self.entry_face = near_face;
         }
 
         if far_t < self.exit_t {
             self.exit_t = far_t;
-            self.exit_normal = far_normal;
+            self.exit_face = far_face;
         }
 
         self.entry_t <= self.exit_t
     }
 }
 
-fn hit_in_range(ray: Ray, t: f32, normal: Vec3, t_min: f32, t_max: f32) -> Option<AabbHit> {
-    (t.is_finite() && t >= t_min && t <= t_max).then(|| AabbHit {
-        t,
-        position: ray.at(t),
-        normal,
-    })
+fn normalized_coordinate(value: f32, min: f32, max: f32) -> Option<f32> {
+    let extent = max - min;
+    if extent == 0.0 || !extent.is_finite() {
+        return None;
+    }
+
+    let local = (value - min) / extent;
+    local.is_finite().then(|| local.clamp(0.0, 1.0))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{Aabb, AabbHit};
-    use crate::{math::Vec3, ray::Ray};
+    use crate::{
+        geometry::{CubeFace, Uv},
+        math::Vec3,
+        ray::Ray,
+    };
 
     const EPSILON: f32 = 1.0e-6;
 
@@ -196,6 +247,13 @@ mod tests {
         assert_approx_eq(hit.t, expected_t);
         assert_vec_approx_eq(hit.position, expected_position);
         assert_eq!(hit.normal, expected_normal);
+        assert_eq!(hit.face.normal(), expected_normal);
+    }
+
+    fn assert_uv(actual: Option<Uv>, expected_u: f32, expected_v: f32) {
+        let actual = actual.expect("face should have valid UV coordinates");
+        assert_approx_eq(actual.u, expected_u);
+        assert_approx_eq(actual.v, expected_v);
     }
 
     #[test]
@@ -415,6 +473,146 @@ mod tests {
             Vec3::new(0.0, 0.5, 0.5),
             Vec3::new(-1.0, 0.0, 0.0),
         );
+        assert_uv(hit.uv, 0.5, 0.5);
+    }
+
+    #[test]
+    fn reports_all_six_faces_with_matching_outward_normals() {
+        let cases = [
+            (
+                Vec3::new(-1.0, 0.25, 0.75),
+                Vec3::new(1.0, 0.0, 0.0),
+                CubeFace::NegativeX,
+            ),
+            (
+                Vec3::new(2.0, 0.25, 0.75),
+                Vec3::new(-1.0, 0.0, 0.0),
+                CubeFace::PositiveX,
+            ),
+            (
+                Vec3::new(0.25, -1.0, 0.75),
+                Vec3::new(0.0, 1.0, 0.0),
+                CubeFace::NegativeY,
+            ),
+            (
+                Vec3::new(0.25, 2.0, 0.75),
+                Vec3::new(0.0, -1.0, 0.0),
+                CubeFace::PositiveY,
+            ),
+            (
+                Vec3::new(0.25, 0.75, -1.0),
+                Vec3::new(0.0, 0.0, 1.0),
+                CubeFace::NegativeZ,
+            ),
+            (
+                Vec3::new(0.25, 0.75, 2.0),
+                Vec3::new(0.0, 0.0, -1.0),
+                CubeFace::PositiveZ,
+            ),
+        ];
+
+        for (origin, direction, expected_face) in cases {
+            let hit = unit_box()
+                .intersect(ray(origin, direction), 0.0, f32::INFINITY)
+                .unwrap();
+
+            assert_eq!(hit.face, expected_face);
+            assert_eq!(hit.normal, expected_face.normal());
+        }
+    }
+
+    #[test]
+    fn maps_all_faces_using_translated_non_unit_local_coordinates() {
+        let bounds =
+            Aabb::try_new(Vec3::new(10.0, 20.0, 30.0), Vec3::new(14.0, 26.0, 38.0)).unwrap();
+        let cases = [
+            (
+                Vec3::new(9.0, 21.5, 36.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                CubeFace::NegativeX,
+                (0.75, 0.75),
+            ),
+            (
+                Vec3::new(15.0, 21.5, 36.0),
+                Vec3::new(-1.0, 0.0, 0.0),
+                CubeFace::PositiveX,
+                (0.25, 0.75),
+            ),
+            (
+                Vec3::new(11.0, 19.0, 36.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                CubeFace::NegativeY,
+                (0.25, 0.25),
+            ),
+            (
+                Vec3::new(11.0, 27.0, 36.0),
+                Vec3::new(0.0, -1.0, 0.0),
+                CubeFace::PositiveY,
+                (0.25, 0.75),
+            ),
+            (
+                Vec3::new(11.0, 21.5, 29.0),
+                Vec3::new(0.0, 0.0, 1.0),
+                CubeFace::NegativeZ,
+                (0.75, 0.75),
+            ),
+            (
+                Vec3::new(11.0, 21.5, 39.0),
+                Vec3::new(0.0, 0.0, -1.0),
+                CubeFace::PositiveZ,
+                (0.25, 0.75),
+            ),
+        ];
+
+        for (origin, direction, expected_face, (expected_u, expected_v)) in cases {
+            let hit = bounds
+                .intersect(ray(origin, direction), 0.0, f32::INFINITY)
+                .unwrap();
+
+            assert_eq!(hit.face, expected_face);
+            assert_uv(hit.uv, expected_u, expected_v);
+        }
+    }
+
+    #[test]
+    fn uv_mapping_is_translation_invariant() {
+        let original = Aabb::try_new(Vec3::ZERO, Vec3::new(2.0, 4.0, 6.0)).unwrap();
+        let translated =
+            Aabb::try_new(Vec3::new(10.0, -7.0, 3.0), Vec3::new(12.0, -3.0, 9.0)).unwrap();
+
+        let original_hit = original
+            .intersect(
+                ray(Vec3::new(0.5, 1.0, 7.0), Vec3::new(0.0, 0.0, -1.0)),
+                0.0,
+                f32::INFINITY,
+            )
+            .unwrap();
+        let translated_hit = translated
+            .intersect(
+                ray(Vec3::new(10.5, -6.0, 10.0), Vec3::new(0.0, 0.0, -1.0)),
+                0.0,
+                f32::INFINITY,
+            )
+            .unwrap();
+
+        assert_uv(original_hit.uv, 0.25, 0.75);
+        assert_eq!(original_hit.uv, translated_hit.uv);
+    }
+
+    #[test]
+    fn degenerate_required_dimension_returns_no_uv_without_losing_hit() {
+        let bounds = Aabb::try_new(Vec3::ZERO, Vec3::new(1.0, 0.0, 1.0)).unwrap();
+        let hit = bounds
+            .intersect(
+                ray(Vec3::new(2.0, 0.0, 0.5), Vec3::new(-1.0, 0.0, 0.0)),
+                0.0,
+                f32::INFINITY,
+            )
+            .unwrap();
+
+        assert_eq!(hit.face, CubeFace::PositiveX);
+        assert_eq!(hit.normal, CubeFace::PositiveX.normal());
+        assert_eq!(hit.uv, None);
     }
 
     #[test]

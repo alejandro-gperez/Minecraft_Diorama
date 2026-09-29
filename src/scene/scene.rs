@@ -100,7 +100,7 @@ mod tests {
     use super::{Scene, SceneObject};
     use crate::{
         color::Color,
-        geometry::Aabb,
+        geometry::{Aabb, CubeFace, Uv},
         material::{Material, MaterialId, Texture},
         math::Vec3,
         ray::Ray,
@@ -145,6 +145,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(hit.material_id, red_id);
+        assert_eq!(hit.geometry.face, CubeFace::PositiveZ);
+        assert_eq!(hit.geometry.uv, Some(Uv::new(0.5, 0.5)));
         assert_eq!(
             scene.closest_hit(
                 ray(Vec3::new(2.0, 2.0, 5.0), Vec3::new(0.0, 0.0, -1.0)),

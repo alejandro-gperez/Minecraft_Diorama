@@ -13,6 +13,8 @@ pub enum RenderError {
     AspectRatioMismatch,
     PrimaryRayGenerationFailed,
     MaterialNotFound,
+    SurfaceUvUnavailable,
+    TextureSamplingFailed,
 }
 
 pub struct Renderer;
@@ -42,12 +44,11 @@ impl Renderer {
                         let material = scene
                             .material(hit.material_id)
                             .ok_or(RenderError::MaterialNotFound)?;
-                        // Mission 9 will derive UVs from the hit face. Solid 1x1 textures keep
-                        // the Phase 1 scene stable without inventing temporary mapping rules.
+                        let uv = hit.geometry.uv.ok_or(RenderError::SurfaceUvUnavailable)?;
                         let texture_sample = material
                             .texture()
-                            .texel(0, 0)
-                            .expect("validated textures always contain at least one texel");
+                            .sample_nearest(uv.u, uv.v)
+                            .ok_or(RenderError::TextureSamplingFailed)?;
                         debug_shade(material.surface_color(texture_sample), hit.geometry.normal)
                     }
                     None => background(v),
@@ -154,6 +155,38 @@ mod tests {
 
         assert_eq!(framebuffer.pixel(1, 2), Some(Color::new(0.75, 0.0, 0.0)));
         assert_eq!(framebuffer.pixel(3, 2), Some(Color::new(0.0, 0.0, 0.75)));
+    }
+
+    #[test]
+    fn renderer_samples_distinct_uv_regions_of_asymmetric_texture() {
+        let camera = OrbitalCamera::try_new(Vec3::ZERO, 0.0, 0.0, 5.0, FRAC_PI_2, 1.0).unwrap();
+        let texture = Texture::try_new(
+            2,
+            2,
+            vec![
+                Color::new(1.0, 0.0, 0.0),
+                Color::new(0.0, 1.0, 0.0),
+                Color::new(0.0, 0.0, 1.0),
+                Color::WHITE,
+            ],
+        )
+        .unwrap();
+        let mut scene = Scene::new();
+        let material_id = scene
+            .add_material(Material::try_new(texture, Color::WHITE, 0.0, 0.0, 0.0).unwrap())
+            .unwrap();
+        scene.add(SceneObject::new(
+            Aabb::try_new(Vec3::new(-3.0, -3.0, -0.5), Vec3::new(3.0, 3.0, 0.5)).unwrap(),
+            material_id,
+        ));
+        let mut framebuffer = Framebuffer::try_new(2, 2).unwrap();
+
+        Renderer::render(&camera, &scene, &mut framebuffer).unwrap();
+
+        assert_eq!(framebuffer.pixel(0, 0), Some(Color::new(0.75, 0.0, 0.0)));
+        assert_eq!(framebuffer.pixel(1, 0), Some(Color::new(0.0, 0.75, 0.0)));
+        assert_eq!(framebuffer.pixel(0, 1), Some(Color::new(0.0, 0.0, 0.75)));
+        assert_eq!(framebuffer.pixel(1, 1), Some(Color::new(0.75, 0.75, 0.75)));
     }
 
     #[test]
