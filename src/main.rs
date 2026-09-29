@@ -1,12 +1,13 @@
-use std::{f32::consts::PI, io, path::Path, time::Instant};
+use std::{f32::consts::PI, io, path::Path};
 
+use app::run;
 use camera::OrbitalCamera;
 use geometry::Aabb;
 use math::Vec3;
-use output::write_ppm;
-use render::{Color, Framebuffer, Renderer};
+use render::{Color, Framebuffer};
 use scene::{Scene, SceneObject};
 
+pub mod app;
 pub mod camera;
 pub mod color;
 pub mod geometry;
@@ -32,21 +33,10 @@ fn main() -> io::Result<()> {
     )
     .expect("Phase 1 camera configuration must be valid");
     let scene = phase1_test_scene();
-    let mut framebuffer =
+    let framebuffer =
         Framebuffer::try_new(WIDTH, HEIGHT).expect("development resolution must be valid");
 
-    let started = Instant::now();
-    Renderer::render(&camera, &scene, &mut framebuffer)
-        .expect("camera and framebuffer aspect ratios must match");
-    let render_time = started.elapsed();
-
-    write_ppm(Path::new(OUTPUT_PATH), &framebuffer)?;
-    println!(
-        "Rendered {OUTPUT_PATH} ({WIDTH}x{HEIGHT}) in {:.2?}",
-        render_time
-    );
-
-    Ok(())
+    run(camera, scene, framebuffer, Path::new(OUTPUT_PATH))
 }
 
 fn phase1_test_scene() -> Scene {
