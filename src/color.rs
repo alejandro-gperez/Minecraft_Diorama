@@ -1,8 +1,18 @@
+use std::ops::Mul;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Color {
     pub r: f32,
     pub g: f32,
     pub b: f32,
+}
+
+impl Mul for Color {
+    type Output = Self;
+
+    fn mul(self, rhs: Self) -> Self::Output {
+        Self::new(self.r * rhs.r, self.g * rhs.g, self.b * rhs.b)
+    }
 }
 
 impl Color {
@@ -62,6 +72,14 @@ mod tests {
         assert_eq!(
             Color::new(f32::NAN, f32::INFINITY, f32::NEG_INFINITY).to_rgb8(),
             [0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn multiplies_channels_component_wise() {
+        assert_eq!(
+            Color::new(0.8, 0.5, 0.25) * Color::new(0.5, 0.4, 1.0),
+            Color::new(0.4, 0.2, 0.25)
         );
     }
 }

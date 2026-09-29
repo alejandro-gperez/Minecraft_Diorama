@@ -12,6 +12,7 @@ const BACKGROUND_TOP: Color = Color::new(0.48, 0.68, 0.92);
 pub enum RenderError {
     AspectRatioMismatch,
     PrimaryRayGenerationFailed,
+    MaterialNotFound,
 }
 
 pub struct Renderer;
@@ -37,7 +38,18 @@ impl Renderer {
                     .ray_for_viewport(u, v)
                     .ok_or(RenderError::PrimaryRayGenerationFailed)?;
                 let color = match scene.closest_hit(ray, PRIMARY_RAY_T_MIN, f32::INFINITY) {
-                    Some(hit) => debug_shade(hit.color, hit.geometry.normal),
+                    Some(hit) => {
+                        let material = scene
+                            .material(hit.material_id)
+                            .ok_or(RenderError::MaterialNotFound)?;
+                        // Mission 9 will derive UVs from the hit face. Solid 1x1 textures keep
+                        // the Phase 1 scene stable without inventing temporary mapping rules.
+                        let texture_sample = material
+                            .texture()
+                            .texel(0, 0)
+                            .expect("validated textures always contain at least one texel");
+                        debug_shade(material.surface_color(texture_sample), hit.geometry.normal)
+                    }
                     None => background(v),
                 };
 
@@ -80,10 +92,19 @@ mod tests {
     use crate::{
         camera::OrbitalCamera,
         geometry::Aabb,
+        material::{Material, MaterialId, Texture},
         math::Vec3,
         render::{Color, Framebuffer},
         scene::{Scene, SceneObject},
     };
+
+    fn add_solid_material(scene: &mut Scene, color: Color) -> MaterialId {
+        scene
+            .add_material(
+                Material::try_new(Texture::solid(color), Color::WHITE, 0.0, 0.0, 0.0).unwrap(),
+            )
+            .unwrap()
+    }
 
     #[test]
     fn pixel_centers_stay_inside_normalized_viewport() {
@@ -100,9 +121,10 @@ mod tests {
     fn tiny_render_contains_hit_and_background_pixels() {
         let camera = OrbitalCamera::try_new(Vec3::ZERO, 0.0, 0.0, 5.0, FRAC_PI_2, 1.0).unwrap();
         let mut scene = Scene::new();
+        let red = add_solid_material(&mut scene, Color::new(1.0, 0.0, 0.0));
         scene.add(SceneObject::new(
             Aabb::try_new(Vec3::new(-0.5, -0.5, -0.5), Vec3::new(0.5, 0.5, 0.5)).unwrap(),
-            Color::new(1.0, 0.0, 0.0),
+            red,
         ));
         let mut framebuffer = Framebuffer::try_new(3, 3).unwrap();
 
@@ -110,6 +132,28 @@ mod tests {
 
         assert_eq!(framebuffer.pixel(1, 1), Some(Color::new(0.75, 0.0, 0.0)));
         assert_ne!(framebuffer.pixel(0, 0), framebuffer.pixel(1, 1));
+    }
+
+    #[test]
+    fn material_lookup_keeps_object_colors_distinguishable() {
+        let camera = OrbitalCamera::try_new(Vec3::ZERO, 0.0, 0.0, 5.0, FRAC_PI_2, 1.0).unwrap();
+        let mut scene = Scene::new();
+        let red = add_solid_material(&mut scene, Color::new(1.0, 0.0, 0.0));
+        let blue = add_solid_material(&mut scene, Color::new(0.0, 0.0, 1.0));
+        scene.add(SceneObject::new(
+            Aabb::try_new(Vec3::new(-2.5, -0.5, -0.5), Vec3::new(-1.5, 0.5, 0.5)).unwrap(),
+            red,
+        ));
+        scene.add(SceneObject::new(
+            Aabb::try_new(Vec3::new(1.5, -0.5, -0.5), Vec3::new(2.5, 0.5, 0.5)).unwrap(),
+            blue,
+        ));
+        let mut framebuffer = Framebuffer::try_new(5, 5).unwrap();
+
+        Renderer::render(&camera, &scene, &mut framebuffer).unwrap();
+
+        assert_eq!(framebuffer.pixel(1, 2), Some(Color::new(0.75, 0.0, 0.0)));
+        assert_eq!(framebuffer.pixel(3, 2), Some(Color::new(0.0, 0.0, 0.75)));
     }
 
     #[test]
@@ -121,6 +165,22 @@ mod tests {
         assert_eq!(
             Renderer::render(&camera, &scene, &mut framebuffer),
             Err(RenderError::AspectRatioMismatch)
+        );
+    }
+
+    #[test]
+    fn rejects_scene_object_with_unknown_material() {
+        let camera = OrbitalCamera::try_new(Vec3::ZERO, 0.0, 0.0, 5.0, FRAC_PI_2, 1.0).unwrap();
+        let mut scene = Scene::new();
+        scene.add(SceneObject::new(
+            Aabb::try_new(Vec3::new(-0.5, -0.5, -0.5), Vec3::new(0.5, 0.5, 0.5)).unwrap(),
+            MaterialId::new(0),
+        ));
+        let mut framebuffer = Framebuffer::try_new(3, 3).unwrap();
+
+        assert_eq!(
+            Renderer::render(&camera, &scene, &mut framebuffer),
+            Err(RenderError::MaterialNotFound)
         );
     }
 }

@@ -13,7 +13,8 @@ larger EggWars world and advanced optical effects are planned work, not current 
 
 ## Current Status
 
-Phase 1 — Core Raytracer — is functionally complete pending final acceptance.
+Phase 1 — Core Raytracer — is complete. Phase 2 — Materials, Textures, and Lighting — is now
+underway, beginning with CPU texture and material data rather than final texture art or lighting.
 
 The current implementation includes:
 
@@ -29,7 +30,9 @@ The current implementation includes:
 - interactive orbital rotation and zoom;
 - dirty rendering that avoids raytracing unchanged frames;
 - separate CPU render timing and presentation FPS diagnostics;
-- automated unit tests for the mathematical and geometric foundation.
+- automated unit tests for the mathematical and geometric foundation;
+- CPU-owned, arbitrary-size textures with deterministic nearest-neighbor sampling;
+- validated material properties and compact IDs shared by scene objects.
 
 ## Architecture
 
@@ -103,10 +106,10 @@ complexity.
 
 ## Testing
 
-The current suite contains 76 tests covering vector arithmetic and normalization, ray invariants,
-AABB construction and edge cases, camera basis/ray generation/orbit limits, scene closest-hit
-behavior, framebuffer and color conversion, PPM output, and presentation-independent camera and
-RGBA conversion helpers.
+The current suite contains 97 tests covering vector arithmetic and normalization, ray invariants,
+AABB construction and edge cases, camera basis/ray generation/orbit limits, textures, materials,
+scene closest-hit behavior, framebuffer and color conversion, PPM output, and
+presentation-independent camera and RGBA conversion helpers.
 
 ## Project Constraints
 
