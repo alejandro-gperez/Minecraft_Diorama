@@ -1149,6 +1149,12 @@ Unless explicitly changed by the user, these decisions are settled:
 - Orbital camera with zoom.
 - Clean Conventional Commit history.
 - Incremental phase-based development.
+- Final block textures should use original Minecraft texture assets from the targeted classic visual era when legally and academically permitted.
+- Runtime texture loading must be implemented locally without external image-loading libraries.
+- Final texture assets should be converted ahead of time to a simple project-supported format, preferably PPM, and loaded by project-owned CPU code.
+- Do not procedurally recreate final Minecraft block textures unless this decision is explicitly changed.
+- Procedural generation requirements apply to terrain/world generation, not to recreating block texture artwork.
+- Texture architecture must support different textures per cube face where required, especially for blocks such as grass with distinct top, side, and bottom appearances.
 
 Do not casually reopen these decisions.
 
@@ -1203,7 +1209,7 @@ Phase 2 work should focus on:
 
 - separation between block identity and optical material behavior;
 - CPU-side texture representation;
-- Minecraft-inspired pixel textures;
+- original Minecraft pixel texture assets loaded through project-owned CPU texture code;
 - cube-face UV mapping;
 - material parameters;
 - basic direct lighting;
