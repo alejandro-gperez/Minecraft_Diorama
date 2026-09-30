@@ -26,6 +26,7 @@ pub const AIR_IOR: f32 = 1.0;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Material {
     textures: TextureSelection,
+    normal_map: Option<TextureId>,
     albedo: Color,
     specular: f32,
     transparency: f32,
@@ -79,6 +80,7 @@ impl Material {
 
         Some(Self {
             textures,
+            normal_map: None,
             albedo,
             specular,
             transparency,
@@ -93,6 +95,19 @@ impl Material {
     /// and strictly positive. Invalid indices are rejected rather than clamped.
     pub fn with_ior(self, ior: f32) -> Option<Self> {
         (ior.is_finite() && ior > 0.0).then_some(Self { ior, ..self })
+    }
+
+    /// Returns this material with a tangent-space normal map, shared by every face.
+    ///
+    /// The map is surface appearance data, like the color texture: it perturbs only the normal
+    /// used for local lighting and shares the color texture's UVs. Materials default to none and
+    /// shade with their geometric normal. The id is resolved against the scene's texture storage
+    /// at render time, so one registered map serves every object using this material.
+    pub fn with_normal_map(self, normal_map: TextureId) -> Self {
+        Self {
+            normal_map: Some(normal_map),
+            ..self
+        }
     }
 
     /// Returns this material as a self-luminous surface, or `None` unless `color` is finite and
@@ -117,6 +132,10 @@ impl Material {
 
     pub const fn textures(&self) -> TextureSelection {
         self.textures
+    }
+
+    pub const fn normal_map(&self) -> Option<TextureId> {
+        self.normal_map
     }
 
     pub const fn albedo(&self) -> Color {
@@ -215,6 +234,24 @@ mod tests {
             material.surface_color(Color::new(0.8, 0.6, 0.4)),
             Color::new(0.4, 0.6, 0.1)
         );
+    }
+
+    #[test]
+    fn materials_default_to_no_normal_map_and_can_reference_a_shared_one() {
+        let plain = material_with(Color::WHITE, 0.3, 0.0, 0.0).unwrap();
+        assert_eq!(plain.normal_map(), None);
+
+        let normal_map = TextureId::new(11);
+        let mapped = plain.clone().with_normal_map(normal_map);
+        assert_eq!(mapped.normal_map(), Some(normal_map));
+        // Only the reference changes; appearance and optics are untouched.
+        assert_eq!(mapped.textures(), plain.textures());
+        assert_eq!(mapped.albedo(), plain.albedo());
+        assert_eq!(mapped.specular(), plain.specular());
+        assert_eq!(mapped.transparency(), plain.transparency());
+        assert_eq!(mapped.reflectivity(), plain.reflectivity());
+        assert_eq!(mapped.ior(), plain.ior());
+        assert_eq!(mapped.emission_strength(), plain.emission_strength());
     }
 
     #[test]

@@ -26,6 +26,8 @@ pub struct CanonicalTextureIds {
     pub grass_side: TextureId,
     pub dirt: TextureId,
     pub cobblestone: TextureId,
+    /// Tangent-space normal map derived from the cobblestone texture.
+    pub cobblestone_normal: TextureId,
     pub obsidian: TextureId,
     pub glass: TextureId,
     pub lava: TextureId,
@@ -73,7 +75,8 @@ pub fn canonical_material_definitions(
             0.08,
             0.0,
             0.03,
-        )?,
+        )?
+        .with_normal_map(textures.cobblestone_normal),
         obsidian: Material::try_new(
             TextureSelection::Uniform(textures.obsidian),
             Color::new(0.90, 0.90, 1.00),
@@ -121,6 +124,7 @@ mod tests {
             grass_side: next_texture(),
             dirt: next_texture(),
             cobblestone: next_texture(),
+            cobblestone_normal: next_texture(),
             obsidian: next_texture(),
             glass: next_texture(),
             lava: next_texture(),
@@ -174,7 +178,7 @@ mod tests {
         ];
 
         assert_eq!(scene.material_count(), 5);
-        assert_eq!(scene.texture_count(), 7);
+        assert_eq!(scene.texture_count(), 8);
         for (index, id) in ids.iter().enumerate() {
             assert!(scene.material(*id).is_some());
             assert!(!ids[..index].contains(id));
@@ -247,6 +251,23 @@ mod tests {
             assert!(!material.is_emissive());
             assert_eq!(material.emission_strength(), 0.0);
             assert_eq!(material.emission_color(), Color::BLACK);
+        }
+    }
+
+    #[test]
+    fn only_cobblestone_carries_a_shared_normal_map() {
+        let (scene, textures, materials) = registered_scene();
+
+        let cobblestone = scene.material(materials.cobblestone).unwrap();
+        assert_eq!(cobblestone.normal_map(), Some(textures.cobblestone_normal));
+        assert_ne!(textures.cobblestone_normal, textures.cobblestone);
+        for id in [
+            materials.grass,
+            materials.obsidian,
+            materials.glass,
+            materials.lava,
+        ] {
+            assert_eq!(scene.material(id).unwrap().normal_map(), None);
         }
     }
 

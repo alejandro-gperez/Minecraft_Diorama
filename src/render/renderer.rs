@@ -2,7 +2,7 @@ use crate::{
     camera::OrbitalCamera,
     environment::Environment,
     lighting::{Lighting, PointLight, shade_point_light, shade_surface},
-    material::AIR_IOR,
+    material::{AIR_IOR, shading_normal},
     math::Vec3,
     ray::Ray,
     scene::{Scene, SceneHit},
@@ -350,6 +350,11 @@ fn blend_transmissive(local: Color, optical: Color, transparency: f32) -> Color 
 
 /// Local surface shading: texture, albedo, direct lighting, point lights, and emission.
 ///
+/// Lighting uses the *shading* normal: the geometric normal, or for a material with a normal map
+/// the normal decoded at the hit's UV and rotated into the face's tangent basis. The geometric
+/// normal still owns face identity, UVs, shadow-ray origins, and the side a light must be on.
+/// Reflection and refraction never see the shading normal; they use the geometric interface.
+///
 /// ```text
 /// local = ambient
 ///       + directional_visible * (directional_diffuse + directional_specular)
@@ -378,24 +383,43 @@ fn shade_hit(
         .sample_nearest(uv.u, uv.v)
         .ok_or(RenderError::TextureSamplingFailed)?;
 
+    let shading_normal = match material.normal_map() {
+        Some(normal_map_id) => {
+            let normal_map = scene
+                .texture(normal_map_id)
+                .ok_or(RenderError::TextureNotFound)?;
+            let sample = normal_map
+                .sample_nearest(uv.u, uv.v)
+                .ok_or(RenderError::TextureSamplingFailed)?;
+            shading_normal(hit.geometry.face, sample)
+        }
+        None => hit.geometry.normal,
+    };
+
     let view_direction = (viewer_position - hit.geometry.position)
         .try_normalized()
         .ok_or(RenderError::ViewDirectionUnavailable)?;
     let light = lighting.directional();
-    let direct_light_visible =
-        if light.intensity() > 0.0 && hit.geometry.normal.dot(light.direction_to_light()) > 0.0 {
+    // The geometric normal decides whether the sun is on the visible side of the surface and
+    // where the shadow ray starts. A bump facing the sun on a face turned away from it is under
+    // the surface and must stay dark, so this gate also closes `shade_surface` below.
+    let direct_light_visible = if light.intensity() > 0.0 {
+        if hit.geometry.normal.dot(light.direction_to_light()) > 0.0 {
             let shadow_origin = hit.geometry.position + hit.geometry.normal * RAY_ORIGIN_BIAS;
             let shadow_ray = Ray::try_new(shadow_origin, light.direction_to_light())
                 .ok_or(RenderError::ShadowRayGenerationFailed)?;
             !scene.is_occluded(shadow_ray, SHADOW_RAY_T_MIN, SHADOW_RAY_T_MAX)
         } else {
-            true
-        };
+            false
+        }
+    } else {
+        true
+    };
 
     let base_color = material.surface_color(texture_sample);
     let mut color = shade_surface(
         base_color,
-        hit.geometry.normal,
+        shading_normal,
         view_direction,
         material.specular(),
         direct_light_visible,
@@ -407,6 +431,7 @@ fn shade_hit(
                 scene,
                 *point_light,
                 hit,
+                shading_normal,
                 base_color,
                 view_direction,
                 material.specular(),
@@ -426,10 +451,14 @@ fn shade_hit(
 /// normal and aims at the light, with `t_max` equal to the remaining distance to the light. The
 /// light is a point, not geometry, so a blocker beyond it cannot shadow it. Glass blocks the ray
 /// like any other AABB.
+///
+/// The geometric normal admits the light and offsets the shadow ray; `shading_normal`, equal to
+/// it unless the material has a normal map, drives diffuse and specular.
 fn point_light_contribution(
     scene: &Scene,
     light: PointLight,
     hit: SceneHit,
+    shading_normal: Vec3,
     base_color: Color,
     view_direction: Vec3,
     material_specular: f32,
@@ -453,7 +482,7 @@ fn point_light_contribution(
     Ok(shade_point_light(
         incidence,
         base_color,
-        hit.geometry.normal,
+        shading_normal,
         view_direction,
         material_specular,
     ))
@@ -481,7 +510,9 @@ mod tests {
         camera::OrbitalCamera,
         environment::Environment,
         geometry::{Aabb, CubeFace},
-        lighting::{AmbientLight, DirectionalLight, Lighting, PointLight, shade_surface},
+        lighting::{
+            AmbientLight, DirectionalLight, Lighting, PointLight, shade_point_light, shade_surface,
+        },
         material::{
             AIR_IOR, CanonicalMaterials, CanonicalTextureIds, GLASS_IOR, LAVA_EMISSION_COLOR,
             LAVA_EMISSION_STRENGTH, Material, MaterialId, Texture, TextureId, TextureSelection,
@@ -583,12 +614,16 @@ mod tests {
         let texture = scene
             .add_texture(Texture::solid(Color::new(0.6, 0.5, 0.4)))
             .unwrap();
+        let flat_normal = scene
+            .add_texture(Texture::solid(Color::new(0.5, 0.5, 1.0)))
+            .unwrap();
         let materials = scene
             .add_canonical_materials(CanonicalTextureIds {
                 grass_top: texture,
                 grass_side: texture,
                 dirt: texture,
                 cobblestone: texture,
+                cobblestone_normal: flat_normal,
                 obsidian: texture,
                 glass: texture,
                 lava: texture,
@@ -3592,5 +3627,532 @@ mod tests {
             ),
             Err(RenderError::TextureNotFound)
         );
+    }
+
+    // --- Normal mapping -------------------------------------------------------------------------
+
+    const ALL_FACES: [CubeFace; 6] = [
+        CubeFace::NegativeX,
+        CubeFace::PositiveX,
+        CubeFace::NegativeY,
+        CubeFace::PositiveY,
+        CubeFace::NegativeZ,
+        CubeFace::PositiveZ,
+    ];
+
+    /// Tangent-space normal tilted by `angle` radians toward tangent-space +X (increasing `u`).
+    fn lean_u(angle: f32) -> Vec3 {
+        Vec3::new(angle.sin(), 0.0, angle.cos())
+    }
+
+    fn encode_normal(normal: Vec3) -> Color {
+        Color::new(
+            normal.x * 0.5 + 0.5,
+            normal.y * 0.5 + 0.5,
+            normal.z * 0.5 + 0.5,
+        )
+    }
+
+    /// One-texel normal map holding `tangent_normal`.
+    fn uniform_normal_map(tangent_normal: Vec3) -> Texture {
+        Texture::solid(encode_normal(tangent_normal))
+    }
+
+    /// Material with an optional normal map and the given optical weights, over a solid `color`.
+    fn add_mapped_material(
+        scene: &mut Scene,
+        color: Color,
+        specular: f32,
+        transparency: f32,
+        reflectivity: f32,
+        normal_map: Option<Texture>,
+    ) -> MaterialId {
+        let texture_id = scene.add_texture(Texture::solid(color)).unwrap();
+        let mut material = Material::try_new(
+            TextureSelection::Uniform(texture_id),
+            Color::WHITE,
+            specular,
+            transparency,
+            reflectivity,
+        )
+        .unwrap();
+        if transparency > 0.0 {
+            material = material.with_ior(GLASS_IOR).unwrap();
+        }
+        if let Some(normal_map) = normal_map {
+            material = material.with_normal_map(scene.add_texture(normal_map).unwrap());
+        }
+        scene.add_material(material).unwrap()
+    }
+
+    fn mapped_cube_scene(
+        color: Color,
+        specular: f32,
+        transparency: f32,
+        reflectivity: f32,
+        normal_map: Option<Texture>,
+    ) -> Scene {
+        let mut scene = Scene::new();
+        let material = add_mapped_material(
+            &mut scene,
+            color,
+            specular,
+            transparency,
+            reflectivity,
+            normal_map,
+        );
+        scene.add(SceneObject::new(unit_cube(), material));
+        scene
+    }
+
+    /// Lit only by a white directional light of intensity 1 from `direction_to_light`.
+    fn sun_only(direction_to_light: Vec3) -> Lighting {
+        directional(direction_to_light)
+    }
+
+    fn assert_f32_approx_eq(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() <= 1.0e-5,
+            "{actual} != {expected}"
+        );
+    }
+
+    #[test]
+    fn cobblestone_with_a_flat_normal_map_shades_like_its_geometric_normal() {
+        let (mut scene, materials) = canonical_scene();
+        scene.add(SceneObject::new(unit_cube(), materials.cobblestone));
+        let lighting = directional(Vec3::new(0.6, 1.0, 0.8));
+        let cobblestone = scene.material(materials.cobblestone).unwrap();
+        assert!(cobblestone.normal_map().is_some());
+
+        for origin in [Vec3::new(0.2, 2.0, 0.3), Vec3::new(0.7, 2.0, 0.8)] {
+            let ray = Ray::try_new(origin, Vec3::new(0.0, -1.0, 0.0)).unwrap();
+            let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+            assert_eq!(hit.geometry.normal, Vec3::new(0.0, 1.0, 0.0));
+
+            assert_eq!(
+                shade_hit(&scene, hit, origin, lighting),
+                Ok(shade_surface(
+                    cobblestone.surface_color(Color::new(0.6, 0.5, 0.4)),
+                    hit.geometry.normal,
+                    Vec3::new(0.0, 1.0, 0.0),
+                    cobblestone.specular(),
+                    true,
+                    lighting,
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn materials_without_a_normal_map_shade_with_their_geometric_normal() {
+        let lighting = directional(Vec3::new(0.6, 1.0, 0.8));
+        let origin = Vec3::new(0.5, 2.0, 0.5);
+        let texture_color = Color::new(0.6, 0.5, 0.4);
+
+        let selectors: [fn(CanonicalMaterials) -> MaterialId; 4] =
+            [|m| m.grass, |m| m.obsidian, |m| m.glass, |m| m.lava];
+        for select in selectors {
+            let (mut scene, materials) = canonical_scene();
+            let material_id = select(materials);
+            scene.add(SceneObject::new(unit_cube(), material_id));
+            let material = scene.material(material_id).unwrap();
+            assert_eq!(material.normal_map(), None);
+
+            let ray = Ray::try_new(origin, Vec3::new(0.0, -1.0, 0.0)).unwrap();
+            let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+            let mut expected = shade_surface(
+                material.surface_color(texture_color),
+                hit.geometry.normal,
+                Vec3::new(0.0, 1.0, 0.0),
+                material.specular(),
+                true,
+                lighting,
+            );
+            if material.is_emissive() {
+                expected = expected + material.emitted_radiance(texture_color);
+            }
+            assert_color_approx_eq(shade_hit(&scene, hit, origin, lighting).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn normal_map_changes_directional_lighting_to_the_shading_normal() {
+        let lean = lean_u(30.0_f32.to_radians());
+        let mapped = mapped_cube_scene(Color::WHITE, 0.0, 0.0, 0.0, Some(uniform_normal_map(lean)));
+        let flat = mapped_cube_scene(Color::WHITE, 0.0, 0.0, 0.0, None);
+        let lighting = sun_only(Vec3::new(1.0, 1.0, 0.0));
+
+        let mapped_color = local_shading(&mapped, downward_ray(), lighting);
+        let flat_color = local_shading(&flat, downward_ray(), lighting);
+
+        // On the +Y face tangent-space +X is world +X: the normal becomes (0.5, 0.866, 0).
+        let expected = shade_surface(
+            Color::WHITE,
+            Vec3::new(0.5, 0.75_f32.sqrt(), 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            0.0,
+            true,
+            lighting,
+        );
+        assert_color_approx_eq(mapped_color, expected);
+        assert_ne!(mapped_color, flat_color);
+        assert_f32_approx_eq(flat_color.r, 0.5_f32.sqrt());
+        assert_f32_approx_eq(mapped_color.r, (0.5 + 0.75_f32.sqrt()) / 2.0_f32.sqrt());
+    }
+
+    #[test]
+    fn diffuse_response_follows_the_normal_map_lean_monotonically() {
+        let lighting = sun_only(Vec3::new(1.0, 1.0, 0.0));
+        let brightness = |angle_degrees: f32| {
+            let scene = mapped_cube_scene(
+                Color::WHITE,
+                0.0,
+                0.0,
+                0.0,
+                Some(uniform_normal_map(lean_u(angle_degrees.to_radians()))),
+            );
+            local_shading(&scene, downward_ray(), lighting).r
+        };
+
+        // The light sits at +X, so leaning toward +U brightens and leaning away darkens, up to
+        // the point where the normal faces the light directly (45 degrees).
+        let samples = [-40.0, -20.0, 0.0, 20.0, 40.0].map(brightness);
+        assert!(
+            samples.windows(2).all(|pair| pair[0] < pair[1]),
+            "{samples:?}"
+        );
+        assert_f32_approx_eq(brightness(0.0), 0.5_f32.sqrt());
+        assert!(brightness(45.0) > 0.999);
+    }
+
+    #[test]
+    fn specular_highlight_uses_the_shading_normal() {
+        // Black surface isolates specular. Light at 45 degrees and viewer overhead put the
+        // half-vector 22.5 degrees from vertical toward +X, where only a leaning normal points.
+        let lighting = sun_only(Vec3::new(1.0, 1.0, 0.0));
+        let half_angle = 22.5_f32.to_radians();
+        let mapped = mapped_cube_scene(
+            Color::BLACK,
+            1.0,
+            0.0,
+            0.0,
+            Some(uniform_normal_map(lean_u(half_angle))),
+        );
+        let flat = mapped_cube_scene(Color::BLACK, 1.0, 0.0, 0.0, None);
+
+        let mapped_highlight = local_shading(&mapped, downward_ray(), lighting).r;
+        let flat_highlight = local_shading(&flat, downward_ray(), lighting).r;
+
+        assert!(mapped_highlight > 0.99, "{mapped_highlight}");
+        assert_f32_approx_eq(flat_highlight, half_angle.cos().powf(32.0));
+        assert!(flat_highlight < 0.1);
+    }
+
+    #[test]
+    fn point_light_diffuse_and_specular_use_the_shading_normal() {
+        let light = PointLight::try_new(Vec3::new(2.0, 2.0, 0.5), Color::WHITE, 1.0, 10.0).unwrap();
+        let surface = Vec3::new(0.5, 1.0, 0.5);
+        let up = Vec3::new(0.0, 1.0, 0.0);
+        let lean = lean_u(30.0_f32.to_radians());
+        let expected_normal = Vec3::new(0.5, 0.75_f32.sqrt(), 0.0);
+
+        for specular in [0.0, 0.6] {
+            let shade = |normal_map: Option<Texture>| {
+                let mut scene =
+                    mapped_cube_scene(Color::new(0.8, 0.8, 0.8), specular, 0.0, 0.0, normal_map);
+                scene.add_point_light(light);
+                local_shading(&scene, downward_ray(), darkness())
+            };
+            let incidence = light.incidence_at(surface, up).unwrap();
+
+            assert_color_approx_eq(
+                shade(Some(uniform_normal_map(lean))),
+                shade_point_light(
+                    incidence,
+                    Color::new(0.8, 0.8, 0.8),
+                    expected_normal,
+                    up,
+                    specular,
+                ),
+            );
+            assert_ne!(shade(Some(uniform_normal_map(lean))), shade(None));
+        }
+
+        // Leaning toward the light at +X brightens the flat result; leaning away darkens it.
+        let shade = |normal: Vec3| {
+            let mut scene = mapped_cube_scene(
+                Color::WHITE,
+                0.0,
+                0.0,
+                0.0,
+                Some(uniform_normal_map(normal)),
+            );
+            scene.add_point_light(light);
+            local_shading(&scene, downward_ray(), darkness()).r
+        };
+        let flat = shade(Vec3::new(0.0, 0.0, 1.0));
+        assert!(shade(lean) > flat);
+        assert!(shade(lean_u(-30.0_f32.to_radians())) < flat);
+    }
+
+    #[test]
+    fn a_bump_cannot_be_lit_through_a_face_turned_away_from_the_light() {
+        // The sun is slightly below the top face's plane, so the geometric normal faces away.
+        // A strong lean toward the sun makes the shading normal face it, but the light would be
+        // arriving through the surface, so only ambient may remain.
+        let lean = lean_u(53.0_f32.to_radians());
+        let under_sun = Vec3::new(1.0, -0.1, 0.0);
+        let lighting = Lighting::new(
+            AmbientLight::try_new(Color::WHITE, 0.2).unwrap(),
+            DirectionalLight::try_new(under_sun, Color::WHITE, 1.0).unwrap(),
+        );
+        let mapped = mapped_cube_scene(Color::WHITE, 1.0, 0.0, 0.0, Some(uniform_normal_map(lean)));
+        let flat = mapped_cube_scene(Color::WHITE, 1.0, 0.0, 0.0, None);
+        assert!(lean.x > 0.79);
+
+        let mapped_color = local_shading(&mapped, downward_ray(), lighting);
+        assert_color_approx_eq(mapped_color, Color::new(0.2, 0.2, 0.2));
+        assert_eq!(mapped_color, local_shading(&flat, downward_ray(), lighting));
+
+        let mut with_point_light = mapped;
+        with_point_light.add_point_light(
+            PointLight::try_new(Vec3::new(3.0, 0.9, 0.5), Color::WHITE, 5.0, 10.0).unwrap(),
+        );
+        assert_eq!(
+            local_shading(&with_point_light, downward_ray(), darkness()),
+            Color::BLACK
+        );
+    }
+
+    #[test]
+    fn shadows_remain_geometric_for_normal_mapped_surfaces() {
+        let lean = lean_u(30.0_f32.to_radians());
+        let lighting = Lighting::new(
+            AmbientLight::try_new(Color::WHITE, 0.2).unwrap(),
+            DirectionalLight::try_new(Vec3::new(0.0, 1.0, 0.0), Color::WHITE, 1.0).unwrap(),
+        );
+        let ray = Ray::try_new(Vec3::new(0.5, 1.5, 0.5), Vec3::new(0.0, -1.0, 0.0)).unwrap();
+        let mut mapped =
+            mapped_cube_scene(Color::WHITE, 0.5, 0.0, 0.0, Some(uniform_normal_map(lean)));
+
+        let lit = local_shading(&mapped, ray, lighting);
+        assert!(lit.r > 0.3);
+
+        // A slab above the hit, behind the ray origin, blocks the sun: the bump is shadowed
+        // exactly like the flat face, leaving only ambient.
+        add_blocker(
+            &mut mapped,
+            Vec3::new(0.0, 1.6, 0.0),
+            Vec3::new(1.0, 2.0, 1.0),
+        );
+        assert_color_approx_eq(
+            local_shading(&mapped, ray, lighting),
+            Color::new(0.2, 0.2, 0.2),
+        );
+    }
+
+    #[test]
+    fn invalid_normal_map_texels_fall_back_to_the_geometric_normal() {
+        let lighting = sun_only(Vec3::new(1.0, 1.0, 0.0));
+        let flat = mapped_cube_scene(Color::WHITE, 0.4, 0.0, 0.0, None);
+        let expected = local_shading(&flat, downward_ray(), lighting);
+
+        for corrupt in [
+            Color::new(0.5, 0.5, 0.5),
+            Color::new(0.5, 0.5, 0.0),
+            Color::new(1.0, 0.5, 0.45),
+            Color::new(f32::NAN, 0.5, 1.0),
+        ] {
+            let scene =
+                mapped_cube_scene(Color::WHITE, 0.4, 0.0, 0.0, Some(Texture::solid(corrupt)));
+            let color = local_shading(&scene, downward_ray(), lighting);
+
+            assert!(color.is_finite());
+            assert_eq!(color, expected, "{corrupt:?}");
+        }
+    }
+
+    #[test]
+    fn missing_normal_map_texture_is_a_render_error() {
+        let mut scene = Scene::new();
+        let texture = scene.add_texture(Texture::solid(Color::WHITE)).unwrap();
+        let material = scene
+            .add_material(
+                Material::try_new(
+                    TextureSelection::Uniform(texture),
+                    Color::WHITE,
+                    0.0,
+                    0.0,
+                    0.0,
+                )
+                .unwrap()
+                .with_normal_map(TextureId::new(99)),
+            )
+            .unwrap();
+        scene.add(SceneObject::new(unit_cube(), material));
+        let hit = scene
+            .closest_hit(downward_ray(), 0.0, f32::INFINITY)
+            .unwrap();
+
+        assert_eq!(
+            shade_hit(&scene, hit, downward_ray().origin(), ambient_only()),
+            Err(RenderError::TextureNotFound)
+        );
+    }
+
+    #[test]
+    fn normal_map_is_sampled_at_the_same_uv_as_the_color_texture() {
+        // A 2x2 normal map with a different lean per texel. Each hit's expected normal comes from
+        // sampling the map at that hit's own UV, which also selects the color texel.
+        let leans = [-50.0_f32, 50.0, 0.0, 25.0].map(|degrees| lean_u(degrees.to_radians()));
+        let normal_map = Texture::try_new(2, 2, leans.map(encode_normal).to_vec()).unwrap();
+        let mapped = mapped_cube_scene(Color::WHITE, 0.0, 0.0, 0.0, Some(normal_map.clone()));
+        let lighting = sun_only(Vec3::new(1.0, 1.0, 0.0));
+        let mut distinct = Vec::new();
+
+        for (x, z) in [(0.1, 0.1), (0.9, 0.1), (0.1, 0.9), (0.9, 0.9)] {
+            let origin = Vec3::new(x, 2.0, z);
+            let ray = Ray::try_new(origin, Vec3::new(0.0, -1.0, 0.0)).unwrap();
+            let hit = mapped.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+            let uv = hit.geometry.uv.unwrap();
+            let tangent_normal = crate::material::decode_tangent_normal(
+                normal_map.sample_nearest(uv.u, uv.v).unwrap(),
+            )
+            .unwrap();
+            let world_normal = Vec3::new(tangent_normal.x, tangent_normal.z, tangent_normal.y);
+
+            let actual = shade_hit(&mapped, hit, origin, lighting).unwrap();
+            assert_color_approx_eq(
+                actual,
+                shade_surface(
+                    Color::WHITE,
+                    world_normal,
+                    Vec3::new(0.0, 1.0, 0.0),
+                    0.0,
+                    true,
+                    lighting,
+                ),
+            );
+            distinct.push(actual.r);
+        }
+        // The four corners land on four different texels.
+        distinct.sort_by(f32::total_cmp);
+        distinct.dedup_by(|a, b| (*a - *b).abs() < 1.0e-4);
+        assert!(distinct.len() >= 3, "{distinct:?}");
+    }
+
+    #[test]
+    fn normal_map_leans_follow_the_uv_basis_on_every_face() {
+        let lean = 30.0_f32.to_radians();
+        let (sine, cosine) = (lean.sin(), lean.cos());
+        let base = 0.5_f32 * 2.0_f32.sqrt();
+        let normal_map = |tangent_normal: Vec3| Some(uniform_normal_map(tangent_normal));
+        let flat = mapped_cube_scene(Color::WHITE, 0.0, 0.0, 0.0, None);
+
+        for face in ALL_FACES {
+            let normal = face.normal();
+            let center = Vec3::new(0.5, 0.5, 0.5);
+            let ray = Ray::try_new(center + normal * 2.0, -normal).unwrap();
+            // Tangent-space axis, tilted-normal, and the world axis it must point along.
+            for (tilt, axis) in [
+                (Vec3::new(sine, 0.0, cosine), face.tangent()),
+                (Vec3::new(0.0, sine, cosine), face.bitangent()),
+            ] {
+                let mapped = mapped_cube_scene(Color::WHITE, 0.0, 0.0, 0.0, normal_map(tilt));
+                for (sign, expected) in [
+                    (1.0, (sine + cosine) * base),
+                    (-1.0, (cosine - sine) * base),
+                ] {
+                    let lighting = sun_only(axis * sign + normal);
+                    let hit = mapped.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+                    assert_eq!(hit.geometry.face, face);
+
+                    let shaded = shade_hit(&mapped, hit, ray.origin(), lighting).unwrap();
+                    let unmapped = local_shading(&flat, ray, lighting);
+                    assert_f32_approx_eq(unmapped.r, base);
+                    assert_f32_approx_eq(shaded.r, expected);
+                    // Toward the tilt the face brightens; away it darkens.
+                    assert_eq!(shaded.r > unmapped.r, sign > 0.0, "{face:?} {axis:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reflection_ignores_the_shading_normal() {
+        // Fully reflective: the result is the reflected radiance alone, so a normal map that
+        // visibly changes local shading must leave the pixel unchanged.
+        let lean = uniform_normal_map(lean_u(40.0_f32.to_radians()));
+        let (min, max) = REFLECTION_WITNESS;
+        let build = |normal_map: Option<Texture>| {
+            let mut scene = mapped_cube_scene(Color::new(0.2, 0.4, 0.6), 0.5, 0.0, 1.0, normal_map);
+            let witness = add_reflective_material(&mut scene, Color::new(0.9, 0.3, 0.1), 0.0);
+            scene.add(SceneObject::new(Aabb::try_new(min, max).unwrap(), witness));
+            scene
+        };
+        let (mapped, flat) = (build(Some(lean)), build(None));
+        let lighting = upward_light_with_ambient();
+        let environment = environment();
+
+        assert_ne!(
+            local_shading(&mapped, angled_top_ray(), lighting),
+            local_shading(&flat, angled_top_ray(), lighting)
+        );
+        assert_color_approx_eq(
+            Tracer::new(&mapped, lighting, &environment)
+                .trace_ray(angled_top_ray(), PRIMARY_RAY_DEPTH)
+                .unwrap(),
+            Tracer::new(&flat, lighting, &environment)
+                .trace_ray(angled_top_ray(), PRIMARY_RAY_DEPTH)
+                .unwrap(),
+        );
+    }
+
+    #[test]
+    fn refraction_and_fresnel_ignore_the_shading_normal() {
+        // Fully transparent: only the Fresnel composition of reflection and refraction remains.
+        // Secondary hits on the same mapped material are locally lit with their own shading
+        // normals, so the traced comparison uses ambient-only light, which is independent of the
+        // normal: any difference would have to come from bent or reflected ray geometry.
+        let lean = uniform_normal_map(lean_u(40.0_f32.to_radians()));
+        let build = |normal_map: Option<Texture>| {
+            let mut scene = mapped_cube_scene(Color::new(0.2, 0.4, 0.6), 0.5, 1.0, 0.0, normal_map);
+            let (min, max) = TRANSMISSION_WITNESS;
+            let witness = add_reflective_material(&mut scene, Color::new(0.9, 0.3, 0.1), 0.0);
+            scene.add(SceneObject::new(Aabb::try_new(min, max).unwrap(), witness));
+            scene
+        };
+        let (mapped, flat) = (build(Some(lean)), build(None));
+        let lit = upward_light_with_ambient();
+        let lighting = ambient_only();
+        let environment = environment();
+
+        assert_ne!(
+            local_shading(&mapped, angled_top_ray(), lit),
+            local_shading(&flat, angled_top_ray(), lit)
+        );
+        assert_color_approx_eq(
+            Tracer::new(&mapped, lighting, &environment)
+                .trace_ray(angled_top_ray(), PRIMARY_RAY_DEPTH)
+                .unwrap(),
+            Tracer::new(&flat, lighting, &environment)
+                .trace_ray(angled_top_ray(), PRIMARY_RAY_DEPTH)
+                .unwrap(),
+        );
+    }
+
+    #[test]
+    fn normal_mapping_does_not_move_geometry_or_identity() {
+        let lean = uniform_normal_map(lean_u(40.0_f32.to_radians()));
+        let mapped = mapped_cube_scene(Color::WHITE, 0.0, 0.0, 0.0, Some(lean));
+        let flat = mapped_cube_scene(Color::WHITE, 0.0, 0.0, 0.0, None);
+
+        for ray in [downward_ray(), angled_top_ray()] {
+            let mapped_hit = mapped.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+            let flat_hit = flat.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+
+            assert_eq!(mapped_hit.geometry, flat_hit.geometry);
+        }
     }
 }

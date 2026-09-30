@@ -74,4 +74,12 @@ done
 mkdir -p "$OUTPUT_DIR"
 python3 "$SCRIPT_DIR/prepare_assets.py" "$TEMP_DIR" "$OUTPUT_DIR"
 
-echo "Prepared 11 runtime P6 textures in $OUTPUT_DIR"
+# The derived normal map must stay 16x16 P6: a 13-byte header plus 16*16*3 payload bytes.
+NORMAL_MAP="$OUTPUT_DIR/cobblestone_normal.ppm"
+if [[ "$(head -c 13 "$NORMAL_MAP" | tr '\n' ' ')" != "P6 16 16 255 " ]] \
+    || [[ "$(wc -c < "$NORMAL_MAP" | tr -d ' ')" != "781" ]]; then
+    echo "error: cobblestone_normal.ppm must be a 16x16 P6 image" >&2
+    exit 1
+fi
+
+echo "Prepared 11 runtime P6 textures and the derived cobblestone normal map in $OUTPUT_DIR"

@@ -162,6 +162,10 @@ impl PointLight {
     /// Returns `None` when this light cannot contribute: the surface lies at or beyond the radius,
     /// the light is inert, the light coincides with the surface (no defined direction), or the
     /// surface faces away from it. Callers may therefore skip the shadow ray and specular work.
+    ///
+    /// Pass the *geometric* normal: it decides whether the light is on the visible side of the
+    /// surface at all. A normal-mapped surface then shades with its own normal in
+    /// [`shade_point_light`].
     pub fn incidence_at(self, position: Vec3, normal: Vec3) -> Option<PointLightIncidence> {
         let to_light = self.position - position;
         let distance = to_light.length();
@@ -202,6 +206,10 @@ pub struct PointLightIncidence {
 /// visible. Ambient is not included; the directional model in [`shade_surface`] owns it.
 ///
 /// Shares the directional light's shininess, so both lights use one specular model.
+///
+/// `normal` is the shading normal, which may differ from the geometric normal that admitted the
+/// light in [`PointLight::incidence_at`]. A non-positive Lambert term gates the specular highlight
+/// as well, mirroring [`shade_surface`]; with a geometric normal it is always positive here.
 pub fn shade_point_light(
     incidence: PointLightIncidence,
     base_color: Color,
@@ -209,7 +217,11 @@ pub fn shade_point_light(
     view_direction: Vec3,
     material_specular: f32,
 ) -> Color {
-    let diffuse_factor = normal.dot(incidence.direction_to_light).max(0.0);
+    let diffuse_factor = normal.dot(incidence.direction_to_light);
+    if diffuse_factor <= 0.0 {
+        return Color::BLACK;
+    }
+
     let diffuse = base_color * incidence.radiance.scale(diffuse_factor);
     if material_specular <= 0.0 {
         return diffuse;
@@ -702,6 +714,22 @@ mod tests {
         assert_color_approx_eq(
             shade_point_light(incidence, Color::new(0.5, 0.4, 0.3), Y, Y, 0.0),
             Color::new(0.28125, 0.225, 0.16875),
+        );
+    }
+
+    #[test]
+    fn shading_normal_facing_away_from_an_admitted_light_receives_nothing() {
+        // The geometric normal Y admits the light; a bumped shading normal tilted below the light's
+        // horizon must get neither diffuse nor a leaked specular highlight.
+        let light = point_light(Vec3::new(1.0, 0.2, 0.0), Color::WHITE, 1.0, 10.0);
+        let incidence = light.incidence_at(Vec3::ZERO, Y).unwrap();
+        let view = incidence.direction_to_light;
+        let shading_normal = Vec3::new(-0.8, 0.6, 0.0);
+
+        assert!(shading_normal.dot(incidence.direction_to_light) < 0.0);
+        assert_eq!(
+            shade_point_light(incidence, Color::WHITE, shading_normal, view, 1.0),
+            Color::BLACK
         );
     }
 

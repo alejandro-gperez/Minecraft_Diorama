@@ -11,8 +11,9 @@ sky.
 Phase 1 provides the correct, testable 3D foundation and Phase 2 provides the audited surface and
 lighting system. Phase 3 is underway with a procedural sunset/night environment, bounded
 recursive ray infrastructure, recursive reflections, recursive glass refraction, Schlick
-Fresnel composition for glass, and emissive lava with a local lava point light; normal mapping and
-the larger EggWars world remain planned work.
+Fresnel composition for glass, emissive lava with a local lava point light, and a derived normal map
+for cobblestone. Every planned Phase 3 rubric effect is now implemented, but Phase 3 has not yet
+been audited; the larger EggWars world remains planned work.
 
 ## Current Status
 
@@ -22,7 +23,7 @@ procedural sunset/night environment in world space. Every radiance ray flows thr
 bounded, depth-aware trace path; reflective materials launch recursive reflection rays and
 transparent materials launch recursive Snell refraction rays whose split with reflection follows
 Schlick's Fresnel approximation. Lava is self-luminous and lights nearby surfaces through a finite
-local point light. Normal mapping is not implemented.
+local point light. Cobblestone is normal mapped from a map derived offline from its own texture.
 
 The current implementation includes:
 
@@ -232,6 +233,88 @@ Known limitations:
   Merging connected glass is a concern for the later voxel world.
 - Faces struck from inside glass are locally lit with their outward geometric normal.
 
+## Normal Mapping
+
+Canonical cobblestone is the normal-mapped material. The effect changes only the **shading
+normal** used for local lighting; the AABB, its silhouette, hit position, face, and UVs are
+untouched, so a rough-looking face is still perfectly flat in outline and in shadow. Grass,
+obsidian, glass, and lava have no normal map and shade with their geometric normals exactly as
+before.
+
+### Offline derivation
+
+`scripts/prepare_assets.sh` (through `scripts/prepare_assets.py`) derives
+`assets/textures/cobblestone_normal.ppm` from the runtime cobblestone texture; it is not an
+unrelated external asset, is not painted by hand, and is a 16×16 P6 image like every other texture.
+The script is deterministic (it uses only IEEE arithmetic and `math.sqrt`) and validates the
+output's size.
+
+```text
+height(x, y) = 0.2126 R + 0.7152 G + 0.0722 B          (Rec. 709 luminance, brighter = higher)
+dx = height(x + 1, y) - height(x - 1, y)
+dy = height(x, y + 1) - height(x, y - 1)
+n  = normalize(-strength * dx, -strength * dy, 1)
+texel = round((n * 0.5 + 0.5) * 255)                   (flat surface = 128, 128, 255)
+```
+
+Differences wrap at the 16×16 borders, because Minecraft block textures tile seamlessly and a
+wrapped edge produces no artificial seam. The chosen `strength` is `2.0`. `3.0` crushed a large
+share of texels to near-black, while `1.0` read as a faint grain, so `2.0` gives a clearly
+dimensional surface without looking violently crumpled. A test re-derives the map from
+`cobblestone.ppm` and checks that the committed asset follows this derivation.
+
+### Runtime
+
+A material may hold an optional `TextureId` for its normal map (`Material::with_normal_map`);
+materials default to none, so existing construction is unchanged. The map is an ordinary texture
+registered once in the scene's texture storage and shared by every cobblestone object; it is
+never copied per object. At a hit the renderer samples it with nearest-neighbor filtering at the
+same UV as the color texture, so the map stays attached to the same local mapping and there is no
+bilinear filtering.
+
+The sample is decoded as `n = 2 * rgb - 1`, normalized, and rejected when it is non-finite,
+degenerate, or has `z <= 0.05` (within about 3° of the surface plane or pointing into it). A
+rejected texel falls back to the face's geometric normal instead of being clamped, so a corrupt
+texel can never produce NaN or an inward-facing normal. Any accepted normal has positive `z`, so
+the transformed normal stays in the geometric hemisphere.
+
+### Tangent basis
+
+Tangent space follows the project's UV convention: `+X` is increasing `u`, `+Y` is increasing
+`v` (image down, so nothing is flipped between the image and the surface), and `+Z` is the outward
+geometric normal. A height field `P + h N` has perturbed normal `(-dh/du, -dh/dv, 1)` along the
+actual `du` and `dv` directions, which holds for either handedness, so the mirrored faces need no
+special case. The world-space normal is `T * n.x + B * n.y + N * n.z` with `T` and `B` taken from
+the UV mapping of each face:
+
+| Face | `u` | `v` | Tangent `T` (u+) | Bitangent `B` (v+) | Normal `N` |
+| --- | --- | --- | --- | --- | --- |
+| `+X` | `1 - z` | `1 - y` | `-Z` | `-Y` | `+X` |
+| `-X` | `z` | `1 - y` | `+Z` | `-Y` | `-X` |
+| `+Y` | `x` | `z` | `+X` | `+Z` | `+Y` |
+| `-Y` | `x` | `1 - z` | `+X` | `-Z` | `-Y` |
+| `+Z` | `x` | `1 - y` | `+X` | `-Y` | `+Z` |
+| `-Z` | `1 - x` | `1 - y` | `-X` | `-Y` | `-Z` |
+
+A test hits every face of a non-unit, translated box and confirms that moving along `T` or `B`
+increases only `u` or `v` respectively.
+
+### Geometric normal versus shading normal
+
+| Uses the **shading** normal | Keeps the **geometric** normal |
+| --- | --- |
+| directional Lambert diffuse | AABB intersection, hit position, `CubeFace`, UVs |
+| directional Blinn-Phong specular | shadow-ray origin bias and direction (directional and point) |
+| point-light Lambert diffuse | whether a light is on the visible side of the face at all |
+| point-light Blinn-Phong specular | reflection direction and origin, refraction, Fresnel, medium entering/exiting |
+
+A light arriving from behind the geometric face never reaches the surface, so a bump facing the
+light on a turned-away face stays dark; the Lambert term also gates the specular highlight.
+Reflection and refraction continue to use the geometric interface normal: this mission does not
+add bump-mapped reflection. Shadows remain geometric occlusion, and lava emission, glass behavior, and
+Fresnel are unchanged. Normal mapping is cheap: one extra texture lookup, a decode, and a basis
+transform per normal-mapped hit, with no allocation.
+
 ## Emission and Local Lava Lighting
 
 Lava is the project's primary emissive material. Two deliberately separate mechanisms make it
@@ -275,7 +358,8 @@ color finite and non-negative, the intensity finite and `>= 0` (zero is an inert
 radius finite and `> 0`. A point light is not geometry and never blocks rays. The scene owns a small
 list of them; each shaded hit iterates that list without allocating, cloning, or dynamic dispatch.
 
-For a hit at `P` with geometric normal `N` and a light at `L`:
+For a hit at `P` with shading normal `N` (the geometric normal unless the material has a normal
+map) and a light at `L`:
 
 ```text
 distance    = |L - P|
@@ -289,8 +373,8 @@ The falloff is intentionally not inverse-square: it gives a predictable artistic
 zero influence at and beyond it, and a cheap evaluation. The specular term reuses the directional
 light's Blinn-Phong model and shininess. Lights beyond the radius, inert lights, lights on the
 surface, and back-facing surfaces return before any shadow ray or specular work; materials with
-zero specular skip the highlight. Shading still uses the geometric normal; normal mapping is
-Mission 20.
+zero specular skip the highlight. The geometric normal admits a light and offsets its shadow ray; the diffuse and specular terms
+use the shading normal, which only differs for normal-mapped materials (see Normal Mapping).
 
 Each potentially lit hit casts one any-hit shadow ray from `P + N * POINT_LIGHT_SHADOW_BIAS`
 (`1.0e-4`, a unit-scale assumption like the other biases) toward the light, limited to the remaining
@@ -358,7 +442,8 @@ scripts/prepare_assets.sh
 
 The script validates every source dimension, uses macOS `sips` only for offline PNG decoding,
 and writes runtime files under `assets/textures/`. Its Python helper uses only the standard
-library and performs deterministic PPM conversion and tint arithmetic.
+library and performs deterministic PPM conversion and tint arithmetic. The same command derives
+`cobblestone_normal.ppm` from the cobblestone texture (see Normal Mapping).
 
 The grass top uses the supplied Minecraft grass colormap with the classic Plains parameters:
 temperature `0.8`, rainfall `0.4`, and Minecraft's humidity-times-temperature lookup. This
@@ -383,7 +468,7 @@ parameters are registered once at startup and resolved during rendering through 
 | Material | Texture appearance | Albedo | Specular | Transparency | Reflectivity | IOR | Special effect |
 | --- | --- | --- | ---: | ---: | ---: | ---: | --- |
 | Grass | `grass_top` / `grass_side` / `dirt` | `(1.00, 1.00, 1.00)` | 0.05 | 0.00 | 0.02 | 1.0 | None required |
-| Cobblestone | `cobblestone` on all faces | `(1.00, 1.00, 1.00)` | 0.08 | 0.00 | 0.03 | 1.0 | Normal mapping planned |
+| Cobblestone | `cobblestone` on all faces | `(1.00, 1.00, 1.00)` | 0.08 | 0.00 | 0.03 | 1.0 | Normal mapping (implemented) |
 | Obsidian | `obsidian` on all faces | `(0.90, 0.90, 1.00)` | 0.55 | 0.00 | 0.35 | 1.0 | Reflection (implemented) |
 | Glass | `glass` on all faces | `(0.90, 0.97, 1.00)` | 0.80 | 0.85 | 0.15 | 1.5 | Refraction + Fresnel (implemented) |
 | Lava | `lava` on all faces | `(1.00, 0.95, 0.90)` | 0.10 | 0.00 | 0.05 | 1.0 | Emission + local lava light (implemented) |
@@ -392,8 +477,9 @@ Texture, albedo, specular, reflectivity, transparency, and index of refraction a
 rendering, except that transparent glass's stored reflectivity is superseded by Fresnel. The
 `1.0` IOR of the non-transmissive materials is the neutral default and has no optical effect.
 Lava additionally stores `emission_color = (1.00, 0.88, 0.72)` and `emission_strength = 1.5`; the
-other four materials do not emit. Glass still blocks shadow rays as an opaque AABB, and cobblestone
-still uses its geometric AABB normal. Normal mapping remains Phase 3 work.
+other four materials do not emit. Cobblestone additionally references the shared derived
+`cobblestone_normal` texture; the other four have no normal map. Glass still blocks shadow rays as
+an opaque AABB.
 
 ## Performance
 
@@ -456,9 +542,28 @@ reflections), the number of lights, and their radii. Six `cargo run --release` s
 development machine; the absolute values are not comparable with the earlier figures above, and
 none of this is a formal benchmark.
 
+With the derived cobblestone normal map active, medians of 40 renders at 320×180 (five warm-up renders
+discarded) were measured in one session for the Mission 19 build and the Mission 20 build, using one
+harness and scene layout and alternating the two builds over two rounds. Medians in ms, as
+Mission 19 / Mission 20 per round:
+
+| View | Round 1 | Round 2 |
+| --- | ---: | ---: |
+| Default | 4.17 / 4.26 | 4.39 / 4.54 |
+| Top-down | 4.88 / 4.94 | 5.09 / 5.21 |
+| Close lava | 16.28 / 17.14 | 16.92 / 17.10 |
+| Close glass | 18.12 / 18.57 | 17.49 / 18.62 |
+
+Normal mapping adds roughly 0.1–0.2 ms, about 1–5% depending on view, which is comparable to the
+run-to-run variation between rounds. The absolute values differ from the previous table because the
+camera poses of this harness are not identical to that one; only the paired comparison is
+meaningful. A 6,840-pose camera sweep of the showcase scene (orbit, elevation, zoom, and three
+targets) produced no render error and no non-finite pixel. These are local development
+observations, not formal benchmarks.
+
 ## Testing
 
-The current suite contains 311 tests covering vector arithmetic and normalization, ray invariants,
+The current suite contains 343 tests covering vector arithmetic and normalization, ray invariants,
 AABB construction and edge cases, camera basis/ray generation/orbit limits, texture sampling and
 registration, P6 parsing and malformed input, material face selection, cube-face UV orientation,
 scene closest-hit behavior, ambient/Lambert/Blinn-Phong behavior, renderer lighting and texture
@@ -471,7 +576,9 @@ recursive refraction depth behavior, Schlick Fresnel reflectance and input valid
 orientation, inside and outside reflection origins, Fresnel transparency composition, total
 internal reflection routing, canonical glass refraction, material emission validation and
 self-radiance that survives zero diffuse and occlusion, point-light validation, falloff, diffuse,
-specular, bounded shadow rays, glass blocking, recursive emissive lava, a camera-pose render sweep, framebuffer and color conversion, PPM output, and
+specular, bounded shadow rays, glass blocking, recursive emissive lava, normal-map decoding, the
+six-face tangent basis against the real UV mapping, the derived cobblestone asset, shading-normal
+lighting with geometric shadows and reflection, a camera-pose render sweep, framebuffer and color conversion, PPM output, and
 presentation-independent camera and RGBA conversion helpers. Every AABB remains an opaque shadow
 blocker, including glass.
 
@@ -493,7 +600,6 @@ runs `cargo fmt --check`, `cargo test`, `cargo check`, `cargo build --release`, 
 
 The following belong to later phases and are not yet implemented:
 
-- normal mapping;
 - transparent or colored shadows through glass, absorption, and nested or merged glass media;
 - procedural lava-region extraction into representative point lights;
 - deterministic procedural 16×16 floating islands and configurable seeds;
@@ -513,7 +619,7 @@ The following belong to later phases and are not yet implemented:
 | Refraction | Implemented: recursive Snell refraction through glass (IOR 1.5) |
 | Fresnel | Implemented: Schlick reflection/refraction split for glass, TIR routed to reflection |
 | Emissive lava | Implemented: visible self-radiance plus a local lava point light with hard shadows |
-| Normal mapping | Planned |
+| Normal mapping | Implemented: derived cobblestone normal map lighting with a per-face tangent basis |
 | Sunset/night skybox/environment | Procedural CPU environment implemented; shared miss path for every traced ray |
 | Procedural floating-island terrain | Planned |
 | Voxel traversal and parallel rendering | Planned |

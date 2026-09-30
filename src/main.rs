@@ -88,6 +88,11 @@ fn phase2_test_scene() -> Result<Scene, PpmLoadError> {
         grass_side: register_texture(&mut scene, &texture_directory, "grass_side.ppm")?,
         dirt: register_texture(&mut scene, &texture_directory, "dirt.ppm")?,
         cobblestone: register_texture(&mut scene, &texture_directory, "cobblestone.ppm")?,
+        cobblestone_normal: register_texture(
+            &mut scene,
+            &texture_directory,
+            "cobblestone_normal.ppm",
+        )?,
         obsidian: register_texture(&mut scene, &texture_directory, "obsidian.ppm")?,
         glass: register_texture(&mut scene, &texture_directory, "glass.ppm")?,
         lava: register_texture(&mut scene, &texture_directory, "lava.ppm")?,
