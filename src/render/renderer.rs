@@ -2,12 +2,17 @@ use crate::{
     camera::OrbitalCamera,
     lighting::{Lighting, shade_surface},
     math::Vec3,
+    ray::Ray,
     scene::{Scene, SceneHit},
 };
 
 use super::{Color, Framebuffer};
 
 const PRIMARY_RAY_T_MIN: f32 = 0.0;
+const SHADOW_RAY_T_MIN: f32 = 0.0;
+const SHADOW_RAY_T_MAX: f32 = f32::INFINITY;
+/// Moves secondary rays just outside the hit surface to prevent floating-point self-intersection.
+const RAY_ORIGIN_BIAS: f32 = 1.0e-4;
 const ASPECT_RATIO_TOLERANCE: f32 = 1.0e-5;
 
 const BACKGROUND_BOTTOM: Color = Color::new(0.06, 0.08, 0.16);
@@ -22,6 +27,7 @@ pub enum RenderError {
     SurfaceUvUnavailable,
     TextureSamplingFailed,
     ViewDirectionUnavailable,
+    ShadowRayGenerationFailed,
 }
 
 pub struct Renderer;
@@ -81,12 +87,23 @@ fn shade_hit(
     let view_direction = (camera_position - hit.geometry.position)
         .try_normalized()
         .ok_or(RenderError::ViewDirectionUnavailable)?;
+    let light = lighting.directional();
+    let direct_light_visible =
+        if light.intensity() > 0.0 && hit.geometry.normal.dot(light.direction_to_light()) > 0.0 {
+            let shadow_origin = hit.geometry.position + hit.geometry.normal * RAY_ORIGIN_BIAS;
+            let shadow_ray = Ray::try_new(shadow_origin, light.direction_to_light())
+                .ok_or(RenderError::ShadowRayGenerationFailed)?;
+            !scene.is_occluded(shadow_ray, SHADOW_RAY_T_MIN, SHADOW_RAY_T_MAX)
+        } else {
+            true
+        };
 
     Ok(shade_surface(
         material.surface_color(texture_sample),
         hit.geometry.normal,
         view_direction,
         material.specular(),
+        direct_light_visible,
         lighting,
     ))
 }
@@ -106,7 +123,7 @@ fn background(v: f32) -> Color {
 mod tests {
     use std::f32::consts::FRAC_PI_2;
 
-    use super::{RenderError, Renderer, pixel_center, shade_hit};
+    use super::{RAY_ORIGIN_BIAS, RenderError, Renderer, pixel_center, shade_hit};
     use crate::{
         camera::OrbitalCamera,
         geometry::Aabb,
@@ -132,6 +149,13 @@ mod tests {
         )
     }
 
+    fn upward_light_with_ambient() -> Lighting {
+        Lighting::new(
+            AmbientLight::try_new(Color::WHITE, 0.2).unwrap(),
+            DirectionalLight::try_new(Vec3::new(0.0, 1.0, 0.0), Color::WHITE, 1.0).unwrap(),
+        )
+    }
+
     fn add_solid_material(scene: &mut Scene, color: Color) -> MaterialId {
         let texture_id = scene.add_texture(Texture::solid(color)).unwrap();
         scene
@@ -146,6 +170,20 @@ mod tests {
                 .unwrap(),
             )
             .unwrap()
+    }
+
+    fn top_hit(scene: &Scene) -> (crate::scene::SceneHit, Vec3) {
+        let camera_position = Vec3::new(0.5, 2.0, 0.5);
+        let ray = Ray::try_new(camera_position, Vec3::new(0.0, -1.0, 0.0)).unwrap();
+        let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+        (hit, camera_position)
+    }
+
+    fn add_blocker(scene: &mut Scene, min: Vec3, max: Vec3) {
+        scene.add(SceneObject::new(
+            Aabb::try_new(min, max).unwrap(),
+            MaterialId::new(u32::MAX),
+        ));
     }
 
     #[test]
@@ -415,6 +453,131 @@ mod tests {
         let off_axis = shade_hit(&scene, hit, Vec3::new(2.5, 0.5, 1.0), light).unwrap();
 
         assert!(aligned.r > off_axis.r);
+    }
+
+    #[test]
+    fn directly_lit_surface_does_not_shadow_itself() {
+        let mut scene = Scene::new();
+        let material_id = add_solid_material(&mut scene, Color::WHITE);
+        scene.add(SceneObject::new(
+            Aabb::try_new(Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).unwrap(),
+            material_id,
+        ));
+        let (hit, camera_position) = top_hit(&scene);
+
+        let lit = shade_hit(&scene, hit, camera_position, upward_light_with_ambient()).unwrap();
+
+        assert!(lit.r > 1.0);
+        assert!(lit.g > 1.0);
+        assert!(lit.b > 1.0);
+    }
+
+    #[test]
+    fn blocker_removes_diffuse_but_preserves_ambient() {
+        let mut scene = Scene::new();
+        let material_id = add_solid_material(&mut scene, Color::WHITE);
+        scene.add(SceneObject::new(
+            Aabb::try_new(Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).unwrap(),
+            material_id,
+        ));
+        let (hit, camera_position) = top_hit(&scene);
+        let lighting = upward_light_with_ambient();
+        let visible = shade_hit(&scene, hit, camera_position, lighting).unwrap();
+
+        add_blocker(
+            &mut scene,
+            Vec3::new(0.25, 1.5, 0.25),
+            Vec3::new(0.75, 2.0, 0.75),
+        );
+        let blocked = shade_hit(&scene, hit, camera_position, lighting).unwrap();
+
+        assert!(visible.r > blocked.r);
+        assert_eq!(blocked, Color::new(0.2, 0.2, 0.2));
+    }
+
+    #[test]
+    fn blocker_removes_specular_highlight() {
+        let mut scene = Scene::new();
+        let texture_id = scene.add_texture(Texture::solid(Color::BLACK)).unwrap();
+        let material_id = scene
+            .add_material(
+                Material::try_new(
+                    TextureSelection::Uniform(texture_id),
+                    Color::WHITE,
+                    1.0,
+                    0.0,
+                    0.0,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        scene.add(SceneObject::new(
+            Aabb::try_new(Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).unwrap(),
+            material_id,
+        ));
+        let (hit, camera_position) = top_hit(&scene);
+        let lighting = upward_light_with_ambient();
+        let visible = shade_hit(&scene, hit, camera_position, lighting).unwrap();
+
+        add_blocker(
+            &mut scene,
+            Vec3::new(0.25, 1.5, 0.25),
+            Vec3::new(0.75, 2.0, 0.75),
+        );
+        let blocked = shade_hit(&scene, hit, camera_position, lighting).unwrap();
+
+        assert!(visible.r > 0.0);
+        assert_eq!(blocked, Color::BLACK);
+    }
+
+    #[test]
+    fn blockers_outside_light_direction_or_behind_surface_do_not_shadow() {
+        let mut scene = Scene::new();
+        let material_id = add_solid_material(&mut scene, Color::WHITE);
+        scene.add(SceneObject::new(
+            Aabb::try_new(Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).unwrap(),
+            material_id,
+        ));
+        let (hit, camera_position) = top_hit(&scene);
+        let lighting = upward_light_with_ambient();
+        let baseline = shade_hit(&scene, hit, camera_position, lighting).unwrap();
+
+        add_blocker(
+            &mut scene,
+            Vec3::new(2.0, 1.5, 2.0),
+            Vec3::new(3.0, 2.5, 3.0),
+        );
+        add_blocker(
+            &mut scene,
+            Vec3::new(0.25, -2.0, 0.25),
+            Vec3::new(0.75, -1.5, 0.75),
+        );
+
+        assert_eq!(
+            shade_hit(&scene, hit, camera_position, lighting),
+            Ok(baseline)
+        );
+    }
+
+    #[test]
+    fn nearby_legitimate_blocker_is_not_skipped_by_bias() {
+        let mut scene = Scene::new();
+        let material_id = add_solid_material(&mut scene, Color::WHITE);
+        scene.add(SceneObject::new(
+            Aabb::try_new(Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).unwrap(),
+            material_id,
+        ));
+        let (hit, camera_position) = top_hit(&scene);
+        let blocker_min_y = 1.0 + RAY_ORIGIN_BIAS * 1.5;
+        add_blocker(
+            &mut scene,
+            Vec3::new(0.25, blocker_min_y, 0.25),
+            Vec3::new(0.75, blocker_min_y + RAY_ORIGIN_BIAS, 0.75),
+        );
+
+        let blocked = shade_hit(&scene, hit, camera_position, upward_light_with_ambient()).unwrap();
+
+        assert_eq!(blocked, Color::new(0.2, 0.2, 0.2));
     }
 
     #[test]

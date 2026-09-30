@@ -41,6 +41,26 @@ impl Aabb {
     /// A ray whose origin is strictly inside the box reports the exit surface, so callers
     /// always receive a forward-facing boundary hit rather than an artificial entry point.
     pub fn intersect(&self, ray: Ray, t_min: f32, t_max: f32) -> Option<AabbHit> {
+        let (t, face) = self.surface_in_range(ray, t_min, t_max)?;
+        let position = ray.at(t);
+
+        Some(AabbHit {
+            t,
+            position,
+            normal: face.normal(),
+            face,
+            uv: self.uv_for_face(position, face),
+        })
+    }
+
+    /// Reports whether any box surface falls in the requested ray interval.
+    ///
+    /// This avoids constructing positions, normals, and UVs for visibility-only queries.
+    pub fn intersects(&self, ray: Ray, t_min: f32, t_max: f32) -> bool {
+        self.surface_in_range(ray, t_min, t_max).is_some()
+    }
+
+    fn surface_in_range(&self, ray: Ray, t_min: f32, t_max: f32) -> Option<(f32, CubeFace)> {
         if t_min.is_nan() || t_max.is_nan() || t_min > t_max || !ray.origin().is_finite() {
             return None;
         }
@@ -75,17 +95,16 @@ impl Aabb {
         }
 
         if self.strictly_contains(origin) {
-            return self.hit_in_range(ray, interval.exit_t, interval.exit_face, t_min, t_max);
+            return surface_in_range(interval.exit_t, interval.exit_face, t_min, t_max);
         }
 
-        if let Some(hit) =
-            self.hit_in_range(ray, interval.entry_t, interval.entry_face, t_min, t_max)
+        if let Some(surface) = surface_in_range(interval.entry_t, interval.entry_face, t_min, t_max)
         {
-            return Some(hit);
+            return Some(surface);
         }
 
         if interval.entry_t < t_min {
-            return self.hit_in_range(ray, interval.exit_t, interval.exit_face, t_min, t_max);
+            return surface_in_range(interval.exit_t, interval.exit_face, t_min, t_max);
         }
 
         None
@@ -98,28 +117,6 @@ impl Aabb {
             && point.y < self.max.y
             && point.z > self.min.z
             && point.z < self.max.z
-    }
-
-    fn hit_in_range(
-        &self,
-        ray: Ray,
-        t: f32,
-        face: CubeFace,
-        t_min: f32,
-        t_max: f32,
-    ) -> Option<AabbHit> {
-        if !t.is_finite() || t < t_min || t > t_max {
-            return None;
-        }
-
-        let position = ray.at(t);
-        Some(AabbHit {
-            t,
-            position,
-            normal: face.normal(),
-            face,
-            uv: self.uv_for_face(position, face),
-        })
     }
 
     fn uv_for_face(&self, position: Vec3, face: CubeFace) -> Option<Uv> {
@@ -138,6 +135,10 @@ impl Aabb {
 
         Some(uv)
     }
+}
+
+fn surface_in_range(t: f32, face: CubeFace, t_min: f32, t_max: f32) -> Option<(f32, CubeFace)> {
+    (t.is_finite() && t >= t_min && t <= t_max).then_some((t, face))
 }
 
 #[derive(Clone, Copy)]

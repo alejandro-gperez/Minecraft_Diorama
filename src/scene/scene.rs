@@ -93,6 +93,19 @@ impl Scene {
         closest_hit
     }
 
+    /// Returns as soon as any opaque scene AABB intersects the requested ray interval.
+    ///
+    /// Phase 2 treats every AABB as an opaque blocker, regardless of material transparency.
+    pub fn is_occluded(&self, ray: Ray, t_min: f32, t_max: f32) -> bool {
+        for object in &self.objects {
+            if object.bounds.intersects(ray, t_min, t_max) {
+                return true;
+            }
+        }
+
+        false
+    }
+
     pub fn len(&self) -> usize {
         self.objects.len()
     }
@@ -333,5 +346,112 @@ mod tests {
             scene.material(second_id).unwrap().textures(),
             TextureSelection::Uniform(texture_id)
         );
+    }
+
+    #[test]
+    fn empty_scene_is_not_occluded() {
+        assert!(!Scene::new().is_occluded(
+            ray(Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0)),
+            0.0,
+            f32::INFINITY,
+        ));
+    }
+
+    #[test]
+    fn occlusion_detects_blocker_directly_along_ray() {
+        let mut scene = Scene::new();
+        scene.add(object(
+            Vec3::new(2.0, -0.5, -0.5),
+            Vec3::new(3.0, 0.5, 0.5),
+            MaterialId::new(0),
+        ));
+
+        assert!(scene.is_occluded(
+            ray(Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0)),
+            0.0,
+            f32::INFINITY,
+        ));
+    }
+
+    #[test]
+    fn objects_behind_origin_or_outside_path_do_not_occlude() {
+        let mut scene = Scene::new();
+        scene.add(object(
+            Vec3::new(-3.0, -0.5, -0.5),
+            Vec3::new(-2.0, 0.5, 0.5),
+            MaterialId::new(0),
+        ));
+        scene.add(object(
+            Vec3::new(2.0, 2.0, -0.5),
+            Vec3::new(3.0, 3.0, 0.5),
+            MaterialId::new(0),
+        ));
+
+        assert!(!scene.is_occluded(
+            ray(Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0)),
+            0.0,
+            f32::INFINITY,
+        ));
+    }
+
+    #[test]
+    fn occlusion_respects_minimum_and_maximum_distance() {
+        let mut scene = Scene::new();
+        scene.add(object(
+            Vec3::new(2.0, -0.5, -0.5),
+            Vec3::new(3.0, 0.5, 0.5),
+            MaterialId::new(0),
+        ));
+        let ray = ray(Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0));
+
+        assert!(!scene.is_occluded(ray, 0.0, 1.99));
+        assert!(scene.is_occluded(ray, 2.0, 2.5));
+        assert!(!scene.is_occluded(ray, 3.01, f32::INFINITY));
+    }
+
+    #[test]
+    fn occlusion_uses_any_hit_instead_of_closest_hit_semantics() {
+        let mut scene = Scene::new();
+        scene.add(object(
+            Vec3::new(5.0, -0.5, -0.5),
+            Vec3::new(6.0, 0.5, 0.5),
+            MaterialId::new(0),
+        ));
+        scene.add(object(
+            Vec3::new(2.0, -0.5, -0.5),
+            Vec3::new(3.0, 0.5, 0.5),
+            MaterialId::new(0),
+        ));
+
+        assert!(scene.is_occluded(
+            ray(Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0)),
+            0.0,
+            f32::INFINITY,
+        ));
+    }
+
+    #[test]
+    fn transparent_materials_still_block_phase_two_shadow_rays() {
+        let mut scene = Scene::new();
+        let transparent = Material::try_new(
+            TextureSelection::Uniform(TextureId::new(0)),
+            Color::WHITE,
+            0.0,
+            1.0,
+            0.0,
+        )
+        .unwrap();
+        let transparent_id = scene.add_material(transparent).unwrap();
+        scene.add(object(
+            Vec3::new(2.0, -0.5, -0.5),
+            Vec3::new(3.0, 0.5, 0.5),
+            transparent_id,
+        ));
+
+        assert!(scene.is_occluded(
+            ray(Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0)),
+            0.0,
+            f32::INFINITY,
+        ));
     }
 }

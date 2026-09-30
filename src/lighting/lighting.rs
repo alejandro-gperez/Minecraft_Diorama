@@ -95,9 +95,14 @@ pub fn shade_surface(
     normal: Vec3,
     view_direction: Vec3,
     material_specular: f32,
+    direct_light_visible: bool,
     lighting: Lighting,
 ) -> Color {
     let ambient = base_color * lighting.ambient.color.scale(lighting.ambient.intensity);
+    if !direct_light_visible {
+        return ambient;
+    }
+
     let light = lighting.directional;
     let diffuse_factor = normal.dot(light.direction_to_light).max(0.0);
     if diffuse_factor <= 0.0 {
@@ -218,6 +223,7 @@ mod tests {
             Y,
             Y,
             0.0,
+            true,
             direct_only(Y, Color::WHITE, 1.0),
         );
 
@@ -229,11 +235,11 @@ mod tests {
         let lighting = direct_only(Y, Color::WHITE, 1.0);
 
         assert_eq!(
-            shade_surface(Color::WHITE, X, Y, 1.0, lighting),
+            shade_surface(Color::WHITE, X, Y, 1.0, true, lighting),
             Color::BLACK
         );
         assert_eq!(
-            shade_surface(Color::WHITE, NEG_Y, NEG_Y, 1.0, lighting),
+            shade_surface(Color::WHITE, NEG_Y, NEG_Y, 1.0, true, lighting),
             Color::BLACK
         );
     }
@@ -245,6 +251,7 @@ mod tests {
             Y,
             X,
             0.0,
+            true,
             direct_only(Y, Color::WHITE, 0.5),
         );
         let bright = shade_surface(
@@ -252,6 +259,7 @@ mod tests {
             Y,
             X,
             0.0,
+            true,
             direct_only(Y, Color::WHITE, 1.0),
         );
 
@@ -265,6 +273,7 @@ mod tests {
             Y,
             X,
             0.0,
+            true,
             direct_only(Y, Color::new(1.0, 0.5, 0.25), 1.0),
         );
 
@@ -278,6 +287,7 @@ mod tests {
             NEG_Y,
             NEG_Y,
             1.0,
+            true,
             lighting(Y, Color::WHITE, 1.0, Color::new(0.5, 0.4, 0.3), 0.25),
         );
         let bright = shade_surface(
@@ -285,6 +295,7 @@ mod tests {
             NEG_Y,
             NEG_Y,
             1.0,
+            true,
             lighting(Y, Color::WHITE, 1.0, Color::new(0.5, 0.4, 0.3), 0.5),
         );
 
@@ -294,14 +305,28 @@ mod tests {
 
     #[test]
     fn zero_material_specular_produces_no_highlight() {
-        let result = shade_surface(Color::BLACK, Y, Y, 0.0, direct_only(Y, Color::WHITE, 1.0));
+        let result = shade_surface(
+            Color::BLACK,
+            Y,
+            Y,
+            0.0,
+            true,
+            direct_only(Y, Color::WHITE, 1.0),
+        );
 
         assert_eq!(result, Color::BLACK);
     }
 
     #[test]
     fn aligned_view_and_light_produce_specular_highlight() {
-        let result = shade_surface(Color::BLACK, Y, Y, 0.5, direct_only(Y, Color::WHITE, 1.0));
+        let result = shade_surface(
+            Color::BLACK,
+            Y,
+            Y,
+            0.5,
+            true,
+            direct_only(Y, Color::WHITE, 1.0),
+        );
 
         assert_color_approx_eq(result, Color::new(0.5, 0.5, 0.5));
     }
@@ -313,6 +338,7 @@ mod tests {
             NEG_Y,
             NEG_Y,
             1.0,
+            true,
             direct_only(Y, Color::WHITE, 1.0),
         );
 
@@ -322,11 +348,21 @@ mod tests {
     #[test]
     fn higher_material_specular_increases_highlight() {
         let lighting = direct_only(Y, Color::WHITE, 1.0);
-        let low = shade_surface(Color::BLACK, Y, Y, 0.2, lighting);
-        let high = shade_surface(Color::BLACK, Y, Y, 0.8, lighting);
+        let low = shade_surface(Color::BLACK, Y, Y, 0.2, true, lighting);
+        let high = shade_surface(Color::BLACK, Y, Y, 0.8, true, lighting);
 
         assert!(high.r > low.r);
         assert!(high.g > low.g);
         assert!(high.b > low.b);
+    }
+
+    #[test]
+    fn occlusion_removes_direct_terms_but_preserves_ambient() {
+        let lighting = lighting(Y, Color::WHITE, 1.0, Color::WHITE, 0.2);
+        let visible = shade_surface(Color::WHITE, Y, Y, 1.0, true, lighting);
+        let blocked = shade_surface(Color::WHITE, Y, Y, 1.0, false, lighting);
+
+        assert!(visible.r > blocked.r);
+        assert_color_approx_eq(blocked, Color::new(0.2, 0.2, 0.2));
     }
 }
