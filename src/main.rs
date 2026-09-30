@@ -6,6 +6,7 @@ use std::{
 
 use app::run;
 use camera::OrbitalCamera;
+use environment::Environment;
 use geometry::Aabb;
 use lighting::{AmbientLight, DirectionalLight, Lighting};
 use material::{CanonicalTextureIds, PpmLoadError, TextureId, load_ppm};
@@ -16,6 +17,7 @@ use scene::{Scene, SceneObject};
 pub mod app;
 pub mod camera;
 pub mod color;
+pub mod environment;
 pub mod geometry;
 pub mod lighting;
 pub mod material;
@@ -33,8 +35,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let aspect_ratio = WIDTH as f32 / HEIGHT as f32;
     let camera = OrbitalCamera::try_new(
         Vec3::new(0.0, 0.7, 0.0),
-        0.55,
-        0.35,
+        0.55 + PI,
+        0.15,
         10.0,
         50.0 * PI / 180.0,
         aspect_ratio,
@@ -42,15 +44,23 @@ fn main() -> Result<(), Box<dyn Error>> {
     .expect("Phase 2 camera configuration must be valid");
     let scene = phase2_test_scene()?;
     let lighting = phase2_lighting();
+    let environment = Environment::sunset();
     let framebuffer =
         Framebuffer::try_new(WIDTH, HEIGHT).expect("development resolution must be valid");
 
-    run(camera, scene, lighting, framebuffer, Path::new(OUTPUT_PATH))?;
+    run(
+        camera,
+        scene,
+        lighting,
+        environment,
+        framebuffer,
+        Path::new(OUTPUT_PATH),
+    )?;
     Ok(())
 }
 
 fn phase2_lighting() -> Lighting {
-    let ambient = AmbientLight::try_new(Color::new(0.30, 0.34, 0.46), 0.35)
+    let ambient = AmbientLight::try_new(Color::new(0.30, 0.34, 0.46), 0.50)
         .expect("Phase 2 ambient-light configuration must be valid");
     let directional =
         DirectionalLight::try_new(Vec3::new(0.6, 1.0, 0.8), Color::new(1.0, 0.84, 0.70), 1.0)

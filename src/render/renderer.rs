@@ -1,5 +1,6 @@
 use crate::{
     camera::OrbitalCamera,
+    environment::Environment,
     lighting::{Lighting, shade_surface},
     math::Vec3,
     ray::Ray,
@@ -17,9 +18,6 @@ const SHADOW_RAY_T_MAX: f32 = f32::INFINITY;
 /// revisited together with the scene's numerical precision requirements.
 const RAY_ORIGIN_BIAS: f32 = 1.0e-4;
 const ASPECT_RATIO_TOLERANCE: f32 = 1.0e-5;
-
-const BACKGROUND_BOTTOM: Color = Color::new(0.06, 0.08, 0.16);
-const BACKGROUND_TOP: Color = Color::new(0.48, 0.68, 0.92);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RenderError {
@@ -40,6 +38,7 @@ impl Renderer {
         camera: &OrbitalCamera,
         scene: &Scene,
         lighting: &Lighting,
+        environment: &Environment,
         framebuffer: &mut Framebuffer,
     ) -> Result<(), RenderError> {
         let width = framebuffer.width();
@@ -58,7 +57,7 @@ impl Renderer {
                     .ok_or(RenderError::PrimaryRayGenerationFailed)?;
                 let color = match scene.closest_hit(ray, PRIMARY_RAY_T_MIN, f32::INFINITY) {
                     Some(hit) => shade_hit(scene, hit, camera.position(), *lighting)?,
-                    None => background(v),
+                    None => environment.sample(ray.direction()),
                 };
 
                 framebuffer.set_pixel(x, y, color);
@@ -118,10 +117,6 @@ fn pixel_center(x: usize, y: usize, width: usize, height: usize) -> (f32, f32) {
     )
 }
 
-fn background(v: f32) -> Color {
-    BACKGROUND_BOTTOM.lerp(BACKGROUND_TOP, 1.0 - v)
-}
-
 #[cfg(test)]
 mod tests {
     use std::f32::consts::FRAC_PI_2;
@@ -129,6 +124,7 @@ mod tests {
     use super::{RAY_ORIGIN_BIAS, RenderError, Renderer, pixel_center, shade_hit};
     use crate::{
         camera::OrbitalCamera,
+        environment::Environment,
         geometry::Aabb,
         lighting::{AmbientLight, DirectionalLight, Lighting},
         material::{Material, MaterialId, Texture, TextureId, TextureSelection},
@@ -157,6 +153,10 @@ mod tests {
             AmbientLight::try_new(Color::WHITE, 0.2).unwrap(),
             DirectionalLight::try_new(Vec3::new(0.0, 1.0, 0.0), Color::WHITE, 1.0).unwrap(),
         )
+    }
+
+    fn environment() -> Environment {
+        Environment::sunset()
     }
 
     fn add_solid_material(scene: &mut Scene, color: Color) -> MaterialId {
@@ -201,7 +201,30 @@ mod tests {
     }
 
     #[test]
-    fn tiny_render_contains_hit_and_background_pixels() {
+    fn scene_miss_uses_world_space_environment_sample() {
+        let camera = OrbitalCamera::try_new(Vec3::ZERO, 0.0, 0.0, 5.0, FRAC_PI_2, 1.0).unwrap();
+        let scene = Scene::new();
+        let environment = environment();
+        let mut framebuffer = Framebuffer::try_new(1, 1).unwrap();
+        let center_direction = camera.ray_for_viewport(0.5, 0.5).unwrap().direction();
+
+        Renderer::render(
+            &camera,
+            &scene,
+            &ambient_only(),
+            &environment,
+            &mut framebuffer,
+        )
+        .unwrap();
+
+        assert_eq!(
+            framebuffer.pixel(0, 0),
+            Some(environment.sample(center_direction))
+        );
+    }
+
+    #[test]
+    fn scene_hit_still_uses_material_and_lighting_pipeline() {
         let camera = OrbitalCamera::try_new(Vec3::ZERO, 0.0, 0.0, 5.0, FRAC_PI_2, 1.0).unwrap();
         let mut scene = Scene::new();
         let red = add_solid_material(&mut scene, Color::new(1.0, 0.0, 0.0));
@@ -211,7 +234,14 @@ mod tests {
         ));
         let mut framebuffer = Framebuffer::try_new(3, 3).unwrap();
 
-        Renderer::render(&camera, &scene, &ambient_only(), &mut framebuffer).unwrap();
+        Renderer::render(
+            &camera,
+            &scene,
+            &ambient_only(),
+            &environment(),
+            &mut framebuffer,
+        )
+        .unwrap();
 
         assert_eq!(framebuffer.pixel(1, 1), Some(Color::new(1.0, 0.0, 0.0)));
         assert_ne!(framebuffer.pixel(0, 0), framebuffer.pixel(1, 1));
@@ -233,7 +263,14 @@ mod tests {
         ));
         let mut framebuffer = Framebuffer::try_new(5, 5).unwrap();
 
-        Renderer::render(&camera, &scene, &ambient_only(), &mut framebuffer).unwrap();
+        Renderer::render(
+            &camera,
+            &scene,
+            &ambient_only(),
+            &environment(),
+            &mut framebuffer,
+        )
+        .unwrap();
 
         assert_eq!(framebuffer.pixel(1, 2), Some(Color::new(1.0, 0.0, 0.0)));
         assert_eq!(framebuffer.pixel(3, 2), Some(Color::new(0.0, 0.0, 1.0)));
@@ -273,7 +310,14 @@ mod tests {
         ));
         let mut framebuffer = Framebuffer::try_new(2, 2).unwrap();
 
-        Renderer::render(&camera, &scene, &ambient_only(), &mut framebuffer).unwrap();
+        Renderer::render(
+            &camera,
+            &scene,
+            &ambient_only(),
+            &environment(),
+            &mut framebuffer,
+        )
+        .unwrap();
 
         assert_eq!(framebuffer.pixel(0, 0), Some(Color::new(1.0, 0.0, 0.0)));
         assert_eq!(framebuffer.pixel(1, 0), Some(Color::new(0.0, 1.0, 0.0)));
@@ -590,7 +634,13 @@ mod tests {
         let mut framebuffer = Framebuffer::try_new(4, 2).unwrap();
 
         assert_eq!(
-            Renderer::render(&camera, &scene, &ambient_only(), &mut framebuffer),
+            Renderer::render(
+                &camera,
+                &scene,
+                &ambient_only(),
+                &environment(),
+                &mut framebuffer,
+            ),
             Err(RenderError::AspectRatioMismatch)
         );
     }
@@ -606,7 +656,13 @@ mod tests {
         let mut framebuffer = Framebuffer::try_new(3, 3).unwrap();
 
         assert_eq!(
-            Renderer::render(&camera, &scene, &ambient_only(), &mut framebuffer),
+            Renderer::render(
+                &camera,
+                &scene,
+                &ambient_only(),
+                &environment(),
+                &mut framebuffer,
+            ),
             Err(RenderError::MaterialNotFound)
         );
     }
@@ -634,7 +690,13 @@ mod tests {
         let mut framebuffer = Framebuffer::try_new(3, 3).unwrap();
 
         assert_eq!(
-            Renderer::render(&camera, &scene, &ambient_only(), &mut framebuffer),
+            Renderer::render(
+                &camera,
+                &scene,
+                &ambient_only(),
+                &environment(),
+                &mut framebuffer,
+            ),
             Err(RenderError::TextureNotFound)
         );
     }

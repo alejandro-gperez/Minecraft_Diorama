@@ -8,16 +8,16 @@ Minecraft-inspired EggWars diorama, drawing on the visual language of the classi
 bridges, damaged defenses, opened chests, exposed resources, and lava beneath a sunset-to-night
 sky.
 
-Phase 1 provides the correct, testable 3D foundation and a small debug scene. Phase 2 feature
-implementation is complete and has been audited; the larger EggWars world and advanced optical
-effects remain planned work.
+Phase 1 provides the correct, testable 3D foundation and Phase 2 provides the audited surface and
+lighting system. Phase 3 is underway with a procedural sunset/night environment; recursive rays
+and the larger EggWars world remain planned work.
 
 ## Current Status
 
-Phase 1 — Core Raytracer — is complete. Phase 2 — Materials, Textures, and Lighting — feature
-implementation is complete. Classic block textures, CPU-side material selection, direct lighting,
-hard directional-light shadows, and the five canonical rubric materials are integrated. This
-repository has not been advanced to Phase 3.
+Phase 1 — Core Raytracer — and Phase 2 — Materials, Textures, and Lighting — are complete and
+audited. Phase 3 — Raytracing Effects — is underway. Primary-ray misses now sample a project-owned
+procedural sunset/night environment in world space; recursive reflection and refraction are not
+implemented yet.
 
 The current implementation includes:
 
@@ -27,7 +27,8 @@ The current implementation includes:
 - an orbital camera with yaw, pitch, zoom, and perspective ray generation;
 - a CPU-owned framebuffer;
 - closest-hit traversal over a small scene of AABBs;
-- deterministic background shading;
+- deterministic world-space sunset/night environment sampling;
+- procedural sun, sparse seeded stars, and a dark lower-hemisphere void;
 - binary PPM output;
 - Raylib presentation of the CPU-generated framebuffer;
 - interactive orbital rotation and zoom;
@@ -56,7 +57,7 @@ Runtime PPM assets -> TextureRegistry -> Material / MaterialId
                          Scene -> AABB -> SceneHit + CubeFace + UV
                                       |
                                       v
-                    OrbitalCamera + Lighting -> CPU Renderer
+       OrbitalCamera + Lighting + Environment -> CPU Renderer
                                                    |
                                                    v
                                            CPU Framebuffer
@@ -68,6 +69,24 @@ Runtime PPM assets -> TextureRegistry -> Material / MaterialId
 Raylib does not perform raytracing or render the 3D scene. It is isolated to the application
 boundary and currently handles window creation, keyboard/mouse input, frame timing, and display
 of the framebuffer produced by the CPU renderer. Core modules do not expose Raylib types.
+
+## Procedural Environment
+
+Primary-ray misses are colored by `Environment::sample(world_direction)`. The horizon follows
+world `+Y`, so camera orbit does not move the palette, sun, or stars. A 96-band piecewise gradient
+transitions from a cool lower void through orange/magenta sunset colors into violet and deep navy.
+The subtle direction-based quantization is independent of framebuffer resolution.
+
+The visible sun uses `normalize(0.6, 0.2, 0.8)`, approximately
+`(0.588, 0.196, 0.784)`. It shares the directional light's X/Z azimuth while staying lower for
+the sunset composition; the Phase 2 light itself remains at its established higher elevation.
+A dot-product threshold creates the disc and a wider smooth threshold creates its glow.
+
+Sparse stars use a fixed seed, `0xE6677A2D`, and a hash of quantized world-direction cells. There
+is no stored star collection or mutable RNG, so sampling is deterministic and allocation-free.
+Stars are restricted to the darker upper sky. The environment uses no cubemap, image skybox,
+filesystem access, Raylib sky API, shader, or GPU rendering. The same sampler is ready for future
+secondary-ray misses, but Mission 14 does not launch secondary rays.
 
 ## Controls
 
@@ -160,22 +179,22 @@ CPU raytrace duration and presentation FPS are separate measurements. The applic
 only after startup or a camera change, while Raylib continues presenting the current texture
 each window frame.
 
-On the current development machine, the 320×180 canonical-material showcase with directional
-lighting and hard shadows rendered in approximately 3.10 ms in the latest audit release startup;
-an earlier showcase startup measured 3.24 ms. The earlier hard-shadow comparison runs measured
-3.57 ms, 2.77 ms, and 2.93 ms. These small samples are useful as local sanity checks, not formal
-benchmarks; later phases will substantially increase scene complexity.
+On the current development machine, four 320×180 release startups with the procedural environment
+measured approximately 2.83 ms, 2.82 ms, 2.80 ms, and 2.77 ms. The Phase 2 baseline was roughly
+3.1–3.3 ms. Because the diagnostic camera and miss coverage changed, this is only a regression
+sanity check—not evidence of an optimization or a formal benchmark.
 
 ## Testing
 
-The current suite contains 150 tests covering vector arithmetic and normalization, ray invariants,
+The current suite contains 158 tests covering vector arithmetic and normalization, ray invariants,
 AABB construction and edge cases, camera basis/ray generation/orbit limits, texture sampling and
 registration, P6 parsing and malformed input, material face selection, cube-face UV orientation,
 scene closest-hit behavior, ambient/Lambert/Blinn-Phong behavior, renderer lighting and texture
 resolution, canonical material registration and texture selection, shadow-ray occlusion and origin
-bias, framebuffer and color conversion, PPM output, and presentation-independent camera and RGBA
-conversion helpers. During Phase 2 every AABB is an opaque shadow blocker, including materials
-whose transparency value is reserved for Phase 3.
+bias, procedural environment regions, sun, stars, invalid directions, renderer miss integration,
+framebuffer and color conversion, PPM output, and presentation-independent camera and RGBA
+conversion helpers. Every AABB remains an opaque shadow blocker, including materials whose
+transparency behavior belongs to a later Phase 3 mission.
 
 The audit validation also regenerates the runtime assets with `scripts/prepare_assets.sh`, then
 runs `cargo fmt --check`, `cargo test`, `cargo check`, `cargo build --release`, and
@@ -197,7 +216,6 @@ The following belong to later phases and are not yet implemented:
 
 - reflection, refraction, and normal mapping;
 - emissive lava;
-- a sunset/night skybox;
 - deterministic procedural 16×16 floating islands and configurable seeds;
 - ores and the EggWars battle-aftermath scene;
 - a voxel grid and 3D DDA traversal;
@@ -213,7 +231,7 @@ The following belong to later phases and are not yet implemented:
 | Five textured materials | Canonical definitions and temporary five-material showcase implemented |
 | Lighting, shadows, reflection, refraction | Direct lighting and hard shadows implemented; advanced effects planned |
 | Normal mapping and emissive lava | Planned |
-| Sunset/night skybox | Planned |
+| Sunset/night skybox/environment | Procedural CPU environment implemented; secondary-ray integration planned |
 | Procedural floating-island terrain | Planned |
 | Voxel traversal and parallel rendering | Planned |
 
