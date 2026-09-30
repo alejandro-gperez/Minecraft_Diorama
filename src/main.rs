@@ -8,7 +8,9 @@ use app::run;
 use camera::OrbitalCamera;
 use geometry::Aabb;
 use lighting::{AmbientLight, DirectionalLight, Lighting};
-use material::{Material, MaterialId, PpmLoadError, TextureId, TextureSelection, load_ppm};
+use material::{
+    CanonicalTextureIds, PpmLoadError, TextureId, load_ppm, register_canonical_materials,
+};
 use math::Vec3;
 use render::{Color, Framebuffer};
 use scene::{Scene, SceneObject};
@@ -63,51 +65,37 @@ fn phase2_test_scene() -> Result<Scene, PpmLoadError> {
     let mut scene = Scene::with_capacity(5);
 
     let texture_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/textures");
-    let grass_top = register_texture(&mut scene, &texture_directory, "grass_top.ppm")?;
-    let grass_side = register_texture(&mut scene, &texture_directory, "grass_side.ppm")?;
-    let dirt = register_texture(&mut scene, &texture_directory, "dirt.ppm")?;
-    let cobblestone = register_texture(&mut scene, &texture_directory, "cobblestone.ppm")?;
-    let obsidian = register_texture(&mut scene, &texture_directory, "obsidian.ppm")?;
-    let _glass = register_texture(&mut scene, &texture_directory, "glass.ppm")?;
-    let _lava = register_texture(&mut scene, &texture_directory, "lava.ppm")?;
-    let _coal = register_texture(&mut scene, &texture_directory, "coal_ore.ppm")?;
-    let _iron = register_texture(&mut scene, &texture_directory, "iron_ore.ppm")?;
-    let gold = register_texture(&mut scene, &texture_directory, "gold_ore.ppm")?;
-    let diamond = register_texture(&mut scene, &texture_directory, "diamond_ore.ppm")?;
-
-    let ground = add_material(
-        &mut scene,
-        TextureSelection::TopSideBottom {
-            top: grass_top,
-            side: grass_side,
-            bottom: dirt,
-        },
-        0.05,
-    );
-    let cobblestone = add_material(&mut scene, TextureSelection::Uniform(cobblestone), 0.12);
-    let diamond = add_material(&mut scene, TextureSelection::Uniform(diamond), 0.25);
-    let gold = add_material(&mut scene, TextureSelection::Uniform(gold), 0.30);
-    let obsidian = add_material(&mut scene, TextureSelection::Uniform(obsidian), 0.65);
+    let textures = CanonicalTextureIds {
+        grass_top: register_texture(&mut scene, &texture_directory, "grass_top.ppm")?,
+        grass_side: register_texture(&mut scene, &texture_directory, "grass_side.ppm")?,
+        dirt: register_texture(&mut scene, &texture_directory, "dirt.ppm")?,
+        cobblestone: register_texture(&mut scene, &texture_directory, "cobblestone.ppm")?,
+        obsidian: register_texture(&mut scene, &texture_directory, "obsidian.ppm")?,
+        glass: register_texture(&mut scene, &texture_directory, "glass.ppm")?,
+        lava: register_texture(&mut scene, &texture_directory, "lava.ppm")?,
+    };
+    let materials = register_canonical_materials(&mut scene, textures)
+        .expect("canonical Phase 2 materials must be valid and fit MaterialId");
 
     scene.add(SceneObject::new(
         Aabb::try_new(Vec3::new(-4.0, -0.5, -3.0), Vec3::new(4.0, 0.0, 3.0)).unwrap(),
-        ground,
+        materials.grass,
     ));
     scene.add(SceneObject::new(
-        Aabb::try_new(Vec3::new(-0.8, 0.0, -0.8), Vec3::new(0.8, 1.6, 0.8)).unwrap(),
-        cobblestone,
+        Aabb::try_new(Vec3::new(-2.8, 0.0, -0.2), Vec3::new(-1.6, 1.4, 1.0)).unwrap(),
+        materials.cobblestone,
     ));
     scene.add(SceneObject::new(
-        Aabb::try_new(Vec3::new(-2.3, 0.0, -0.2), Vec3::new(-1.2, 1.0, 0.9)).unwrap(),
-        diamond,
+        Aabb::try_new(Vec3::new(-1.3, 0.0, -0.6), Vec3::new(-0.1, 1.8, 0.6)).unwrap(),
+        materials.obsidian,
     ));
     scene.add(SceneObject::new(
-        Aabb::try_new(Vec3::new(1.2, 0.0, -1.4), Vec3::new(2.2, 2.2, -0.4)).unwrap(),
-        gold,
+        Aabb::try_new(Vec3::new(0.2, 0.0, -0.2), Vec3::new(1.4, 1.6, 1.0)).unwrap(),
+        materials.glass,
     ));
     scene.add(SceneObject::new(
-        Aabb::try_new(Vec3::new(-0.3, 0.0, -2.4), Vec3::new(0.7, 2.0, -1.4)).unwrap(),
-        obsidian,
+        Aabb::try_new(Vec3::new(1.7, 0.0, -0.8), Vec3::new(2.9, 1.3, 0.4)).unwrap(),
+        materials.lava,
     ));
 
     Ok(scene)
@@ -122,13 +110,4 @@ fn register_texture(
     Ok(scene
         .add_texture(texture)
         .expect("prepared texture count must fit TextureId"))
-}
-
-fn add_material(scene: &mut Scene, textures: TextureSelection, specular: f32) -> MaterialId {
-    scene
-        .add_material(
-            Material::try_new(textures, Color::WHITE, specular, 0.0, 0.0)
-                .expect("test-scene material must be valid"),
-        )
-        .expect("test-scene material count must fit MaterialId")
 }

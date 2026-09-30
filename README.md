@@ -15,8 +15,7 @@ larger EggWars world and advanced optical effects are planned work, not current 
 
 Phase 1 — Core Raytracer — is complete. Phase 2 — Materials, Textures, and Lighting — is now
 underway. Classic block textures, CPU-side material selection, and initial direct lighting are
-integrated, including hard directional-light shadows; final optical tuning remains future Phase
-2 work.
+integrated, including hard directional-light shadows and the five canonical rubric materials.
 
 The current implementation includes:
 
@@ -40,6 +39,7 @@ The current implementation includes:
 - face-aware, local AABB UV coordinates propagated directly from slab intersections;
 - CPU ambient, Lambert diffuse, and Blinn-Phong specular lighting from one directional light.
 - CPU hard shadows using biased secondary rays and early-exit scene occlusion queries.
+- centralized, ID-based definitions for grass, cobblestone, obsidian, glass, and lava.
 
 ## Architecture
 
@@ -127,6 +127,25 @@ the `255` maximum channel value, and exact RGB payload size before registering t
 store compact texture IDs rather than owning or cloning texture data. Raylib is not used to load
 or sample surface textures.
 
+## Canonical Materials
+
+The temporary Phase 2 showcase displays all five rubric materials simultaneously. Their optical
+parameters are registered once at startup and resolved during rendering through compact
+`MaterialId` and `TextureId` values; shading performs no string lookup or per-hit allocation.
+
+| Material | Texture appearance | Albedo | Specular | Transparency | Reflectivity | Future special effect |
+| --- | --- | --- | ---: | ---: | ---: | --- |
+| Grass | `grass_top` / `grass_side` / `dirt` | `(1.00, 1.00, 1.00)` | 0.05 | 0.00 | 0.02 | None required |
+| Cobblestone | `cobblestone` on all faces | `(1.00, 1.00, 1.00)` | 0.08 | 0.00 | 0.03 | Normal mapping planned |
+| Obsidian | `obsidian` on all faces | `(0.90, 0.90, 1.00)` | 0.55 | 0.00 | 0.35 | Reflection planned |
+| Glass | `glass` on all faces | `(0.90, 0.97, 1.00)` | 0.80 | 0.85 | 0.15 | Refraction planned |
+| Lava | `lava` on all faces | `(1.00, 0.95, 0.90)` | 0.10 | 0.00 | 0.05 | Emission planned |
+
+Phase 2 stores all parameters but only texture, albedo, and specular currently affect shading.
+Glass remains opaque to primary and shadow rays; obsidian does not launch reflection rays; lava
+does not emit light; and cobblestone still uses its geometric AABB normal. Refraction, reflection,
+emission, and normal mapping remain Phase 3 work.
+
 ## Performance
 
 CPU raytrace duration and presentation FPS are separate measurements. The application rerenders
@@ -140,13 +159,14 @@ formal benchmark; later phases will substantially increase scene complexity.
 
 ## Testing
 
-The current suite contains 147 tests covering vector arithmetic and normalization, ray invariants,
+The current suite contains 150 tests covering vector arithmetic and normalization, ray invariants,
 AABB construction and edge cases, camera basis/ray generation/orbit limits, texture sampling and
 registration, P6 parsing and malformed input, material face selection, cube-face UV orientation,
 scene closest-hit behavior, ambient/Lambert/Blinn-Phong behavior, renderer lighting and texture
-resolution, shadow-ray occlusion and origin bias, framebuffer and color conversion, PPM output,
-and presentation-independent camera and RGBA conversion helpers. During Phase 2 every AABB is an
-opaque shadow blocker, including materials whose transparency value is reserved for Phase 3.
+resolution, canonical material registration and texture selection, shadow-ray occlusion and origin
+bias, framebuffer and color conversion, PPM output, and presentation-independent camera and RGBA
+conversion helpers. During Phase 2 every AABB is an opaque shadow blocker, including materials
+whose transparency value is reserved for Phase 3.
 
 ## Project Constraints
 
@@ -162,7 +182,6 @@ opaque shadow blocker, including materials whose transparency value is reserved 
 
 The following belong to later phases and are not yet implemented:
 
-- final optical tuning for the five primary textured materials;
 - reflection, refraction, and normal mapping;
 - emissive lava;
 - a sunset/night skybox;
@@ -178,7 +197,7 @@ The following belong to later phases and are not yet implemented:
 | --- | --- |
 | 3D CPU raytracing foundation | Implemented in Phase 1 |
 | Orbital viewing and zoom | Implemented in Phase 1 |
-| Five textured materials | Asset infrastructure and temporary visual-validation materials implemented |
+| Five textured materials | Canonical definitions and temporary five-material showcase implemented |
 | Lighting, shadows, reflection, refraction | Direct lighting and hard shadows implemented; advanced effects planned |
 | Normal mapping and emissive lava | Planned |
 | Sunset/night skybox | Planned |
