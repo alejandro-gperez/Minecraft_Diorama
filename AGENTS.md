@@ -1202,7 +1202,9 @@ At the initial repository state:
 
 Only implement work belonging to the current phase unless the user explicitly requests otherwise.
 
-When Phase 1 is accepted as complete, this section may be updated to Phase 2 in a dedicated documentation commit.
+# 29. Current Phase
+
+Before starting work, determine the current project phase.
 
 ## Phase 1: Core Raytracer
 
@@ -1217,8 +1219,7 @@ Phase 1 established and validated:
 - orbital 3D camera with zoom;
 - perspective primary-ray generation;
 - CPU-owned framebuffer;
-- simple closest-hit scene traversal;
-- basic debug shading;
+- closest-hit scene traversal;
 - deterministic background rendering;
 - PPM image export;
 - isolated Raylib presentation/input layer;
@@ -1227,42 +1228,111 @@ Phase 1 established and validated:
 - CPU render timing;
 - automated mathematical, geometric, camera, scene, rendering, and presentation-boundary tests.
 
-Phase 1 has passed automated validation, manual interactive testing, and a dedicated architecture/documentation audit.
+Phase 1 passed automated validation, manual interactive testing, and a dedicated architecture/documentation audit.
 
-Do not reopen or redesign Phase 1 systems without a concrete correctness issue or an explicit architectural requirement from a later phase.
+Do not reopen or redesign Phase 1 systems without a concrete correctness issue or an explicit requirement from a later phase.
+
+## Phase 2: Materials, Textures, and Lighting
+
+**STATUS: COMPLETE**
+
+Phase 2 established and validated:
+
+- CPU-owned texture representation;
+- nearest-neighbor texture sampling;
+- compact `TextureId` and `MaterialId` identities;
+- centralized texture and material ownership;
+- explicit six-face `CubeFace` representation;
+- local AABB UV mapping;
+- translated and non-unit AABB texture support;
+- offline source-PNG to runtime-PPM asset preparation;
+- project-owned P6 PPM loading;
+- original classic Minecraft texture assets;
+- deterministic fixed grass tint derived from the Minecraft grass colormap;
+- per-face texture selection;
+- five canonical rubric materials;
+- ambient illumination;
+- Lambert diffuse lighting;
+- Blinn-Phong specular lighting;
+- one warm directional light;
+- CPU-raytraced hard shadows;
+- early-exit shadow occlusion queries;
+- explicit secondary-ray origin bias;
+- documented material and rendering architecture.
+
+The five canonical materials are:
+
+- Grass;
+- Cobblestone;
+- Obsidian;
+- Glass;
+- Lava.
+
+Each canonical material deliberately defines:
+
+- texture appearance;
+- albedo;
+- specular;
+- transparency;
+- reflectivity.
+
+Phase 2 passed automated validation, runtime validation, visual inspection, and a dedicated architecture/documentation audit.
+
+Stored optical parameters do not imply that their Phase 3 effects are already implemented.
+
+At the end of Phase 2:
+
+- cobblestone still uses geometric normals;
+- obsidian stores reflectivity but does not launch reflection rays;
+- glass stores transparency but remains opaque and non-refractive;
+- lava is textured but non-emissive;
+- no skybox/environment mapping exists.
+
+Do not reopen or redesign Phase 2 systems without a concrete correctness issue or an explicit Phase 3 requirement.
 
 ## Current Phase
 
-**CURRENT PHASE: PHASE 2 - MATERIALS, TEXTURES, LIGHTING**
+**CURRENT PHASE: PHASE 3 - RAYTRACING EFFECTS**
 
-Phase 2 introduces the visual surface system while preserving all Phase 1 architectural boundaries.
+Phase 3 activates the advanced raytracing behavior deliberately prepared by the previous phases.
 
-Phase 2 work should focus on:
+Phase 3 should focus on:
 
-- separation between block identity and optical material behavior;
-- CPU-side texture representation;
-- original Minecraft pixel texture assets loaded through project-owned CPU texture code;
-- cube-face UV mapping;
-- material parameters;
-- basic direct lighting;
-- shadows;
-- visually distinct surface behavior.
-
-Do not implement Phase 3 raytracing effects early.
-
-In particular, Phase 2 must NOT prematurely implement:
-
-- recursive reflection;
+- skybox/environment sampling;
+- recursive/secondary ray infrastructure;
+- reflection;
 - refraction;
-- normal mapping;
-- emissive lighting;
-- skybox/environment mapping.
+- index of refraction;
+- Fresnel behavior where appropriate;
+- emissive materials;
+- normal mapping.
 
-Those belong to Phase 3.
+These effects must be visibly and intentionally demonstrated in the final scene.
 
-Likewise, do not implement Phase 4 performance architecture or Phase 5 procedural EggWars world generation early.
+Phase 3 must preserve:
 
-Incremental phase boundaries remain intentional.
+- CPU-only rendering;
+- project-owned raytracing calculations;
+- Raylib presentation isolation;
+- deterministic material/texture ownership;
+- existing camera behavior;
+- existing lighting and hard-shadow behavior unless an advanced effect explicitly requires extension.
+
+Do not prematurely implement Phase 4 performance architecture.
+
+In particular, Phase 3 must NOT introduce:
+
+- voxel-grid traversal;
+- 3D DDA;
+- tile-based multithreading;
+- speculative SIMD optimization;
+- procedural EggWars terrain.
+
+Those belong to later phases.
+
+Do not prematurely construct the final EggWars arena during Phase 3.
+
+Use small diagnostic/showcase scenes to validate advanced effects before integrating them into the procedural world.
 
 ---
 
