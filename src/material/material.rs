@@ -17,6 +17,12 @@ impl MaterialId {
     }
 }
 
+/// Index of refraction of the air surrounding every scene object.
+///
+/// Also the neutral index for materials that do not transmit light: with `transparency == 0` no
+/// refracted ray is ever traced, so their index has no optical effect.
+pub const AIR_IOR: f32 = 1.0;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Material {
     textures: TextureSelection,
@@ -24,6 +30,7 @@ pub struct Material {
     specular: f32,
     transparency: f32,
     reflectivity: f32,
+    ior: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,7 +81,14 @@ impl Material {
             specular,
             transparency,
             reflectivity,
+            ior: AIR_IOR,
         })
+    }
+
+    /// Returns this material with the given index of refraction, or `None` unless it is finite
+    /// and strictly positive. Invalid indices are rejected rather than clamped.
+    pub fn with_ior(self, ior: f32) -> Option<Self> {
+        (ior.is_finite() && ior > 0.0).then_some(Self { ior, ..self })
     }
 
     pub const fn textures(&self) -> TextureSelection {
@@ -97,6 +111,10 @@ impl Material {
         self.reflectivity
     }
 
+    pub const fn ior(&self) -> f32 {
+        self.ior
+    }
+
     /// Applies the material tint to a sampled texture color component by component.
     pub fn surface_color(&self, texture_sample: Color) -> Color {
         texture_sample * self.albedo
@@ -113,7 +131,7 @@ fn color_is_normalized(color: Color) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Material, MaterialId, TextureSelection};
+    use super::{AIR_IOR, Material, MaterialId, TextureSelection};
     use crate::{color::Color, geometry::CubeFace, material::TextureId};
 
     const TEXTURE_ID: TextureId = TextureId::new(7);
@@ -217,6 +235,56 @@ mod tests {
         assert!(material_with(Color::new(-0.1, 0.0, 0.0), 0.0, 0.0, 0.0).is_none());
         assert!(material_with(Color::new(0.0, 1.1, 0.0), 0.0, 0.0, 0.0).is_none());
         assert!(material_with(Color::new(0.0, 0.0, f32::NAN), 0.0, 0.0, 0.0).is_none());
+    }
+
+    #[test]
+    fn new_materials_default_to_the_air_index_of_refraction() {
+        assert_eq!(AIR_IOR, 1.0);
+        assert_eq!(
+            material_with(Color::WHITE, 0.0, 0.0, 0.0).unwrap().ior(),
+            AIR_IOR
+        );
+    }
+
+    #[test]
+    fn accepts_valid_index_of_refraction_and_retains_other_properties() {
+        let material = material_with(Color::new(0.5, 1.0, 0.25), 0.3, 0.1, 0.2)
+            .unwrap()
+            .with_ior(1.33)
+            .unwrap();
+
+        assert_eq!(material.ior(), 1.33);
+        assert_eq!(material.textures(), TextureSelection::Uniform(TEXTURE_ID));
+        assert_eq!(material.albedo(), Color::new(0.5, 1.0, 0.25));
+        assert_eq!(material.specular(), 0.3);
+        assert_eq!(material.transparency(), 0.1);
+        assert_eq!(material.reflectivity(), 0.2);
+    }
+
+    #[test]
+    fn accepts_unit_and_glass_indices_of_refraction() {
+        let base = material_with(Color::WHITE, 0.0, 0.0, 0.0).unwrap();
+
+        assert_eq!(base.clone().with_ior(1.0).unwrap().ior(), 1.0);
+        assert_eq!(base.with_ior(1.5).unwrap().ior(), 1.5);
+    }
+
+    #[test]
+    fn rejects_zero_and_negative_indices_of_refraction() {
+        let base = material_with(Color::WHITE, 0.0, 0.0, 0.0).unwrap();
+
+        assert!(base.clone().with_ior(0.0).is_none());
+        assert!(base.clone().with_ior(-0.0).is_none());
+        assert!(base.with_ior(-1.5).is_none());
+    }
+
+    #[test]
+    fn rejects_nan_and_infinite_indices_of_refraction() {
+        let base = material_with(Color::WHITE, 0.0, 0.0, 0.0).unwrap();
+
+        assert!(base.clone().with_ior(f32::NAN).is_none());
+        assert!(base.clone().with_ior(f32::INFINITY).is_none());
+        assert!(base.with_ior(f32::NEG_INFINITY).is_none());
     }
 
     #[test]

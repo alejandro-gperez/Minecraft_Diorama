@@ -62,6 +62,35 @@ impl Vec3 {
         self - normal * (2.0 * self.dot(normal))
     }
 
+    /// Bends the unit direction `self` through an interface by Snell's law.
+    ///
+    /// `normal` is the unit interface normal oriented against `self` (`self·normal <= 0`), and
+    /// `eta = eta_i / eta_t` is the ratio of the incident to the transmitted index of refraction.
+    /// With `cos_i = -self·normal` and `sin²_t = eta²(1 - cos_i²)`, the transmitted direction is
+    /// `eta * self + (eta * cos_i - cos_t) * normal`.
+    ///
+    /// Returns `None` on total internal reflection (`sin²_t > 1`), for a normal facing along
+    /// `self`, for a non-finite or non-positive `eta`, or when the result cannot be normalized.
+    pub fn refract(self, normal: Self, eta: f32) -> Option<Self> {
+        if !eta.is_finite() || eta <= 0.0 {
+            return None;
+        }
+
+        let cos_i = -self.dot(normal);
+        if !cos_i.is_finite() || cos_i < 0.0 {
+            return None;
+        }
+
+        let sin_squared_t = eta * eta * (1.0 - cos_i * cos_i);
+        if sin_squared_t > 1.0 {
+            // Total internal reflection: no transmitted direction exists.
+            return None;
+        }
+
+        let cos_t = (1.0 - sin_squared_t).sqrt();
+        (self * eta + normal * (eta * cos_i - cos_t)).try_normalized()
+    }
+
     pub fn is_finite(self) -> bool {
         self.x.is_finite() && self.y.is_finite() && self.z.is_finite()
     }
@@ -160,6 +189,121 @@ mod tests {
         assert_approx_eq(reflected.x, incident.x);
         assert_approx_eq(reflected.z, incident.z);
         assert_approx_eq(reflected.y, -incident.y);
+    }
+
+    const AIR_TO_GLASS: f32 = 1.0 / 1.5;
+    const GLASS_TO_AIR: f32 = 1.5;
+    const UP: Vec3 = Vec3::new(0.0, 1.0, 0.0);
+
+    /// Sine of the angle between a unit direction and the unit normal of a surface.
+    fn sine_to_normal(direction: Vec3, normal: Vec3) -> f32 {
+        direction.cross(normal).length()
+    }
+
+    fn assert_unit_and_finite(vector: Vec3) {
+        assert!(vector.is_finite());
+        assert_approx_eq(vector.length(), 1.0);
+    }
+
+    #[test]
+    fn refract_passes_normal_incidence_straight_through_in_both_directions() {
+        let down = Vec3::new(0.0, -1.0, 0.0);
+
+        for eta in [AIR_TO_GLASS, GLASS_TO_AIR] {
+            let transmitted = down.refract(UP, eta).unwrap();
+            assert_vec_approx_eq(transmitted, down);
+            assert_unit_and_finite(transmitted);
+        }
+    }
+
+    #[test]
+    fn refract_bends_toward_the_normal_entering_denser_medium() {
+        // 45 degrees in air: sin_t = sin(45°) / 1.5 = 0.4714045.
+        let incident = Vec3::new(1.0, -1.0, 0.0).try_normalized().unwrap();
+        let transmitted = incident.refract(UP, AIR_TO_GLASS).unwrap();
+        let sin_t = std::f32::consts::FRAC_1_SQRT_2 / 1.5;
+
+        assert_vec_approx_eq(
+            transmitted,
+            Vec3::new(sin_t, -(1.0 - sin_t * sin_t).sqrt(), 0.0),
+        );
+        assert!(sine_to_normal(transmitted, UP) < sine_to_normal(incident, UP));
+        assert_unit_and_finite(transmitted);
+    }
+
+    #[test]
+    fn refract_bends_away_from_the_normal_leaving_denser_medium() {
+        // sin_i = 0.4 inside glass leaves into air at sin_t = 1.5 * 0.4 = 0.6, i.e. (0.6, -0.8).
+        let incident = Vec3::new(0.4, -(0.84_f32).sqrt(), 0.0);
+        let transmitted = incident.refract(UP, GLASS_TO_AIR).unwrap();
+
+        assert_vec_approx_eq(transmitted, Vec3::new(0.6, -0.8, 0.0));
+        assert!(sine_to_normal(transmitted, UP) > sine_to_normal(incident, UP));
+        assert_unit_and_finite(transmitted);
+    }
+
+    #[test]
+    fn refract_satisfies_snells_law_in_the_plane_of_incidence() {
+        let normal = Vec3::new(1.0, 2.0, 3.0).try_normalized().unwrap();
+        let tangent = Vec3::new(3.0, 0.0, -1.0).try_normalized().unwrap();
+        assert_approx_eq(tangent.dot(normal), 0.0);
+
+        for (n_i, n_t) in [(1.0, 1.5), (1.5, 1.0), (1.0, 1.33), (1.2, 1.2)] {
+            for sin_i in [0.0_f32, 0.1, 0.35, 0.6] {
+                let cos_i = (1.0 - sin_i * sin_i).sqrt();
+                let incident = tangent * sin_i - normal * cos_i;
+                let transmitted = incident.refract(normal, n_i / n_t).unwrap();
+
+                assert_unit_and_finite(transmitted);
+                assert!(
+                    (n_i * sine_to_normal(incident, normal)
+                        - n_t * sine_to_normal(transmitted, normal))
+                    .abs()
+                        <= 1.0e-5
+                );
+                // Coplanar with the incident ray and normal, still crossing the interface, and
+                // with its tangential component on the same side.
+                assert_approx_eq(incident.cross(normal).dot(transmitted), 0.0);
+                assert!(transmitted.dot(normal) < 0.0);
+                assert!(transmitted.dot(tangent) >= -EPSILON);
+            }
+        }
+    }
+
+    #[test]
+    fn refract_reports_total_internal_reflection_beyond_critical_angle() {
+        // Glass to air: the critical angle has sin_c = 1 / 1.5.
+        let incident = Vec3::new(1.0, -1.0, 0.0).try_normalized().unwrap();
+        assert_eq!(incident.refract(UP, GLASS_TO_AIR), None);
+
+        let at = |sin_i: f32| Vec3::new(sin_i, -(1.0 - sin_i * sin_i).sqrt(), 0.0);
+        let critical = 1.0 / 1.5;
+        assert!(at(critical - 1.0e-3).refract(UP, GLASS_TO_AIR).is_some());
+        assert_eq!(at(critical + 1.0e-3).refract(UP, GLASS_TO_AIR), None);
+        // Grazing incidence from the dense side is always totally reflected.
+        assert_eq!(Vec3::new(1.0, 0.0, 0.0).refract(UP, GLASS_TO_AIR), None);
+    }
+
+    #[test]
+    fn refract_with_matched_indices_is_the_identity() {
+        let incident = Vec3::new(0.3, -0.8, 0.5).try_normalized().unwrap();
+
+        assert_vec_approx_eq(incident.refract(UP, 1.0).unwrap(), incident);
+    }
+
+    #[test]
+    fn refract_rejects_invalid_input() {
+        let down = Vec3::new(0.0, -1.0, 0.0);
+
+        // The normal must be oriented against the incident direction.
+        assert_eq!(down.refract(-UP, AIR_TO_GLASS), None);
+        for eta in [0.0, -1.5, f32::NAN, f32::INFINITY] {
+            assert_eq!(down.refract(UP, eta), None);
+        }
+        assert_eq!(
+            Vec3::new(f32::NAN, -1.0, 0.0).refract(UP, AIR_TO_GLASS),
+            None
+        );
     }
 
     #[test]

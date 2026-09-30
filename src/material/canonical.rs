@@ -2,6 +2,11 @@ use crate::color::Color;
 
 use super::{Material, MaterialId, TextureId, TextureSelection};
 
+/// Index of refraction of canonical glass, approximately that of ordinary soda-lime glass.
+///
+/// The other canonical materials do not transmit light and keep the neutral default `AIR_IOR`.
+pub const GLASS_IOR: f32 = 1.5;
+
 /// Texture identities required by the five Phase 2 rubric materials.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CanonicalTextureIds {
@@ -70,7 +75,8 @@ pub fn canonical_material_definitions(
             0.80,
             0.85,
             0.15,
-        )?,
+        )?
+        .with_ior(GLASS_IOR)?,
         lava: Material::try_new(
             TextureSelection::Uniform(textures.lava),
             Color::new(1.00, 0.95, 0.90),
@@ -83,11 +89,11 @@ pub fn canonical_material_definitions(
 
 #[cfg(test)]
 mod tests {
-    use super::{CanonicalMaterials, CanonicalTextureIds};
+    use super::{CanonicalMaterials, CanonicalTextureIds, GLASS_IOR};
     use crate::{
         color::Color,
         geometry::CubeFace,
-        material::{Material, Texture, TextureId, TextureSelection},
+        material::{AIR_IOR, Material, Texture, TextureId, TextureSelection},
         scene::Scene,
     };
 
@@ -118,11 +124,13 @@ mod tests {
         specular: f32,
         transparency: f32,
         reflectivity: f32,
+        ior: f32,
     ) {
         assert_eq!(material.albedo(), albedo);
         assert_eq!(material.specular(), specular);
         assert_eq!(material.transparency(), transparency);
         assert_eq!(material.reflectivity(), reflectivity);
+        assert_eq!(material.ior(), ior);
     }
 
     fn assert_uniform(selection: TextureSelection, expected: TextureId) {
@@ -167,6 +175,7 @@ mod tests {
             0.05,
             0.0,
             0.02,
+            AIR_IOR,
         );
         assert_properties(
             scene.material(materials.cobblestone).unwrap(),
@@ -174,6 +183,7 @@ mod tests {
             0.08,
             0.0,
             0.03,
+            AIR_IOR,
         );
         assert_properties(
             scene.material(materials.obsidian).unwrap(),
@@ -181,6 +191,7 @@ mod tests {
             0.55,
             0.0,
             0.35,
+            AIR_IOR,
         );
         assert_properties(
             scene.material(materials.glass).unwrap(),
@@ -188,6 +199,7 @@ mod tests {
             0.80,
             0.85,
             0.15,
+            GLASS_IOR,
         );
         assert_properties(
             scene.material(materials.lava).unwrap(),
@@ -195,7 +207,14 @@ mod tests {
             0.10,
             0.0,
             0.05,
+            AIR_IOR,
         );
+    }
+
+    #[test]
+    fn canonical_indices_of_refraction_are_air_and_glass() {
+        assert_eq!(AIR_IOR, 1.0);
+        assert_eq!(GLASS_IOR, 1.5);
     }
 
     #[test]
