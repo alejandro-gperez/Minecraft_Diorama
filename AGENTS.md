@@ -163,7 +163,7 @@ Do not add any additional dependency to `Cargo.toml` without explicit user appro
 
 If functionality can reasonably be implemented with the Rust standard library and project code, implement it locally.
 
-Raylib itself should not be added until the project actually reaches the presentation/window
+Raylib is already a project dependency and must remain isolated to the presentation/input boundary (window, input, timing, and framebuffer display).
 
 ---
 
@@ -1191,16 +1191,6 @@ Unless explicitly changed by the user, these decisions are settled:
 Do not casually reopen these decisions.
 
 ---
-
-# 29. Current Phase
-
-Before starting work, determine the current project phase.
-
-At the initial repository state:
-
-**CURRENT PHASE: PHASE 1 - CORE RAYTRACER**
-
-Only implement work belonging to the current phase unless the user explicitly requests otherwise.
 
 # 29. Current Phase
 
