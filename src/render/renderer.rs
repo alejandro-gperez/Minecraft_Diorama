@@ -11,7 +11,10 @@ use super::{Color, Framebuffer};
 const PRIMARY_RAY_T_MIN: f32 = 0.0;
 const SHADOW_RAY_T_MIN: f32 = 0.0;
 const SHADOW_RAY_T_MAX: f32 = f32::INFINITY;
-/// Moves secondary rays just outside the hit surface to prevent floating-point self-intersection.
+/// Fixed world-space offset for the current unit-scale AABB scene.
+///
+/// If a later scene spans substantially different world scales, this assumption should be
+/// revisited together with the scene's numerical precision requirements.
 const RAY_ORIGIN_BIAS: f32 = 1.0e-4;
 const ASPECT_RATIO_TOLERANCE: f32 = 1.0e-5;
 

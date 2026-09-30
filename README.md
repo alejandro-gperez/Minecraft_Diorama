@@ -8,14 +8,16 @@ Minecraft-inspired EggWars diorama, drawing on the visual language of the classi
 bridges, damaged defenses, opened chests, exposed resources, and lava beneath a sunset-to-night
 sky.
 
-Phase 1 currently provides the correct, testable 3D foundation and a small debug scene. The
-larger EggWars world and advanced optical effects are planned work, not current functionality.
+Phase 1 provides the correct, testable 3D foundation and a small debug scene. Phase 2 feature
+implementation is complete and has been audited; the larger EggWars world and advanced optical
+effects remain planned work.
 
 ## Current Status
 
-Phase 1 — Core Raytracer — is complete. Phase 2 — Materials, Textures, and Lighting — is now
-underway. Classic block textures, CPU-side material selection, and initial direct lighting are
-integrated, including hard directional-light shadows and the five canonical rubric materials.
+Phase 1 — Core Raytracer — is complete. Phase 2 — Materials, Textures, and Lighting — feature
+implementation is complete. Classic block textures, CPU-side material selection, direct lighting,
+hard directional-light shadows, and the five canonical rubric materials are integrated. This
+repository has not been advanced to Phase 3.
 
 The current implementation includes:
 
@@ -44,17 +46,23 @@ The current implementation includes:
 ## Architecture
 
 ```text
-Scene + OrbitalCamera + Lighting
+Source PNG assets
         |
+        | offline preparation
         v
-   CPU Renderer
-        |
-        v
- CPU Framebuffer
-      /     \
-     v       v
-   PPM     Raylib
-           Window
+Runtime PPM assets -> TextureRegistry -> Material / MaterialId
+                                              |
+                                              v
+                         Scene -> AABB -> SceneHit + CubeFace + UV
+                                      |
+                                      v
+                    OrbitalCamera + Lighting -> CPU Renderer
+                                                   |
+                                                   v
+                                           CPU Framebuffer
+                                             /       \
+                                            v         v
+                                          PPM      Raylib window
 ```
 
 Raylib does not perform raytracing or render the 3D scene. It is isolated to the application
@@ -152,10 +160,11 @@ CPU raytrace duration and presentation FPS are separate measurements. The applic
 only after startup or a camera change, while Raylib continues presenting the current texture
 each window frame.
 
-On the current development machine, the initial 320×180 release render with directional lighting
-measured approximately 2.32–2.51 ms. With hard shadow rays enabled, three practical startup runs
-measured 3.57 ms, 2.77 ms, and 2.93 ms. The small sample is useful as a local sanity check, not a
-formal benchmark; later phases will substantially increase scene complexity.
+On the current development machine, the 320×180 canonical-material showcase with directional
+lighting and hard shadows rendered in approximately 3.10 ms in the latest audit release startup;
+an earlier showcase startup measured 3.24 ms. The earlier hard-shadow comparison runs measured
+3.57 ms, 2.77 ms, and 2.93 ms. These small samples are useful as local sanity checks, not formal
+benchmarks; later phases will substantially increase scene complexity.
 
 ## Testing
 
@@ -167,6 +176,10 @@ resolution, canonical material registration and texture selection, shadow-ray oc
 bias, framebuffer and color conversion, PPM output, and presentation-independent camera and RGBA
 conversion helpers. During Phase 2 every AABB is an opaque shadow blocker, including materials
 whose transparency value is reserved for Phase 3.
+
+The audit validation also regenerates the runtime assets with `scripts/prepare_assets.sh`, then
+runs `cargo fmt --check`, `cargo test`, `cargo check`, `cargo build --release`, and
+`cargo run --release`.
 
 ## Project Constraints
 
