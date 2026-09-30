@@ -22,7 +22,6 @@ const PRIMARY_RAY_DEPTH: RayDepth = 0;
 /// the environment on a miss; it only may not spawn a further secondary radiance ray.
 const MAX_RAY_DEPTH: RayDepth = 3;
 
-/// Secondary-ray origin handling is deliberately deferred to the missions that spawn such rays.
 const RADIANCE_RAY_T_MIN: f32 = 0.0;
 const SHADOW_RAY_T_MIN: f32 = 0.0;
 const SHADOW_RAY_T_MAX: f32 = f32::INFINITY;
@@ -31,6 +30,12 @@ const SHADOW_RAY_T_MAX: f32 = f32::INFINITY;
 /// If a later scene spans substantially different world scales, this assumption should be
 /// revisited together with the scene's numerical precision requirements.
 const RAY_ORIGIN_BIAS: f32 = 1.0e-4;
+/// Fixed world-space offset lifting a reflected ray off its exterior hit surface.
+///
+/// Numerically equal to `RAY_ORIGIN_BIAS` today, but kept separate: reflection and shadow rays
+/// may need different offsets once the scene scale or refraction origin handling changes. The
+/// same unit-scale assumption applies.
+const REFLECTION_RAY_ORIGIN_BIAS: f32 = 1.0e-4;
 const ASPECT_RATIO_TOLERANCE: f32 = 1.0e-5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,6 +48,7 @@ pub enum RenderError {
     TextureSamplingFailed,
     ViewDirectionUnavailable,
     ShadowRayGenerationFailed,
+    ReflectionRayGenerationFailed,
     RayDepthExceeded,
 }
 
@@ -117,20 +123,41 @@ impl<'a> Tracer<'a> {
 
         let local = shade_hit(self.scene, hit, ray.origin(), self.lighting)?;
 
-        // Secondary radiance contributions belong here, each gated by
-        // `can_spawn_secondary_ray(depth)` and traced with `depth + 1`. No material launches one
-        // yet, so local shading is the complete result.
-        Ok(local)
+        // Material lookup already succeeded inside `shade_hit`.
+        let reflectivity = self
+            .scene
+            .material(hit.material_id)
+            .ok_or(RenderError::MaterialNotFound)?
+            .reflectivity();
+        if reflectivity <= 0.0 || !can_spawn_secondary_ray(depth) {
+            return Ok(local);
+        }
+
+        let reflected_ray = reflection_ray(ray, hit)?;
+        let reflected = self.trace_ray(reflected_ray, depth + 1)?;
+
+        Ok(blend_reflection(local, reflected, reflectivity))
     }
 }
 
 /// Reports whether a ray traced at `depth` may spawn a radiance ray at `depth + 1`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "no material launches secondary radiance rays yet")
-)]
 const fn can_spawn_secondary_ray(depth: RayDepth) -> bool {
     depth < MAX_RAY_DEPTH
+}
+
+/// Mirror reflection of `ray` about the hit's outward geometric normal, `R = D - 2(D·N)N`,
+/// starting slightly off the surface so it does not re-hit the face it leaves.
+fn reflection_ray(ray: Ray, hit: SceneHit) -> Result<Ray, RenderError> {
+    let normal = hit.geometry.normal;
+    let origin = hit.geometry.position + normal * REFLECTION_RAY_ORIGIN_BIAS;
+
+    Ray::try_new(origin, ray.direction().reflect(normal))
+        .ok_or(RenderError::ReflectionRayGenerationFailed)
+}
+
+/// Energy-conserving blend of local shading and reflected radiance with a constant coefficient.
+fn blend_reflection(local: Color, reflected: Color, reflectivity: f32) -> Color {
+    local.lerp(reflected, reflectivity)
 }
 
 /// Local surface shading: texture, albedo, and direct lighting with hard-shadow visibility.
@@ -191,8 +218,9 @@ mod tests {
     use std::f32::consts::FRAC_PI_2;
 
     use super::{
-        MAX_RAY_DEPTH, PRIMARY_RAY_DEPTH, RAY_ORIGIN_BIAS, RenderError, Renderer, Tracer,
-        can_spawn_secondary_ray, pixel_center, shade_hit,
+        MAX_RAY_DEPTH, PRIMARY_RAY_DEPTH, RAY_ORIGIN_BIAS, REFLECTION_RAY_ORIGIN_BIAS, RenderError,
+        Renderer, Tracer, blend_reflection, can_spawn_secondary_ray, pixel_center, reflection_ray,
+        shade_hit,
     };
     use crate::{
         camera::OrbitalCamera,
@@ -314,57 +342,67 @@ mod tests {
         (scene, materials)
     }
 
-    fn all_canonical(materials: CanonicalMaterials) -> [MaterialId; 5] {
-        [
-            materials.grass,
-            materials.cobblestone,
-            materials.obsidian,
-            materials.glass,
-            materials.lava,
-        ]
-    }
-
     /// Diagonal ray striking the unit cube's top face at `(0.5, 1.0, 0.5)`.
     fn angled_top_ray() -> Ray {
         Ray::try_new(Vec3::new(-0.5, 2.0, 0.5), Vec3::new(1.0, -1.0, 0.0)).unwrap()
     }
 
-    // Bright blocks placed where a mirror reflection or straight transmission of
-    // `angled_top_ray` would arrive; neither blocks the incoming ray or its upward shadow ray.
-    const REFLECTION_WITNESS: (Vec3, Vec3) = (Vec3::new(1.5, 2.0, 0.0), Vec3::new(2.5, 3.0, 1.0));
+    // Blocks placed where a mirror reflection or straight transmission of `angled_top_ray` would
+    // arrive; neither blocks the incoming ray or its upward shadow ray.
+    const REFLECTION_WITNESS: (Vec3, Vec3) = (Vec3::new(1.2, 2.0, 0.0), Vec3::new(2.5, 3.0, 1.0));
     const TRANSMISSION_WITNESS: (Vec3, Vec3) =
         (Vec3::new(1.5, -1.5, 0.0), Vec3::new(2.5, -0.5, 1.0));
 
-    /// Traces `angled_top_ray` onto a unit cube of the selected canonical material at every valid
-    /// depth, with and without the witness blocks, and expects exactly its local shading.
-    fn assert_only_local_shading(select: impl Fn(CanonicalMaterials) -> MaterialId) {
-        let lighting = upward_light_with_ambient();
-        let environment = environment();
-        let ray = angled_top_ray();
-        let (mut scene, materials) = canonical_scene();
-        let material_id = select(materials);
+    fn assert_color_approx_eq(actual: Color, expected: Color) {
+        for (a, e) in [
+            (actual.r, expected.r),
+            (actual.g, expected.g),
+            (actual.b, expected.b),
+        ] {
+            assert!((a - e).abs() <= 1.0e-5, "{actual:?} != {expected:?}");
+        }
+    }
+
+    /// Solid-colored material with the given reflectivity and no other optical effects.
+    fn add_reflective_material(scene: &mut Scene, color: Color, reflectivity: f32) -> MaterialId {
+        let texture_id = scene.add_texture(Texture::solid(color)).unwrap();
+        scene
+            .add_material(
+                Material::try_new(
+                    TextureSelection::Uniform(texture_id),
+                    Color::WHITE,
+                    0.0,
+                    0.0,
+                    reflectivity,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+    }
+
+    /// Unit cube of `reflectivity` plus a solid-`witness_color` block at `REFLECTION_WITNESS`,
+    /// i.e. exactly where `angled_top_ray` reflects to.
+    fn mirror_and_witness_scene(reflectivity: f32, witness_color: Color) -> Scene {
+        let mut scene = Scene::new();
+        let mirror = add_reflective_material(&mut scene, Color::new(0.2, 0.4, 0.6), reflectivity);
+        let witness = add_reflective_material(&mut scene, witness_color, 0.0);
         scene.add(SceneObject::new(
             Aabb::try_new(Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).unwrap(),
-            material_id,
+            mirror,
         ));
+        let (min, max) = REFLECTION_WITNESS;
+        scene.add(SceneObject::new(Aabb::try_new(min, max).unwrap(), witness));
+        scene
+    }
+
+    fn local_shading(scene: &Scene, ray: Ray, lighting: Lighting) -> Color {
         let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
-        assert_eq!(hit.material_id, material_id);
-        let local = shade_hit(&scene, hit, ray.origin(), lighting).unwrap();
+        shade_hit(scene, hit, ray.origin(), lighting).unwrap()
+    }
 
-        let mut witnessed = scene.clone();
-        let white = add_solid_material(&mut witnessed, Color::WHITE);
-        for (min, max) in [REFLECTION_WITNESS, TRANSMISSION_WITNESS] {
-            witnessed.add(SceneObject::new(Aabb::try_new(min, max).unwrap(), white));
-        }
-
-        for depth in PRIMARY_RAY_DEPTH..=MAX_RAY_DEPTH {
-            for candidate in [&scene, &witnessed] {
-                assert_eq!(
-                    Tracer::new(candidate, lighting, &environment).trace_ray(ray, depth),
-                    Ok(local)
-                );
-            }
-        }
+    fn canonical_reflectivity(select: impl Fn(CanonicalMaterials) -> MaterialId) -> f32 {
+        let (scene, materials) = canonical_scene();
+        scene.material(select(materials)).unwrap().reflectivity()
     }
 
     #[test]
@@ -595,26 +633,330 @@ mod tests {
     }
 
     #[test]
-    fn canonical_materials_produce_no_recursive_contribution() {
-        for index in 0..5 {
-            assert_only_local_shading(|materials| all_canonical(materials)[index]);
+    fn reflection_ray_follows_mirror_formula_from_biased_origin() {
+        let scene = unit_cube_scene();
+        let ray = angled_top_ray();
+        let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+        let reflected = reflection_ray(ray, hit).unwrap();
+        let expected = Vec3::new(1.0, 1.0, 0.0).try_normalized().unwrap();
+
+        assert!((reflected.direction() - expected).length() < 1.0e-6);
+        assert!((reflected.direction().length() - 1.0).abs() < 1.0e-6);
+        assert!(reflected.direction().is_finite());
+        assert_eq!(REFLECTION_RAY_ORIGIN_BIAS, 1.0e-4);
+        assert_eq!(
+            reflected.origin(),
+            hit.geometry.position + hit.geometry.normal * REFLECTION_RAY_ORIGIN_BIAS
+        );
+    }
+
+    #[test]
+    fn perpendicular_reflection_returns_along_incident_path() {
+        let scene = unit_cube_scene();
+        let ray = downward_ray();
+        let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+
+        let reflected = reflection_ray(ray, hit).unwrap();
+
+        assert!((reflected.direction() - Vec3::new(0.0, 1.0, 0.0)).length() < 1.0e-6);
+    }
+
+    #[test]
+    fn reflected_ray_does_not_hit_its_own_exterior_surface() {
+        let scene = unit_cube_scene();
+
+        for ray in [downward_ray(), angled_top_ray()] {
+            let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+            let reflected = reflection_ray(ray, hit).unwrap();
+
+            // The source object is still in the scene; only the origin bias prevents the re-hit.
+            assert_eq!(scene.closest_hit(reflected, 0.0, f32::INFINITY), None);
         }
     }
 
     #[test]
-    fn glass_remains_opaque() {
-        let (scene, materials) = canonical_scene();
-        assert!(scene.material(materials.glass).unwrap().transparency() > 0.0);
+    fn reflection_blend_is_exact_linear_interpolation() {
+        let local = Color::new(0.2, 0.4, 0.6);
+        let reflected = Color::new(1.0, 0.0, 0.5);
 
-        assert_only_local_shading(|m| m.glass);
+        assert_color_approx_eq(blend_reflection(local, reflected, 0.0), local);
+        assert_color_approx_eq(blend_reflection(local, reflected, 1.0), reflected);
+        assert_color_approx_eq(
+            blend_reflection(local, reflected, 0.25),
+            local.scale(0.75) + reflected.scale(0.25),
+        );
     }
 
     #[test]
-    fn obsidian_does_not_reflect_yet() {
-        let (scene, materials) = canonical_scene();
-        assert!(scene.material(materials.obsidian).unwrap().reflectivity() > 0.0);
+    fn zero_reflectivity_yields_local_shading_only() {
+        let lighting = upward_light_with_ambient();
+        let ray = angled_top_ray();
+        let scene = mirror_and_witness_scene(0.0, Color::WHITE);
+        let environment = environment();
 
-        assert_only_local_shading(|m| m.obsidian);
+        for depth in PRIMARY_RAY_DEPTH..=MAX_RAY_DEPTH {
+            assert_eq!(
+                Tracer::new(&scene, lighting, &environment).trace_ray(ray, depth),
+                Ok(local_shading(&scene, ray, lighting))
+            );
+        }
+    }
+
+    #[test]
+    fn full_reflectivity_yields_reflected_radiance_only() {
+        let lighting = ambient_only();
+        let ray = angled_top_ray();
+        let scene = mirror_and_witness_scene(1.0, Color::new(0.9, 0.1, 0.3));
+        let environment = environment();
+
+        // The witness has albedo-1 ambient-only shading, so it returns its own texture color.
+        assert_color_approx_eq(
+            Tracer::new(&scene, lighting, &environment)
+                .trace_ray(ray, PRIMARY_RAY_DEPTH)
+                .unwrap(),
+            Color::new(0.9, 0.1, 0.3),
+        );
+    }
+
+    #[test]
+    fn intermediate_reflectivity_blends_local_and_reflected_radiance() {
+        let lighting = ambient_only();
+        let ray = angled_top_ray();
+        let witness_color = Color::new(0.9, 0.1, 0.3);
+        let scene = mirror_and_witness_scene(0.35, witness_color);
+        let environment = environment();
+
+        let local = local_shading(&scene, ray, lighting);
+        let traced = Tracer::new(&scene, lighting, &environment)
+            .trace_ray(ray, PRIMARY_RAY_DEPTH)
+            .unwrap();
+
+        assert_color_approx_eq(traced, local.scale(0.65) + witness_color.scale(0.35));
+    }
+
+    #[test]
+    fn reflectivity_is_constant_across_incidence_angles() {
+        // No Fresnel: a flat-colored mirror blended with a known environment color uses the same
+        // coefficient at grazing and head-on incidence.
+        let lighting = ambient_only();
+        let environment = environment();
+        let mut scene = Scene::new();
+        let mirror = add_reflective_material(&mut scene, Color::new(0.2, 0.4, 0.6), 0.35);
+        scene.add(SceneObject::new(
+            Aabb::try_new(Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).unwrap(),
+            mirror,
+        ));
+
+        for (origin, direction) in [
+            (Vec3::new(0.5, 2.0, 0.5), Vec3::new(0.0, -1.0, 0.0)),
+            (Vec3::new(-0.5, 2.0, 0.5), Vec3::new(1.0, -1.0, 0.0)),
+            (Vec3::new(-1.0, 0.9, 0.3), Vec3::new(1.0, -0.05, 0.3)),
+        ] {
+            let ray = Ray::try_new(origin, direction).unwrap();
+            let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+            let sky = environment.sample(reflection_ray(ray, hit).unwrap().direction());
+            let local = local_shading(&scene, ray, lighting);
+
+            assert_color_approx_eq(
+                Tracer::new(&scene, lighting, &environment)
+                    .trace_ray(ray, PRIMARY_RAY_DEPTH)
+                    .unwrap(),
+                local.scale(0.65) + sky.scale(0.35),
+            );
+        }
+    }
+
+    #[test]
+    fn reflected_miss_samples_environment_through_common_miss_path() {
+        let lighting = ambient_only();
+        let environment = environment();
+        let mut scene = Scene::new();
+        let mirror = add_reflective_material(&mut scene, Color::new(0.2, 0.4, 0.6), 0.5);
+        scene.add(SceneObject::new(
+            Aabb::try_new(Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).unwrap(),
+            mirror,
+        ));
+        let ray = angled_top_ray();
+        let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+        let sky = environment.sample(reflection_ray(ray, hit).unwrap().direction());
+        let local = local_shading(&scene, ray, lighting);
+
+        assert_color_approx_eq(
+            Tracer::new(&scene, lighting, &environment)
+                .trace_ray(ray, PRIMARY_RAY_DEPTH)
+                .unwrap(),
+            local.scale(0.5) + sky.scale(0.5),
+        );
+    }
+
+    #[test]
+    fn reflective_hit_below_maximum_depth_spawns_reflection() {
+        let lighting = ambient_only();
+        let ray = angled_top_ray();
+        let plain = mirror_and_witness_scene(0.0, Color::WHITE);
+        let mirror = mirror_and_witness_scene(0.5, Color::WHITE);
+        let environment = environment();
+
+        for depth in PRIMARY_RAY_DEPTH..MAX_RAY_DEPTH {
+            assert_ne!(
+                Tracer::new(&mirror, lighting, &environment).trace_ray(ray, depth),
+                Tracer::new(&plain, lighting, &environment).trace_ray(ray, depth)
+            );
+        }
+    }
+
+    #[test]
+    fn reflective_hit_at_maximum_depth_is_locally_shaded_only() {
+        let lighting = upward_light_with_ambient();
+        let ray = angled_top_ray();
+        let scene = mirror_and_witness_scene(0.5, Color::WHITE);
+        let environment = environment();
+
+        assert_eq!(
+            Tracer::new(&scene, lighting, &environment).trace_ray(ray, MAX_RAY_DEPTH),
+            Ok(local_shading(&scene, ray, lighting))
+        );
+    }
+
+    #[test]
+    fn reflected_hit_receives_full_shading_including_hard_shadows() {
+        // The witness underside is lit by a downward-pointing light; a blocker beneath it must
+        // darken what the mirror shows, proving reflected hits use the ordinary shading and
+        // shadow path.
+        let lighting = Lighting::new(
+            AmbientLight::try_new(Color::WHITE, 0.2).unwrap(),
+            DirectionalLight::try_new(Vec3::new(0.0, -1.0, 0.0), Color::WHITE, 1.0).unwrap(),
+        );
+        let ray = angled_top_ray();
+        let environment = environment();
+        let lit = mirror_and_witness_scene(1.0, Color::WHITE);
+        let mut shadowed = lit.clone();
+        add_blocker(
+            &mut shadowed,
+            Vec3::new(1.3, 1.2, 0.0),
+            Vec3::new(1.7, 1.6, 1.0),
+        );
+
+        let lit_color = Tracer::new(&lit, lighting, &environment)
+            .trace_ray(ray, PRIMARY_RAY_DEPTH)
+            .unwrap();
+        let shadowed_color = Tracer::new(&shadowed, lighting, &environment)
+            .trace_ray(ray, PRIMARY_RAY_DEPTH)
+            .unwrap();
+
+        assert!(lit_color.r > 1.0);
+        assert_color_approx_eq(shadowed_color, Color::new(0.2, 0.2, 0.2));
+    }
+
+    #[test]
+    fn facing_mirrors_terminate_at_maximum_depth() {
+        let lighting = upward_light_with_ambient();
+        let environment = environment();
+        let mut scene = Scene::new();
+        let mirror = add_reflective_material(&mut scene, Color::WHITE, 1.0);
+        for (min, max) in [
+            (Vec3::new(-5.0, -1.0, -5.0), Vec3::new(5.0, 0.0, 5.0)),
+            (Vec3::new(-5.0, 2.0, -5.0), Vec3::new(5.0, 3.0, 5.0)),
+        ] {
+            scene.add(SceneObject::new(Aabb::try_new(min, max).unwrap(), mirror));
+        }
+        let ray = Ray::try_new(Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.2, -1.0, 0.1)).unwrap();
+
+        let color = Tracer::new(&scene, lighting, &environment)
+            .trace_ray(ray, PRIMARY_RAY_DEPTH)
+            .unwrap();
+
+        assert!(color.is_finite());
+    }
+
+    #[test]
+    fn shadow_rays_do_not_consume_recursive_depth_with_reflection_active() {
+        let lighting = upward_light_with_ambient();
+        let ray = angled_top_ray();
+        let environment = environment();
+        let mut scene = mirror_and_witness_scene(0.5, Color::WHITE);
+        add_blocker(
+            &mut scene,
+            Vec3::new(0.25, 1.5, 0.25),
+            Vec3::new(0.75, 1.9, 0.75),
+        );
+        let local = local_shading(&scene, ray, lighting);
+
+        assert_color_approx_eq(local, Color::new(0.04, 0.08, 0.12));
+        // At maximum depth no reflection is spawned, yet the shadow still darkens local shading.
+        assert_eq!(
+            Tracer::new(&scene, lighting, &environment).trace_ray(ray, MAX_RAY_DEPTH),
+            Ok(local)
+        );
+    }
+
+    #[test]
+    fn canonical_materials_keep_their_stored_reflectivity() {
+        assert_eq!(canonical_reflectivity(|m| m.grass), 0.02);
+        assert_eq!(canonical_reflectivity(|m| m.cobblestone), 0.03);
+        assert_eq!(canonical_reflectivity(|m| m.obsidian), 0.35);
+        assert_eq!(canonical_reflectivity(|m| m.glass), 0.15);
+        assert_eq!(canonical_reflectivity(|m| m.lava), 0.05);
+    }
+
+    #[test]
+    fn canonical_materials_reflect_their_stored_fraction_of_the_environment() {
+        let lighting = upward_light_with_ambient();
+        let environment = environment();
+        let ray = angled_top_ray();
+
+        for select in [
+            (|m: CanonicalMaterials| m.grass) as fn(CanonicalMaterials) -> MaterialId,
+            |m| m.cobblestone,
+            |m| m.obsidian,
+            |m| m.glass,
+            |m| m.lava,
+        ] {
+            let (mut scene, materials) = canonical_scene();
+            let id = select(materials);
+            let reflectivity = scene.material(id).unwrap().reflectivity();
+            scene.add(SceneObject::new(
+                Aabb::try_new(Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).unwrap(),
+                id,
+            ));
+            let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+            let sky = environment.sample(reflection_ray(ray, hit).unwrap().direction());
+            let local = local_shading(&scene, ray, lighting);
+
+            assert_color_approx_eq(
+                Tracer::new(&scene, lighting, &environment)
+                    .trace_ray(ray, PRIMARY_RAY_DEPTH)
+                    .unwrap(),
+                local.scale(1.0 - reflectivity) + sky.scale(reflectivity),
+            );
+        }
+    }
+
+    #[test]
+    fn glass_reflects_but_stays_opaque_and_non_refractive() {
+        let (mut scene, materials) = canonical_scene();
+        assert!(scene.material(materials.glass).unwrap().transparency() > 0.0);
+        let lighting = upward_light_with_ambient();
+        let environment = environment();
+        let ray = angled_top_ray();
+        scene.add(SceneObject::new(
+            Aabb::try_new(Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).unwrap(),
+            materials.glass,
+        ));
+        let baseline = Tracer::new(&scene, lighting, &environment)
+            .trace_ray(ray, PRIMARY_RAY_DEPTH)
+            .unwrap();
+
+        // A bright block where straight transmission would arrive must change nothing.
+        let white = add_solid_material(&mut scene, Color::WHITE);
+        let (min, max) = TRANSMISSION_WITNESS;
+        scene.add(SceneObject::new(Aabb::try_new(min, max).unwrap(), white));
+
+        assert_eq!(
+            Tracer::new(&scene, lighting, &environment).trace_ray(ray, PRIMARY_RAY_DEPTH),
+            Ok(baseline)
+        );
+        assert_ne!(baseline, local_shading(&scene, ray, lighting));
     }
 
     #[test]
@@ -634,9 +976,19 @@ mod tests {
         let onto_lava = downward_ray();
         let onto_neighbor =
             Ray::try_new(Vec3::new(1.5, 2.0, 0.5), Vec3::new(0.0, -1.0, 0.0)).unwrap();
+        let lava_reflectivity = scene.material(materials.lava).unwrap().reflectivity();
+        let reflected_sky = environment
+            .sample(Vec3::new(0.0, 1.0, 0.0))
+            .scale(lava_reflectivity);
 
         for depth in PRIMARY_RAY_DEPTH..=MAX_RAY_DEPTH {
-            assert_eq!(tracer.trace_ray(onto_lava, depth), Ok(Color::BLACK));
+            // Under zero light, lava shows only its small stored reflection, never emitted light.
+            let expected = if can_spawn_secondary_ray(depth) {
+                reflected_sky
+            } else {
+                Color::BLACK
+            };
+            assert_color_approx_eq(tracer.trace_ray(onto_lava, depth).unwrap(), expected);
             assert_eq!(tracer.trace_ray(onto_neighbor, depth), Ok(Color::BLACK));
         }
     }

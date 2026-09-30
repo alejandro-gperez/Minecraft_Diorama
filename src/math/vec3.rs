@@ -54,6 +54,14 @@ impl Vec3 {
         normalized.is_finite().then_some(normalized)
     }
 
+    /// Mirrors `self` about the surface described by the unit `normal`: `self - 2(self·n)n`.
+    ///
+    /// For a unit `self` and unit `normal` the result is unit length up to rounding; callers that
+    /// need the project's normalization guarantee should pass it through `Ray::try_new`.
+    pub fn reflect(self, normal: Self) -> Self {
+        self - normal * (2.0 * self.dot(normal))
+    }
+
     pub fn is_finite(self) -> bool {
         self.x.is_finite() && self.y.is_finite() && self.z.is_finite()
     }
@@ -120,6 +128,38 @@ mod tests {
         assert_approx_eq(actual.x, expected.x);
         assert_approx_eq(actual.y, expected.y);
         assert_approx_eq(actual.z, expected.z);
+    }
+
+    #[test]
+    fn reflect_inverts_perpendicular_incidence() {
+        let normal = Vec3::new(0.0, 1.0, 0.0);
+
+        assert_vec_approx_eq(Vec3::new(0.0, -1.0, 0.0).reflect(normal), normal);
+    }
+
+    #[test]
+    fn reflect_mirrors_angled_incidence_about_the_normal() {
+        let incident = Vec3::new(1.0, -1.0, 0.0).try_normalized().unwrap();
+        let reflected = incident.reflect(Vec3::new(0.0, 1.0, 0.0));
+        let expected = Vec3::new(1.0, 1.0, 0.0).try_normalized().unwrap();
+
+        assert_vec_approx_eq(reflected, expected);
+        assert_approx_eq(reflected.length(), 1.0);
+        assert!(reflected.is_finite());
+    }
+
+    #[test]
+    fn reflect_is_symmetric_under_normal_sign_and_involutive() {
+        let incident = Vec3::new(0.3, -0.8, 0.5).try_normalized().unwrap();
+        let normal = Vec3::new(0.0, 1.0, 0.0);
+        let reflected = incident.reflect(normal);
+
+        assert_vec_approx_eq(reflected, incident.reflect(-normal));
+        assert_vec_approx_eq(reflected.reflect(normal), incident);
+        // The tangential component is preserved and the normal component flips.
+        assert_approx_eq(reflected.x, incident.x);
+        assert_approx_eq(reflected.z, incident.z);
+        assert_approx_eq(reflected.y, -incident.y);
     }
 
     #[test]

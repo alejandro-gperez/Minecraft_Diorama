@@ -9,17 +9,17 @@ bridges, damaged defenses, opened chests, exposed resources, and lava beneath a 
 sky.
 
 Phase 1 provides the correct, testable 3D foundation and Phase 2 provides the audited surface and
-lighting system. Phase 3 is underway with a procedural sunset/night environment and bounded
-recursive ray infrastructure; reflection, refraction, and the larger EggWars world remain planned
-work.
+lighting system. Phase 3 is underway with a procedural sunset/night environment, bounded
+recursive ray infrastructure, and recursive reflections; refraction and the larger EggWars world
+remain planned work.
 
 ## Current Status
 
 Phase 1 — Core Raytracer — and Phase 2 — Materials, Textures, and Lighting — are complete and
 audited. Phase 3 — Raytracing Effects — is underway. Primary-ray misses now sample a project-owned
-procedural sunset/night environment in world space. Every radiance ray now flows through one
-bounded, depth-aware trace path, but no material launches secondary rays yet; reflection and
-refraction are not implemented.
+procedural sunset/night environment in world space. Every radiance ray flows through one
+bounded, depth-aware trace path, and reflective materials now launch recursive reflection rays.
+Refraction, Fresnel, emission, and normal mapping are not implemented.
 
 The current implementation includes:
 
@@ -99,11 +99,32 @@ counts upward from the camera: primary rays are depth `0`, a ray spawned by a de
 textured and lit, and shadow-tested, and it still samples the environment on a miss; it only may
 not spawn a further secondary ray. Tracing above the maximum returns an explicit render error.
 
-Local surface shading is separate from the point where recursive contributions will be composed.
-No material currently spawns a secondary ray, so obsidian does not reflect, glass remains opaque,
-and lava does not emit. Hard-shadow rays are any-hit visibility queries, not radiance rays, and do
-not consume depth. Recursion uses only small stack values and shared borrows, with no per-ray
-allocation.
+Local surface shading is separate from the point where recursive contributions are composed.
+Reflection is the only secondary radiance ray so far; glass remains opaque and lava does not emit.
+Hard-shadow rays are any-hit visibility queries, not radiance rays, and do not consume depth.
+Recursion uses only small stack values and shared borrows, with no per-ray allocation.
+
+## Reflection
+
+A hit whose material has `reflectivity > 0` and whose depth satisfies
+`can_spawn_secondary_ray(depth)` traces one mirror ray at `depth + 1`. For a normalized incident
+direction `D` and the outward geometric normal `N`:
+
+```text
+R      = D - 2(D·N)N
+origin = hit.position + N * REFLECTION_RAY_ORIGIN_BIAS      (1.0e-4)
+color  = local * (1 - reflectivity) + reflected * reflectivity
+```
+
+The reflected ray goes through the same `trace_ray` as every other ray: a miss samples the
+world-space procedural environment, and a hit receives texture, albedo, lighting, hard shadows,
+and further reflection while depth permits. A hit at `MAX_RAY_DEPTH` is locally shaded only. The
+bias is numerically equal to the shadow bias but is a separate constant, and the source object is
+never excluded. The reflectivity coefficient is constant per material; there is no Fresnel term.
+
+Obsidian (`0.35`) is the primary demonstration: it mirrors the sunset horizon and neighboring
+blocks. Glass reflects at its stored `0.15` but remains opaque and non-refractive until the
+refraction mission. The other materials reflect only their small stored values.
 
 ## Controls
 
@@ -181,14 +202,14 @@ parameters are registered once at startup and resolved during rendering through 
 | --- | --- | --- | ---: | ---: | ---: | --- |
 | Grass | `grass_top` / `grass_side` / `dirt` | `(1.00, 1.00, 1.00)` | 0.05 | 0.00 | 0.02 | None required |
 | Cobblestone | `cobblestone` on all faces | `(1.00, 1.00, 1.00)` | 0.08 | 0.00 | 0.03 | Normal mapping planned |
-| Obsidian | `obsidian` on all faces | `(0.90, 0.90, 1.00)` | 0.55 | 0.00 | 0.35 | Reflection planned |
+| Obsidian | `obsidian` on all faces | `(0.90, 0.90, 1.00)` | 0.55 | 0.00 | 0.35 | Reflection (implemented) |
 | Glass | `glass` on all faces | `(0.90, 0.97, 1.00)` | 0.80 | 0.85 | 0.15 | Refraction planned |
 | Lava | `lava` on all faces | `(1.00, 0.95, 0.90)` | 0.10 | 0.00 | 0.05 | Emission planned |
 
-Phase 2 stores all parameters but only texture, albedo, and specular currently affect shading.
-Glass remains opaque to primary and shadow rays; obsidian does not launch reflection rays; lava
-does not emit light; and cobblestone still uses its geometric AABB normal. Refraction, reflection,
-emission, and normal mapping remain Phase 3 work.
+Texture, albedo, specular, and reflectivity currently affect shading. Transparency is stored but
+inactive: glass remains opaque to primary, reflected, and shadow rays. Lava does not emit light
+and cobblestone still uses its geometric AABB normal. Refraction, Fresnel, emission, and normal
+mapping remain Phase 3 work.
 
 ## Performance
 
@@ -205,16 +226,22 @@ After the bounded trace-path refactor, eight interleaved startups each of the pr
 builds measured typically 2.77–2.87 ms and 2.70–2.80 ms respectively, with a byte-identical image.
 The infrastructure alone adds no measurable cost while no secondary rays are active.
 
+With recursive reflection active, five 320×180 release startups of the diagnostic scene measured
+approximately 3.59–3.92 ms (3.59, 3.92, 3.82, 3.82, 3.87), versus roughly 2.8 ms before. This is a
+small local sample, not a formal benchmark. Cost now scales with the number of visible reflective
+pixels (every material has `reflectivity > 0`) and with depth, since each reflective hit below
+`MAX_RAY_DEPTH` traces one more ray plus its shadow query.
+
 ## Testing
 
-The current suite contains 172 tests covering vector arithmetic and normalization, ray invariants,
+The current suite contains 189 tests covering vector arithmetic and normalization, ray invariants,
 AABB construction and edge cases, camera basis/ray generation/orbit limits, texture sampling and
 registration, P6 parsing and malformed input, material face selection, cube-face UV orientation,
 scene closest-hit behavior, ambient/Lambert/Blinn-Phong behavior, renderer lighting and texture
 resolution, canonical material registration and texture selection, shadow-ray occlusion and origin
 bias, procedural environment regions, sun, stars, invalid directions, renderer miss integration,
-ray-depth policy and trace-path equivalence at every valid depth, the absence of secondary
-contributions from the canonical materials, framebuffer and color conversion, PPM output, and
+ray-depth policy, reflection mathematics, origin bias, linear reflectivity blending, recursive
+reflection depth behavior, canonical reflectivity and the still-inactive transparency, framebuffer and color conversion, PPM output, and
 presentation-independent camera and RGBA conversion helpers. Every AABB remains an opaque shadow
 blocker, including materials whose transparency behavior belongs to a later Phase 3 mission.
 
@@ -236,7 +263,7 @@ runs `cargo fmt --check`, `cargo test`, `cargo check`, `cargo build --release`, 
 
 The following belong to later phases and are not yet implemented:
 
-- reflection, refraction, and normal mapping;
+- refraction, Fresnel composition, and normal mapping;
 - emissive lava;
 - deterministic procedural 16×16 floating islands and configurable seeds;
 - ores and the EggWars battle-aftermath scene;
@@ -251,7 +278,8 @@ The following belong to later phases and are not yet implemented:
 | 3D CPU raytracing foundation | Implemented in Phase 1 |
 | Orbital viewing and zoom | Implemented in Phase 1 |
 | Five textured materials | Canonical definitions and temporary five-material showcase implemented |
-| Lighting, shadows, reflection, refraction | Direct lighting and hard shadows implemented; advanced effects planned |
+| Lighting, shadows, reflection | Direct lighting, hard shadows, and bounded recursive reflection implemented |
+| Refraction and Fresnel | Planned |
 | Normal mapping and emissive lava | Planned |
 | Sunset/night skybox/environment | Procedural CPU environment implemented; shared miss path for every traced ray |
 | Procedural floating-island terrain | Planned |
