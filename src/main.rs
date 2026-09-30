@@ -8,9 +8,7 @@ use app::run;
 use camera::OrbitalCamera;
 use geometry::Aabb;
 use lighting::{AmbientLight, DirectionalLight, Lighting};
-use material::{
-    CanonicalTextureIds, PpmLoadError, TextureId, load_ppm, register_canonical_materials,
-};
+use material::{CanonicalTextureIds, PpmLoadError, TextureId, load_ppm};
 use math::Vec3;
 use render::{Color, Framebuffer};
 use scene::{Scene, SceneObject};
@@ -74,7 +72,8 @@ fn phase2_test_scene() -> Result<Scene, PpmLoadError> {
         glass: register_texture(&mut scene, &texture_directory, "glass.ppm")?,
         lava: register_texture(&mut scene, &texture_directory, "lava.ppm")?,
     };
-    let materials = register_canonical_materials(&mut scene, textures)
+    let materials = scene
+        .add_canonical_materials(textures)
         .expect("canonical Phase 2 materials must be valid and fit MaterialId");
 
     scene.add(SceneObject::new(

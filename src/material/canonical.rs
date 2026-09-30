@@ -1,4 +1,4 @@
-use crate::{color::Color, scene::Scene};
+use crate::color::Color;
 
 use super::{Material, MaterialId, TextureId, TextureSelection};
 
@@ -14,7 +14,17 @@ pub struct CanonicalTextureIds {
     pub lava: TextureId,
 }
 
-/// Stable runtime identities for the five canonical materials.
+/// Material definitions for the five canonical Phase 2 materials.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CanonicalMaterialDefinitions {
+    pub grass: Material,
+    pub cobblestone: Material,
+    pub obsidian: Material,
+    pub glass: Material,
+    pub lava: Material,
+}
+
+/// Stable runtime identities for the five canonical materials after scene registration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CanonicalMaterials {
     pub grass: MaterialId,
@@ -24,63 +34,56 @@ pub struct CanonicalMaterials {
     pub lava: MaterialId,
 }
 
-/// Registers the canonical Phase 2 material set without cloning or duplicating textures.
-pub fn register_canonical_materials(
-    scene: &mut Scene,
+/// Builds the canonical Phase 2 definitions without owning or duplicating textures.
+pub fn canonical_material_definitions(
     textures: CanonicalTextureIds,
-) -> Option<CanonicalMaterials> {
-    let grass = scene.add_material(Material::try_new(
-        TextureSelection::TopSideBottom {
-            top: textures.grass_top,
-            side: textures.grass_side,
-            bottom: textures.dirt,
-        },
-        Color::WHITE,
-        0.05,
-        0.0,
-        0.02,
-    )?)?;
-    let cobblestone = scene.add_material(Material::try_new(
-        TextureSelection::Uniform(textures.cobblestone),
-        Color::WHITE,
-        0.08,
-        0.0,
-        0.03,
-    )?)?;
-    let obsidian = scene.add_material(Material::try_new(
-        TextureSelection::Uniform(textures.obsidian),
-        Color::new(0.90, 0.90, 1.00),
-        0.55,
-        0.0,
-        0.35,
-    )?)?;
-    let glass = scene.add_material(Material::try_new(
-        TextureSelection::Uniform(textures.glass),
-        Color::new(0.90, 0.97, 1.00),
-        0.80,
-        0.85,
-        0.15,
-    )?)?;
-    let lava = scene.add_material(Material::try_new(
-        TextureSelection::Uniform(textures.lava),
-        Color::new(1.00, 0.95, 0.90),
-        0.10,
-        0.0,
-        0.05,
-    )?)?;
-
-    Some(CanonicalMaterials {
-        grass,
-        cobblestone,
-        obsidian,
-        glass,
-        lava,
+) -> Option<CanonicalMaterialDefinitions> {
+    Some(CanonicalMaterialDefinitions {
+        grass: Material::try_new(
+            TextureSelection::TopSideBottom {
+                top: textures.grass_top,
+                side: textures.grass_side,
+                bottom: textures.dirt,
+            },
+            Color::WHITE,
+            0.05,
+            0.0,
+            0.02,
+        )?,
+        cobblestone: Material::try_new(
+            TextureSelection::Uniform(textures.cobblestone),
+            Color::WHITE,
+            0.08,
+            0.0,
+            0.03,
+        )?,
+        obsidian: Material::try_new(
+            TextureSelection::Uniform(textures.obsidian),
+            Color::new(0.90, 0.90, 1.00),
+            0.55,
+            0.0,
+            0.35,
+        )?,
+        glass: Material::try_new(
+            TextureSelection::Uniform(textures.glass),
+            Color::new(0.90, 0.97, 1.00),
+            0.80,
+            0.85,
+            0.15,
+        )?,
+        lava: Material::try_new(
+            TextureSelection::Uniform(textures.lava),
+            Color::new(1.00, 0.95, 0.90),
+            0.10,
+            0.0,
+            0.05,
+        )?,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CanonicalMaterials, CanonicalTextureIds, register_canonical_materials};
+    use super::{CanonicalMaterials, CanonicalTextureIds};
     use crate::{
         color::Color,
         geometry::CubeFace,
@@ -105,7 +108,7 @@ mod tests {
     fn registered_scene() -> (Scene, CanonicalTextureIds, CanonicalMaterials) {
         let mut scene = Scene::new();
         let textures = register_test_textures(&mut scene);
-        let materials = register_canonical_materials(&mut scene, textures).unwrap();
+        let materials = scene.add_canonical_materials(textures).unwrap();
         (scene, textures, materials)
     }
 

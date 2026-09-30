@@ -1,6 +1,9 @@
 use crate::{
     geometry::{Aabb, AabbHit},
-    material::{Material, MaterialId, Texture, TextureId, TextureRegistry},
+    material::{
+        CanonicalMaterials, CanonicalTextureIds, Material, MaterialId, Texture, TextureId,
+        TextureRegistry, canonical_material_definitions,
+    },
     ray::Ray,
 };
 
@@ -62,6 +65,27 @@ impl Scene {
         let id = MaterialId::new(index);
         self.materials.push(material);
         Some(id)
+    }
+
+    /// Registers the canonical Phase 2 definitions in the scene's central material storage.
+    pub fn add_canonical_materials(
+        &mut self,
+        textures: CanonicalTextureIds,
+    ) -> Option<CanonicalMaterials> {
+        let definitions = canonical_material_definitions(textures)?;
+        let grass = self.add_material(definitions.grass)?;
+        let cobblestone = self.add_material(definitions.cobblestone)?;
+        let obsidian = self.add_material(definitions.obsidian)?;
+        let glass = self.add_material(definitions.glass)?;
+        let lava = self.add_material(definitions.lava)?;
+
+        Some(CanonicalMaterials {
+            grass,
+            cobblestone,
+            obsidian,
+            glass,
+            lava,
+        })
     }
 
     pub fn material(&self, id: MaterialId) -> Option<&Material> {

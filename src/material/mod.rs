@@ -4,7 +4,10 @@ pub mod ppm;
 pub mod texture;
 pub mod texture_registry;
 
-pub use canonical::{CanonicalMaterials, CanonicalTextureIds, register_canonical_materials};
+pub use canonical::{
+    CanonicalMaterialDefinitions, CanonicalMaterials, CanonicalTextureIds,
+    canonical_material_definitions,
+};
 pub use material::{Material, MaterialId, TextureSelection};
 pub use ppm::{PpmLoadError, load_ppm, parse_ppm};
 pub use texture::Texture;
