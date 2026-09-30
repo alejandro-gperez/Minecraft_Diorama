@@ -12,6 +12,7 @@ use raylib::prelude::{
 
 use crate::{
     camera::OrbitalCamera,
+    lighting::Lighting,
     output::write_ppm,
     render::{Framebuffer, Renderer},
     scene::Scene,
@@ -30,6 +31,7 @@ const MOUSE_WHEEL_ZOOM_UNITS: f32 = 0.75;
 pub fn run(
     mut camera: OrbitalCamera,
     scene: Scene,
+    lighting: Lighting,
     mut framebuffer: Framebuffer,
     ppm_path: &Path,
 ) -> io::Result<()> {
@@ -40,7 +42,7 @@ pub fn run(
 
     let (mut raylib, thread) = raylib::init()
         .size(WINDOW_WIDTH, WINDOW_HEIGHT)
-        .title("CPU Raytraced EggWars Diorama - Phase 1")
+        .title("CPU Raytraced EggWars Diorama - Phase 2")
         .build();
     raylib.set_target_fps(TARGET_FPS);
 
@@ -66,8 +68,8 @@ pub fn run(
 
         if dirty {
             let started = Instant::now();
-            Renderer::render(&camera, &scene, &mut framebuffer)
-                .expect("camera and framebuffer aspect ratios must match");
+            Renderer::render(&camera, &scene, &lighting, &mut framebuffer)
+                .expect("Phase 2 render configuration and scene data must remain valid");
             last_render_seconds = started.elapsed().as_secs_f64();
             cpu_render_count += 1;
 

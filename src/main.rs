@@ -7,6 +7,7 @@ use std::{
 use app::run;
 use camera::OrbitalCamera;
 use geometry::Aabb;
+use lighting::{AmbientLight, DirectionalLight, Lighting};
 use material::{Material, MaterialId, PpmLoadError, TextureId, TextureSelection, load_ppm};
 use math::Vec3;
 use render::{Color, Framebuffer};
@@ -16,6 +17,7 @@ pub mod app;
 pub mod camera;
 pub mod color;
 pub mod geometry;
+pub mod lighting;
 pub mod material;
 pub mod math;
 pub mod output;
@@ -39,11 +41,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     )
     .expect("Phase 2 camera configuration must be valid");
     let scene = phase2_test_scene()?;
+    let lighting = phase2_lighting();
     let framebuffer =
         Framebuffer::try_new(WIDTH, HEIGHT).expect("development resolution must be valid");
 
-    run(camera, scene, framebuffer, Path::new(OUTPUT_PATH))?;
+    run(camera, scene, lighting, framebuffer, Path::new(OUTPUT_PATH))?;
     Ok(())
+}
+
+fn phase2_lighting() -> Lighting {
+    let ambient = AmbientLight::try_new(Color::new(0.30, 0.34, 0.46), 0.35)
+        .expect("Phase 2 ambient-light configuration must be valid");
+    let directional =
+        DirectionalLight::try_new(Vec3::new(0.6, 1.0, 0.8), Color::new(1.0, 0.84, 0.70), 1.0)
+            .expect("Phase 2 directional-light configuration must be valid");
+
+    Lighting::new(ambient, directional)
 }
 
 fn phase2_test_scene() -> Result<Scene, PpmLoadError> {
@@ -69,11 +82,12 @@ fn phase2_test_scene() -> Result<Scene, PpmLoadError> {
             side: grass_side,
             bottom: dirt,
         },
+        0.05,
     );
-    let cobblestone = add_material(&mut scene, TextureSelection::Uniform(cobblestone));
-    let diamond = add_material(&mut scene, TextureSelection::Uniform(diamond));
-    let gold = add_material(&mut scene, TextureSelection::Uniform(gold));
-    let obsidian = add_material(&mut scene, TextureSelection::Uniform(obsidian));
+    let cobblestone = add_material(&mut scene, TextureSelection::Uniform(cobblestone), 0.12);
+    let diamond = add_material(&mut scene, TextureSelection::Uniform(diamond), 0.25);
+    let gold = add_material(&mut scene, TextureSelection::Uniform(gold), 0.30);
+    let obsidian = add_material(&mut scene, TextureSelection::Uniform(obsidian), 0.65);
 
     scene.add(SceneObject::new(
         Aabb::try_new(Vec3::new(-4.0, -0.5, -3.0), Vec3::new(4.0, 0.0, 3.0)).unwrap(),
@@ -110,10 +124,10 @@ fn register_texture(
         .expect("prepared texture count must fit TextureId"))
 }
 
-fn add_material(scene: &mut Scene, textures: TextureSelection) -> MaterialId {
+fn add_material(scene: &mut Scene, textures: TextureSelection, specular: f32) -> MaterialId {
     scene
         .add_material(
-            Material::try_new(textures, Color::WHITE, 0.0, 0.0, 0.0)
+            Material::try_new(textures, Color::WHITE, specular, 0.0, 0.0)
                 .expect("test-scene material must be valid"),
         )
         .expect("test-scene material count must fit MaterialId")

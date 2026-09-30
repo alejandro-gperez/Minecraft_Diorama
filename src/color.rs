@@ -1,4 +1,4 @@
-use std::ops::Mul;
+use std::ops::{Add, Mul};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Color {
@@ -15,6 +15,14 @@ impl Mul for Color {
     }
 }
 
+impl Add for Color {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Self::new(self.r + rhs.r, self.g + rhs.g, self.b + rhs.b)
+    }
+}
+
 impl Color {
     pub const BLACK: Self = Self::new(0.0, 0.0, 0.0);
     pub const WHITE: Self = Self::new(1.0, 1.0, 1.0);
@@ -25,6 +33,10 @@ impl Color {
 
     pub fn scale(self, factor: f32) -> Self {
         Self::new(self.r * factor, self.g * factor, self.b * factor)
+    }
+
+    pub fn is_finite(self) -> bool {
+        self.r.is_finite() && self.g.is_finite() && self.b.is_finite()
     }
 
     pub fn lerp(self, other: Self, t: f32) -> Self {
@@ -81,5 +93,21 @@ mod tests {
             Color::new(0.8, 0.5, 0.25) * Color::new(0.5, 0.4, 1.0),
             Color::new(0.4, 0.2, 0.25)
         );
+    }
+
+    #[test]
+    fn adds_channels_component_wise() {
+        let result = Color::new(0.2, 0.3, 0.4) + Color::new(0.5, 0.4, 0.3);
+
+        assert!((result.r - 0.7).abs() <= 1.0e-6);
+        assert!((result.g - 0.7).abs() <= 1.0e-6);
+        assert!((result.b - 0.7).abs() <= 1.0e-6);
+    }
+
+    #[test]
+    fn reports_finite_channels() {
+        assert!(Color::new(0.0, 1.0, -1.0).is_finite());
+        assert!(!Color::new(f32::NAN, 0.0, 0.0).is_finite());
+        assert!(!Color::new(0.0, f32::INFINITY, 0.0).is_finite());
     }
 }

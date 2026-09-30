@@ -14,8 +14,8 @@ larger EggWars world and advanced optical effects are planned work, not current 
 ## Current Status
 
 Phase 1 — Core Raytracer — is complete. Phase 2 — Materials, Textures, and Lighting — is now
-underway. Classic block textures and CPU-side material selection are integrated; lighting and
-final optical tuning remain future Phase 2 work.
+underway. Classic block textures, CPU-side material selection, and initial direct lighting are
+integrated; hard shadows and final optical tuning remain future Phase 2 work.
 
 The current implementation includes:
 
@@ -25,7 +25,7 @@ The current implementation includes:
 - an orbital camera with yaw, pitch, zoom, and perspective ray generation;
 - a CPU-owned framebuffer;
 - closest-hit traversal over a small scene of AABBs;
-- basic debug colors and deterministic background shading;
+- deterministic background shading;
 - binary PPM output;
 - Raylib presentation of the CPU-generated framebuffer;
 - interactive orbital rotation and zoom;
@@ -36,12 +36,13 @@ The current implementation includes:
 - project-owned binary P6 PPM loading with explicit validation errors;
 - a CPU-owned texture registry addressed by compact, stable `TextureId` values;
 - validated material properties and uniform or top/side/bottom texture selection;
-- face-aware, local AABB UV coordinates propagated directly from slab intersections.
+- face-aware, local AABB UV coordinates propagated directly from slab intersections;
+- CPU ambient, Lambert diffuse, and Blinn-Phong specular lighting from one directional light.
 
 ## Architecture
 
 ```text
-Scene + OrbitalCamera
+Scene + OrbitalCamera + Lighting
         |
         v
    CPU Renderer
@@ -130,18 +131,19 @@ CPU raytrace duration and presentation FPS are separate measurements. The applic
 only after startup or a camera change, while Raylib continues presenting the current texture
 each window frame.
 
-On the current development machine, the initial 320×180 release render measured approximately
-2.42 ms. Manual presentation use was observed at approximately 45–58 FPS. These are development
-observations, not universal benchmarks; later phases will substantially increase scene
-complexity.
+On the current development machine, the initial 320×180 release render with directional lighting
+measured approximately 2.32 ms, compared informally with the Mission 10 texture-only baseline of
+approximately 2.22 ms. This single-run difference is not treated as a regression or benchmark;
+later phases will substantially increase scene complexity.
 
 ## Testing
 
-The current suite contains 116 tests covering vector arithmetic and normalization, ray invariants,
+The current suite contains 135 tests covering vector arithmetic and normalization, ray invariants,
 AABB construction and edge cases, camera basis/ray generation/orbit limits, texture sampling and
 registration, P6 parsing and malformed input, material face selection, cube-face UV orientation,
-scene closest-hit behavior, renderer texture resolution, framebuffer and color conversion, PPM
-output, and presentation-independent camera and RGBA conversion helpers.
+scene closest-hit behavior, ambient/Lambert/Blinn-Phong behavior, renderer lighting and texture
+resolution, framebuffer and color conversion, PPM output, and presentation-independent camera
+and RGBA conversion helpers.
 
 ## Project Constraints
 
@@ -158,7 +160,7 @@ output, and presentation-independent camera and RGBA conversion helpers.
 The following belong to later phases and are not yet implemented:
 
 - final optical tuning for the five primary textured materials;
-- lighting and shadows;
+- hard shadows;
 - reflection, refraction, and normal mapping;
 - emissive lava;
 - a sunset/night skybox;
@@ -175,7 +177,7 @@ The following belong to later phases and are not yet implemented:
 | 3D CPU raytracing foundation | Implemented in Phase 1 |
 | Orbital viewing and zoom | Implemented in Phase 1 |
 | Five textured materials | Asset infrastructure and temporary visual-validation materials implemented |
-| Lighting, shadows, reflection, refraction | Planned |
+| Lighting, shadows, reflection, refraction | Direct lighting implemented; shadows and advanced effects planned |
 | Normal mapping and emissive lava | Planned |
 | Sunset/night skybox | Planned |
 | Procedural floating-island terrain | Planned |
