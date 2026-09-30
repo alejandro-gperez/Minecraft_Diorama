@@ -107,8 +107,10 @@ impl<'a> Tracer<'a> {
     /// Returns the radiance arriving along `ray`, traced at recursion `depth`.
     ///
     /// Every radiance ray, primary or secondary, shares one miss path: the world-space
-    /// environment. The viewer for local specular shading is the ray origin, which is the camera
-    /// position for primary rays and the spawning surface point for secondary rays.
+    /// environment. Local specular shading views the surface back along the ray, `-direction`.
+    /// That equals the direction toward the ray origin but stays well defined when a secondary
+    /// ray hits a surface closer to its origin than the normalization epsilon, such as in the
+    /// concave corner between a block and the ground.
     fn trace_ray(&self, ray: Ray, depth: RayDepth) -> Result<Color, RenderError> {
         if depth > MAX_RAY_DEPTH {
             return Err(RenderError::RayDepthExceeded);
@@ -121,7 +123,8 @@ impl<'a> Tracer<'a> {
             return Ok(self.environment.sample(ray.direction()));
         };
 
-        let local = shade_hit(self.scene, hit, ray.origin(), self.lighting)?;
+        let viewer_position = hit.geometry.position - ray.direction();
+        let local = shade_hit(self.scene, hit, viewer_position, self.lighting)?;
 
         // Material lookup already succeeded inside `shade_hit`.
         let reflectivity = self
@@ -888,6 +891,42 @@ mod tests {
             Tracer::new(&scene, lighting, &environment).trace_ray(ray, MAX_RAY_DEPTH),
             Ok(local)
         );
+    }
+
+    #[test]
+    fn reflected_ray_hitting_adjacent_surface_at_tiny_distance_still_renders() {
+        // A ground slab meets a block at a concave corner. A reflection spawned off the ground
+        // just beside the block starts within 1e-6 of the block's face and hits it almost
+        // immediately; this used to fail with ViewDirectionUnavailable.
+        let mut scene = Scene::new();
+        let ground = add_reflective_material(&mut scene, Color::new(0.3, 0.6, 0.3), 0.5);
+        let block = add_reflective_material(&mut scene, Color::new(0.5, 0.5, 0.5), 0.5);
+        scene.add(SceneObject::new(
+            Aabb::try_new(Vec3::new(-4.0, -0.5, -4.0), Vec3::new(4.0, 0.0, 4.0)).unwrap(),
+            ground,
+        ));
+        scene.add(SceneObject::new(
+            Aabb::try_new(Vec3::new(-1.3, 0.0, -0.6), Vec3::new(-0.1, 1.8, 0.6)).unwrap(),
+            block,
+        ));
+        let lighting = upward_light_with_ambient();
+        let environment = environment();
+        let tracer = Tracer::new(&scene, lighting, &environment);
+        // Ground hit just outside the block's +x face; the mirror ray heads into that face.
+        let x = -0.1 + 2.0e-7;
+        let ray = Ray::try_new(
+            Vec3::new(x + 1.0, 1.0, 0.4265921),
+            Vec3::new(-1.0, -1.0, 0.0),
+        )
+        .unwrap();
+        let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+        let reflected = reflection_ray(ray, hit).unwrap();
+        let near = scene.closest_hit(reflected, 0.0, f32::INFINITY).unwrap();
+        assert!(near.geometry.t < 1.0e-6, "t = {}", near.geometry.t);
+
+        let color = tracer.trace_ray(ray, PRIMARY_RAY_DEPTH).unwrap();
+
+        assert!(color.is_finite());
     }
 
     #[test]
