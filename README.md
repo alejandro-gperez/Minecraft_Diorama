@@ -12,13 +12,16 @@ Phase 1 provides the correct, testable 3D foundation and Phase 2 provides the au
 lighting system. Phase 3 is underway with a procedural sunset/night environment, bounded
 recursive ray infrastructure, recursive reflections, recursive glass refraction, Schlick
 Fresnel composition for glass, emissive lava with a local lava point light, and a derived normal map
-for cobblestone. Every planned Phase 3 rubric effect is now implemented, but Phase 3 has not yet
-been audited; the larger EggWars world remains planned work.
+for cobblestone. Every planned Phase 3 rubric effect is implemented and Phase 3 has passed a
+correctness, architecture, and performance-boundary audit. The larger EggWars world, the
+performance architecture (voxel grid, 3D DDA, tiled multithreading), and the final scene remain
+planned work.
 
 ## Current Status
 
 Phase 1 — Core Raytracer — and Phase 2 — Materials, Textures, and Lighting — are complete and
-audited. Phase 3 — Raytracing Effects — is underway. Primary-ray misses now sample a project-owned
+audited. Phase 3 — Raytracing Effects — has all of its planned effects implemented and audited,
+pending formal acceptance. Phase 4 (performance architecture) has not started. Primary-ray misses now sample a project-owned
 procedural sunset/night environment in world space. Every radiance ray flows through one
 bounded, depth-aware trace path; reflective materials launch recursive reflection rays and
 transparent materials launch recursive Snell refraction rays whose split with reflection follows
@@ -392,6 +395,25 @@ intensity `3.0`, radius `5.0`, at `(2.3, 1.0, -1.15)`, just outside the lava blo
 default camera so the block does not shadow its own light. It visibly warms the nearby grass and
 fades with distance; glass and obsidian inside its radius receive a fainter contribution.
 
+## Known Limitations
+
+These are deliberate scope boundaries of the current diagnostic renderer, not hidden defects:
+
+- Shadow rays treat every AABB, including glass, as an opaque blocker; there are no transparent or
+  colored shadows, absorption, or dispersion.
+- No nested-medium tracking: every transmissive AABB is assumed to sit in air, so touching glass
+  boxes behave as glass → air → glass.
+- Faces struck from inside glass are locally lit with their outward geometric normal.
+- The origin biases (`1.0e-4`) and the point-light radius assume approximately unit-scale geometry.
+- Normal mapping changes shading only, not silhouettes, shadows, reflection, or refraction.
+- Lava regions are not procedurally converted into lights; the showcase hand-places one light.
+- The recursion limit is `MAX_RAY_DEPTH = 3`; it was not raised because cost has not been
+  profiled at greater depth.
+- Scene traversal is brute force over every AABB. There is no spatial acceleration and rendering is
+  single-threaded; both belong to Phase 4.
+- Materials, light colors, and the sun direction are diagnostic values. Final artistic tuning
+  belongs to the EggWars scene.
+
 ## Controls
 
 - Arrow keys: orbit horizontally and vertically.
@@ -561,6 +583,28 @@ meaningful. A 6,840-pose camera sweep of the showcase scene (orbit, elevation, z
 targets) produced no render error and no non-finite pixel. These are local development
 observations, not formal benchmarks.
 
+### Pre-Phase-4 baseline
+
+The Phase 3 audit recorded this baseline on the final showcase scene with real textures: 320×180,
+release build, single-threaded, brute-force AABB traversal, one process, 40 measured renders per
+view after 5 discarded warm-up renders. Medians in ms (range in parentheses):
+
+| View | Median |
+| --- | ---: |
+| Default (orbit 0.55 + π, pitch 0.15, radius 10) | 4.88 (4.81–4.94) |
+| Top-down | 5.20 (5.13–5.51) |
+| Close cobblestone | 10.74 (10.61–11.40) |
+| Close lava | 18.08 (17.91–18.27) |
+| Close glass | 30.17 (28.61–30.50) |
+
+Six `cargo run --release` startups of the default view measured 4.96–5.54 ms (5.54, 4.97, 4.96,
+5.05, 5.05, 5.00). The machine was noticeably slower in this session than in the earlier tables,
+so compare only within this table. Cost is dominated by close views filled with glass (two
+recursive rays per hit plus shadow and point-light queries) and lava (point-light shadow rays).
+A second audit sweep of 8,064 poses (four targets, 48 yaw steps, seven pitches, six radii from 0.8
+to 25) at 64×36 produced no render error and no non-finite pixel. These are local development
+observations, not universal benchmarks, and are the reference for Phase 4 speedups.
+
 ## Testing
 
 The current suite contains 343 tests covering vector arithmetic and normalization, ray invariants,
@@ -582,7 +626,8 @@ lighting with geometric shadows and reflection, a camera-pose render sweep, fram
 presentation-independent camera and RGBA conversion helpers. Every AABB remains an opaque shadow
 blocker, including glass.
 
-The audit validation also regenerates the runtime assets with `scripts/prepare_assets.sh`, then
+The Phase 3 audit changed no runtime behavior and added no tests; the count is unchanged at 343.
+It also regenerates the runtime assets with `scripts/prepare_assets.sh`, then
 runs `cargo fmt --check`, `cargo test`, `cargo check`, `cargo build --release`, and
 `cargo run --release`.
 
@@ -598,7 +643,8 @@ runs `cargo fmt --check`, `cargo test`, `cargo check`, `cargo build --release`, 
 
 ## Planned Features
 
-The following belong to later phases and are not yet implemented:
+The following are not yet implemented. Phase 4 (performance architecture) and Phase 5 (EggWars
+world) are the next planned phases; neither has started:
 
 - transparent or colored shadows through glass, absorption, and nested or merged glass media;
 - procedural lava-region extraction into representative point lights;
@@ -610,10 +656,14 @@ The following belong to later phases and are not yet implemented:
 
 ## Course Rubric Mapping
 
+"Implemented" below means the renderer feature exists and is demonstrated in the current
+diagnostic showcase of five blocks. Rubric credit also requires each feature to appear
+intentionally in the final EggWars diorama, which does not exist yet.
+
 | Target | Status |
 | --- | --- |
 | 3D CPU raytracing foundation | Implemented in Phase 1 |
-| Orbital viewing and zoom | Implemented in Phase 1 |
+| Orbital viewing and zoom | Implemented in Phase 1 (arrow keys orbit, `W`/`S`/wheel zoom) |
 | Five textured materials | Canonical definitions and temporary five-material showcase implemented |
 | Lighting, shadows, reflection | Direct lighting, hard shadows, and bounded recursive reflection implemented |
 | Refraction | Implemented: recursive Snell refraction through glass (IOR 1.5) |
@@ -621,8 +671,9 @@ The following belong to later phases and are not yet implemented:
 | Emissive lava | Implemented: visible self-radiance plus a local lava point light with hard shadows |
 | Normal mapping | Implemented: derived cobblestone normal map lighting with a per-face tangent basis |
 | Sunset/night skybox/environment | Procedural CPU environment implemented; shared miss path for every traced ray |
-| Procedural floating-island terrain | Planned |
-| Voxel traversal and parallel rendering | Planned |
+| Procedural floating-island terrain (16×16, seeded) | Planned (Phase 5) |
+| Voxel grid, 3D DDA, dynamic tile multithreading | Planned (Phase 4) |
+| Final EggWars aftermath scene | Planned (Phase 5–6) |
 
 ## Video
 

@@ -18,26 +18,30 @@ player entity or gameplay system.
 
 - Phase 1 — Core Raytracer: complete.
 - Phase 2 — Materials, Textures, and Lighting: complete.
-- Phase 3 — Raytracing Effects: in progress.
-- Mission 14 — procedural sunset/night environment: complete.
-- Mission 15 — bounded recursive ray infrastructure: next.
-- Current suite: 158 passing tests.
+- Phase 3 — Raytracing Effects: all feature missions (14–20) implemented and audited; awaiting the
+  user's formal acceptance and the `AGENTS.md` update.
+- Mission 14 environment, 15 bounded recursion (`MAX_RAY_DEPTH = 3`), 16 reflection, 17 refraction
+  + IOR, 18 Schlick Fresnel, 19 lava emission + point lights, 20 derived cobblestone normal
+  mapping: complete.
+- Current suite: 343 passing tests.
 - Development resolution: 320×180, presented at 960×540.
-- Recent release render observations: approximately 2.77–2.83 ms on the development machine.
-  These are local development observations and are not universal benchmarks.
-- Last completed feature commit: `d16a265 feat(environment): add procedural sunset skybox`.
+- Pre-Phase-4 baseline (local, single-threaded, brute-force AABB traversal): default view about
+  4.9 ms, close cobblestone about 10.7 ms, close lava about 18 ms, close glass about 30 ms. These
+  are local development observations, not universal benchmarks; the README has the full table.
+- Compiler state: no rustc warnings; clippy reports only the known `clippy::module_inception`
+  warnings.
+- Next work: Phase 3 acceptance, then Phase 4 planning. Phase 4 is not current and is not
+  authorized until the user updates `AGENTS.md`.
 
 The repository is expected to begin each mission from a clean checkpoint. Verify the actual
 repository state instead of assuming this section is current.
 
 ## Mission boundary
 
-The next intended implementation is **Mission 15 — bounded recursive ray infrastructure**. Its
-purpose is to introduce controlled secondary-ray tracing infrastructure without activating
-reflection or refraction behavior. The user and planning assistant will provide its exact prompt
-and API. Do not design, implement, or anticipate Mission 15 during unrelated work.
-
-Do not implement future missions early. Stop at mission boundaries.
+Do not implement Phase 4 (voxel grid, 3D DDA, tiled multithreading, SIMD) or Phase 5 (procedural
+terrain, the EggWars scene) from this handoff. The user and planning assistant will provide the
+exact prompt and API for each future mission. Do not implement future missions early. Stop at
+mission boundaries.
 
 ## Working protocol
 
@@ -95,48 +99,34 @@ user explicitly requests it.
 - Do not introduce the voxel grid, 3D DDA, dynamic tiles, multithreading, SIMD, or final
   procedural terrain during Phase 3.
 
-## Phase 3 roadmap
+## Phase 3 summary
 
-This is planning context, not authorization to implement future missions:
+Mission status: 14–20 complete; Phase 3 audit complete. Established decisions to preserve:
 
-| Mission | Status |
-| --- | --- |
-| 14 — procedural sunset/night environment | Complete |
-| 15 — bounded recursive ray infrastructure | Next |
-| 16 — obsidian reflection | Planned |
-| 17 — glass refraction + IOR | Planned |
-| 18 — Fresnel composition | Planned |
-| 19 — lava emission + local lava lighting | Planned |
-| 20 — derived cobblestone normal mapping | Planned |
-| Phase 3 audit | Planned |
-
-Established Phase 3 decisions:
-
-- The procedural environment is sampled in world space and should later be reused for secondary
-  ray misses.
-- Recursive rays require a strict maximum depth. Measure performance before increasing depth.
-- Obsidian is the primary reflection demonstration.
-- Glass is the primary refraction demonstration, with meaningful air/glass IOR behavior.
-- Fresnel/Schlick belongs after basic refraction and must remain separate from Mission 15.
-- Lava must be visibly emissive. The intended simple illumination model is emissive lava plus a
-  small number of finite-radius local point lights and point-light shadow rays, not global
-  illumination or path tracing.
-- Cobblestone normal mapping should be derived deterministically from its texture/height
-  interpretation rather than an unrelated external normal-map asset.
+- The procedural environment is sampled in world space and is the single miss path for every
+  radiance ray, primary or secondary.
+- Recursion is bounded by `MAX_RAY_DEPTH = 3` (depth 0 is primary). Shadow rays take no depth.
+  Measure performance before increasing the depth.
+- Opaque materials blend constant reflectivity; transparent materials use Schlick Fresnel with
+  Snell refraction (glass IOR 1.5) and route total internal reflection to reflection.
+- Emission is material-owned and unshadowed; lava lights its surroundings through a small number of
+  finite-radius point lights with hard shadow rays, not global illumination.
+- Cobblestone normal mapping uses a map derived offline from its own texture. The shading normal
+  drives local lighting only; the geometric normal owns everything else.
 
 ## Known non-blockers
 
-Do not fix these during a documentation handoff:
+Do not fix these without an explicit mission:
 
-- the fixed shadow bias is currently suitable for the unit-scale diagnostic scene;
-- glass remains optically incomplete until its refraction mission;
-- lava remains non-emissive until its emission mission;
-- cobblestone still uses geometric normals until normal mapping;
+- glass casts opaque hard shadows; there is no nested-medium tracking (touching glass is glass →
+  air → glass); faces hit from inside glass are lit with the outward normal;
+- origin biases and point-light radius assume approximately unit-scale geometry;
+- normal mapping changes shading but not silhouettes, shadows, reflection, or refraction;
+- lava regions are not converted into lights automatically;
 - known `clippy::module_inception` warnings do not justify broad refactoring;
-- final sun/directional-light artistic alignment is deferred until the EggWars scene exists.
+- final sun/directional-light artistic alignment and material tuning are deferred until the
+  EggWars scene exists.
 
 ## Handoff safety
 
-Do not modify `AGENTS.md` to record progress. Do not implement Mission 15 from this handoff alone.
-Do not change renderer behavior, lighting, environment behavior, materials, geometry, camera,
-assets, or tests for the purpose of creating this handoff.
+Do not modify `AGENTS.md` to record progress. Do not start Phase 4 from this handoff alone.
