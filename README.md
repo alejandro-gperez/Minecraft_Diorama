@@ -10,8 +10,9 @@ sky.
 
 Phase 1 provides the correct, testable 3D foundation and Phase 2 provides the audited surface and
 lighting system. Phase 3 is underway with a procedural sunset/night environment, bounded
-recursive ray infrastructure, recursive reflections, and recursive glass refraction; Fresnel,
-emission, normal mapping, and the larger EggWars world remain planned work.
+recursive ray infrastructure, recursive reflections, recursive glass refraction, and Schlick
+Fresnel composition for glass; emission, normal mapping, and the larger EggWars world remain
+planned work.
 
 ## Current Status
 
@@ -19,8 +20,8 @@ Phase 1 — Core Raytracer — and Phase 2 — Materials, Textures, and Lighting
 audited. Phase 3 — Raytracing Effects — is underway. Primary-ray misses now sample a project-owned
 procedural sunset/night environment in world space. Every radiance ray flows through one
 bounded, depth-aware trace path; reflective materials launch recursive reflection rays and
-transparent materials launch recursive Snell refraction rays. Fresnel, emission, and normal
-mapping are not implemented.
+transparent materials launch recursive Snell refraction rays whose split with reflection follows
+Schlick's Fresnel approximation. Emission and normal mapping are not implemented.
 
 The current implementation includes:
 
@@ -49,6 +50,8 @@ The current implementation includes:
 - centralized, ID-based definitions for grass, cobblestone, obsidian, glass, and lava.
 - bounded recursive mirror reflection with a constant per-material reflectivity.
 - bounded recursive Snell refraction with a validated per-material index of refraction.
+- angle-dependent Schlick Fresnel composition of glass reflection and refraction, with total
+  internal reflection routed to reflection.
 
 ## Architecture
 
@@ -103,32 +106,42 @@ textured and lit, and shadow-tested, and it still samples the environment on a m
 not spawn a further secondary ray. Tracing above the maximum returns an explicit render error.
 
 Local surface shading is separate from the point where recursive contributions are composed.
-Reflection and refraction are the secondary radiance rays; each spawns at `depth + 1`, so a hit
-that both reflects and refracts branches into two child rays. Lava does not emit.
+Reflection and refraction are the secondary radiance rays; each spawns at `depth + 1`, so a
+transparent hit below the maximum depth branches into two child rays (only the reflected one
+under total internal reflection). A transparent hit at `MAX_RAY_DEPTH` spawns neither branch and returns its full,
+unweighted local shading rather than black. Lava does not emit.
 Hard-shadow rays are any-hit visibility queries, not radiance rays, and do not consume depth.
 Recursion uses only small stack values and shared borrows, with no per-ray allocation.
 
 ## Reflection
 
-A hit whose material has `reflectivity > 0` and whose depth satisfies
-`can_spawn_secondary_ray(depth)` traces one mirror ray at `depth + 1`. For a normalized incident
-direction `D` and the outward geometric normal `N`:
+An opaque hit (`transparency == 0`) whose material has `reflectivity > 0` and whose depth
+satisfies `can_spawn_secondary_ray(depth)` traces one mirror ray at `depth + 1`. For a normalized
+incident direction `D` and the outward geometric normal `N`:
 
 ```text
 R      = D - 2(D·N)N
-origin = hit.position + N * REFLECTION_RAY_ORIGIN_BIAS      (1.0e-4)
+origin = hit.position + N * REFLECTION_RAY_ORIGIN_BIAS      (D·N < 0, arriving from outside)
+origin = hit.position - N * REFLECTION_RAY_ORIGIN_BIAS      (D·N >= 0, arriving from inside)
 color  = local * (1 - reflectivity) + reflected * reflectivity
 ```
+
+`REFLECTION_RAY_ORIGIN_BIAS` is `1.0e-4`. A reflected ray stays in the medium the incident ray
+travelled through, so the origin is offset onto the incident side. Exterior reflections are
+unchanged; a ray reflecting inside glass stays inside instead of being pushed out and immediately
+re-entering the face it reflected from. The same entering/exiting classification drives
+reflection, refraction, and Fresnel.
 
 The reflected ray goes through the same `trace_ray` as every other ray: a miss samples the
 world-space procedural environment, and a hit receives texture, albedo, lighting, hard shadows,
 and further reflection while depth permits. A hit at `MAX_RAY_DEPTH` is locally shaded only. The
 bias is numerically equal to the shadow bias but is a separate constant, and the source object is
-never excluded. The reflectivity coefficient is constant per material; there is no Fresnel term.
+never excluded. For opaque materials the reflectivity coefficient is constant per material, with
+no Fresnel term.
 
 Obsidian (`0.35`) is the primary demonstration: it mirrors the sunset horizon and neighboring
-blocks. Glass also reflects at its stored `0.15`, in addition to refracting. The other materials
-reflect only their small stored values.
+blocks. Grass, cobblestone, and lava reflect only their small stored values. Glass reflection is
+Fresnel-controlled instead; see below.
 
 ## Refraction
 
@@ -162,25 +175,57 @@ object is never excluded.
 
 Refracted rays share the common trace path: misses sample the procedural environment and hits
 receive full shading, reflection, and further refraction while depth permits. On total internal
-reflection, no refracted ray exists and the surface keeps its reflection-blended color with no
-transmitted contribution; energy is not redistributed to reflection yet.
+reflection no refracted ray exists; see Fresnel composition below. Glass (`transparency = 0.85`)
+is the primary demonstration: the grass, neighboring blocks, and sky are visible through it,
+displaced by the refraction, and the displacement changes with the viewing angle. Materials with
+zero transparency never trace refraction rays.
 
-Composition is a temporary, angle-independent two-step blend:
+## Fresnel Composition
+
+Transparent materials split their optical contribution between reflection and refraction with
+Schlick's approximation of the Fresnel reflectance. Using the interface indices and oriented
+normal `n` from the classification above:
 
 ```text
-base  = local * (1 - reflectivity) + reflected * reflectivity
-color = base  * (1 - transparency) + refracted * transparency
+R0        = ((eta_i - eta_t) / (eta_i + eta_t))²
+cos_theta = clamp(-D·n, 0, 1)
+F         = R0 + (1 - R0)(1 - cos_theta)⁵        F = 1 under total internal reflection
+
+optical   = reflected * F + refracted * (1 - F)
+color     = local * (1 - transparency) + optical * transparency
 ```
 
-Reflectivity and transparency are not renormalized to sum to one, and there is no Fresnel term;
-Fresnel composition is planned for the next mission. Glass (`transparency = 0.85`) is the primary
-demonstration: the grass, neighboring blocks, and sky are visible through it, displaced by the
-refraction, and the displacement changes with the viewing angle. Its texture and albedo remain as
-the local interface appearance. Materials with zero transparency never trace refraction rays.
+For air and glass (`1.0` / `1.5`), `R0 = 0.04` in both directions, so glass viewed head-on is
+about 96% transmissive, while `F` rises toward `1` at grazing incidence and the glass mirrors the
+sky and neighboring blocks. `transparency` is the fraction of the surface that behaves as a clear
+optical interface; for canonical glass, 15% of the textured, lit local appearance remains and the
+85% optical portion is split by Fresnel. The helper `schlick_reflectance` validates its indices
+the same way materials do and rejects non-finite input.
 
-Known limitation: shadow rays still treat every AABB, including glass, as an opaque blocker, so
-glass casts a full hard shadow. Transparent or colored shadows, absorption, and dispersion are not
-implemented.
+For transparent materials the stored `reflectivity` is not applied: Fresnel already decides how
+much of the optical portion reflects, and blending the constant on top would count reflection
+twice. Canonical glass keeps its stored `0.15` as material data, but it has no optical effect.
+Opaque materials keep the constant-reflectivity blend above.
+
+Under total internal reflection the transmissive portion becomes pure reflection:
+`color = local * (1 - transparency) + reflected * transparency`, and no refracted ray is traced.
+Previously the whole surface fell back to its reflection-blended local color there, so
+inside-glass edges glowed with the lit texture. Below `MAX_RAY_DEPTH`, reflection is
+traced whenever `F > 0` and refraction whenever `F < 1` and Snell gives a direction; both use
+`depth + 1`. At `MAX_RAY_DEPTH` neither branch is traced and the hit keeps its local shading.
+
+Schlick is evaluated at the incident-side cosine in both directions. Inside glass this makes `F`
+stay near `R0` until the critical angle (about 41.8°) and then jump to `1`; the physical Fresnel
+curve rises steeply but continuously there.
+
+Known limitations:
+
+- Shadow rays still treat every AABB, including glass, as an opaque blocker, so glass casts a full
+  hard shadow. Transparent or colored shadows, absorption, and dispersion are not implemented.
+- Every glass AABB is assumed to be surrounded by air, and no medium stack is tracked. Two touching
+  glass blocks therefore behave as glass → air → glass, with an internal interface between them.
+  Merging connected glass is a concern for the later voxel world.
+- Faces struck from inside glass are locally lit with their outward geometric normal.
 
 ## Controls
 
@@ -259,14 +304,14 @@ parameters are registered once at startup and resolved during rendering through 
 | Grass | `grass_top` / `grass_side` / `dirt` | `(1.00, 1.00, 1.00)` | 0.05 | 0.00 | 0.02 | 1.0 | None required |
 | Cobblestone | `cobblestone` on all faces | `(1.00, 1.00, 1.00)` | 0.08 | 0.00 | 0.03 | 1.0 | Normal mapping planned |
 | Obsidian | `obsidian` on all faces | `(0.90, 0.90, 1.00)` | 0.55 | 0.00 | 0.35 | 1.0 | Reflection (implemented) |
-| Glass | `glass` on all faces | `(0.90, 0.97, 1.00)` | 0.80 | 0.85 | 0.15 | 1.5 | Refraction (implemented) |
+| Glass | `glass` on all faces | `(0.90, 0.97, 1.00)` | 0.80 | 0.85 | 0.15 | 1.5 | Refraction + Fresnel (implemented) |
 | Lava | `lava` on all faces | `(1.00, 0.95, 0.90)` | 0.10 | 0.00 | 0.05 | 1.0 | Emission planned |
 
 Texture, albedo, specular, reflectivity, transparency, and index of refraction all affect
-rendering. The `1.0` IOR of the non-transmissive materials is the neutral default and has no
-optical effect. Glass still blocks shadow rays as an opaque AABB. Lava does not emit light and
-cobblestone still uses its geometric AABB normal. Fresnel, emission, and normal mapping remain
-Phase 3 work.
+rendering, except that transparent glass's stored reflectivity is superseded by Fresnel. The
+`1.0` IOR of the non-transmissive materials is the neutral default and has no optical effect.
+Glass still blocks shadow rays as an opaque AABB. Lava does not emit light and cobblestone still
+uses its geometric AABB normal. Emission and normal mapping remain Phase 3 work.
 
 ## Performance
 
@@ -298,9 +343,20 @@ depends on the number of visible glass pixels, how often rays inside glass hit t
 reflection, the recursion depth, and what the secondary rays hit. These are local observations,
 not a formal benchmark.
 
+With Fresnel composition, forty warmed 320×180 release renders per view in one process gave a
+default-view median of about 4.33 ms (4.31–4.54 ms), against 4.08 ms (4.05–4.20 ms) for the
+refraction build measured the same way, roughly 6% more. Close-up glass views filling much of the
+frame measured medians of about 14.4 ms (head-on) and 15.0 ms (grazing), against 14.2 ms and
+15.2 ms before. Six `cargo run --release` startups measured 4.36–4.75 ms (4.74, 4.44, 4.36,
+4.75, 4.63, 4.43). The branch structure is unchanged: glass hits below the maximum depth still trace
+a reflected ray and, unless total internal reflection occurs, a refracted ray; Fresnel changes
+their weights. The extra default-view cost is plausibly from inside-glass reflections, which now
+stay inside and hit glass again instead of escaping, but that attribution was not profiled.
+These are local observations, not a formal benchmark.
+
 ## Testing
 
-The current suite contains 225 tests covering vector arithmetic and normalization, ray invariants,
+The current suite contains 246 tests covering vector arithmetic and normalization, ray invariants,
 AABB construction and edge cases, camera basis/ray generation/orbit limits, texture sampling and
 registration, P6 parsing and malformed input, material face selection, cube-face UV orientation,
 scene closest-hit behavior, ambient/Lambert/Blinn-Phong behavior, renderer lighting and texture
@@ -309,8 +365,9 @@ bias, procedural environment regions, sun, stars, invalid directions, renderer m
 ray-depth policy, reflection mathematics, origin bias, linear reflectivity blending, recursive
 reflection depth behavior, canonical reflectivity, index-of-refraction validation, Snell
 refraction and total internal reflection, entering/exiting classification and origin bias,
-recursive refraction depth behavior, transparency composition, canonical glass refraction, a
-camera-pose render sweep, framebuffer and color conversion, PPM output, and
+recursive refraction depth behavior, Schlick Fresnel reflectance and input validation, interface
+orientation, inside and outside reflection origins, Fresnel transparency composition, total
+internal reflection routing, canonical glass refraction, a camera-pose render sweep, framebuffer and color conversion, PPM output, and
 presentation-independent camera and RGBA conversion helpers. Every AABB remains an opaque shadow
 blocker, including glass.
 
@@ -332,8 +389,8 @@ runs `cargo fmt --check`, `cargo test`, `cargo check`, `cargo build --release`, 
 
 The following belong to later phases and are not yet implemented:
 
-- Fresnel composition and normal mapping;
-- transparent or colored shadows through glass;
+- normal mapping;
+- transparent or colored shadows through glass, absorption, and nested or merged glass media;
 - emissive lava;
 - deterministic procedural 16×16 floating islands and configurable seeds;
 - ores and the EggWars battle-aftermath scene;
@@ -350,7 +407,7 @@ The following belong to later phases and are not yet implemented:
 | Five textured materials | Canonical definitions and temporary five-material showcase implemented |
 | Lighting, shadows, reflection | Direct lighting, hard shadows, and bounded recursive reflection implemented |
 | Refraction | Implemented: recursive Snell refraction through glass (IOR 1.5) |
-| Fresnel | Planned |
+| Fresnel | Implemented: Schlick reflection/refraction split for glass, TIR routed to reflection |
 | Normal mapping and emissive lava | Planned |
 | Sunset/night skybox/environment | Procedural CPU environment implemented; shared miss path for every traced ray |
 | Procedural floating-island terrain | Planned |

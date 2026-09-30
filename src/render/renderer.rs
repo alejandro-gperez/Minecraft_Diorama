@@ -8,7 +8,7 @@ use crate::{
     scene::{Scene, SceneHit},
 };
 
-use super::{Color, Framebuffer};
+use super::{Color, Framebuffer, fresnel::schlick_reflectance};
 
 /// Recursion depth of a radiance ray, counted upward from the camera.
 ///
@@ -31,17 +31,20 @@ const SHADOW_RAY_T_MAX: f32 = f32::INFINITY;
 /// If a later scene spans substantially different world scales, this assumption should be
 /// revisited together with the scene's numerical precision requirements.
 const RAY_ORIGIN_BIAS: f32 = 1.0e-4;
-/// Fixed world-space offset lifting a reflected ray off its exterior hit surface.
+/// Fixed world-space offset moving a reflected ray onto the incident side of its hit surface.
 ///
 /// Numerically equal to `RAY_ORIGIN_BIAS` today, but kept separate: reflection and shadow rays
-/// may need different offsets once the scene scale or refraction origin handling changes. The
-/// same unit-scale assumption applies.
+/// may need different offsets once the scene scale changes, and a reflection's offset direction
+/// depends on which side the incident ray arrived from. The same unit-scale assumption applies.
 const REFLECTION_RAY_ORIGIN_BIAS: f32 = 1.0e-4;
 /// Fixed world-space offset moving a refracted ray onto the transmitted side of its interface.
 ///
 /// Numerically equal to the other biases for the same unit-scale reason, but its direction depends
 /// on whether the ray enters or exits the medium, so it is a separate operation and constant.
 const REFRACTION_RAY_ORIGIN_BIAS: f32 = 1.0e-4;
+/// Fresnel reflectance under total internal reflection: no transmitted direction exists, so the
+/// whole transmissive optical portion reflects.
+const TOTAL_INTERNAL_REFLECTANCE: f32 = 1.0;
 const ASPECT_RATIO_TOLERANCE: f32 = 1.0e-5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,6 +59,7 @@ pub enum RenderError {
     ShadowRayGenerationFailed,
     ReflectionRayGenerationFailed,
     RefractionRayGenerationFailed,
+    FresnelReflectanceUnavailable,
     RayDepthExceeded,
 }
 
@@ -133,6 +137,8 @@ impl<'a> Tracer<'a> {
         let viewer_position = hit.geometry.position - ray.direction();
         let local = shade_hit(self.scene, hit, viewer_position, self.lighting)?;
         if !can_spawn_secondary_ray(depth) {
+            // Terminal hit: its local shading stands in, unweighted, for the optical contribution
+            // it may no longer trace. This holds for transmissive materials too.
             return Ok(local);
         }
 
@@ -142,29 +148,58 @@ impl<'a> Tracer<'a> {
             .material(hit.material_id)
             .ok_or(RenderError::MaterialNotFound)?;
 
-        let reflectivity = material.reflectivity();
-        let base_with_reflection = if reflectivity > 0.0 {
-            let reflected = self.trace_ray(reflection_ray(ray, hit)?, depth + 1)?;
-            blend_reflection(local, reflected, reflectivity)
-        } else {
-            local
-        };
-
         let transparency = material.transparency();
-        if transparency <= 0.0 {
-            return Ok(base_with_reflection);
+        if transparency > 0.0 {
+            // Fresnel alone splits the transmissive portion between reflection and refraction;
+            // the stored reflectivity is not applied on top, which would count reflection twice.
+            let optical = self.trace_fresnel_optics(ray, hit, material.ior(), depth)?;
+            return Ok(blend_transmissive(local, optical, transparency));
         }
-        // Total internal reflection transmits nothing; the reflection-blended result stands.
-        let Some(refracted_ray) = refraction_ray(ray, hit, material.ior())? else {
-            return Ok(base_with_reflection);
-        };
-        let refracted = self.trace_ray(refracted_ray, depth + 1)?;
 
-        Ok(blend_transmission(
-            base_with_reflection,
-            refracted,
-            transparency,
-        ))
+        let reflectivity = material.reflectivity();
+        if reflectivity > 0.0 {
+            let reflected = self.trace_ray(reflection_ray(ray, hit)?, depth + 1)?;
+            Ok(blend_reflection(local, reflected, reflectivity))
+        } else {
+            Ok(local)
+        }
+    }
+
+    /// Radiance leaving a transmissive interface back along `ray`, split by Fresnel reflectance:
+    /// `reflected * F + refracted * (1 - F)`.
+    ///
+    /// `F` comes from Schlick's approximation at the incidence cosine against the oriented
+    /// interface normal, or is exactly `1` under total internal reflection, where no refracted ray
+    /// exists. Each branch is traced at `depth + 1` only when its weight is non-zero: distinct
+    /// indices keep `F >= R0 > 0`, so reflection is traced, while refraction is skipped under
+    /// total internal reflection and at exactly grazing incidence.
+    fn trace_fresnel_optics(
+        &self,
+        ray: Ray,
+        hit: SceneHit,
+        material_ior: f32,
+        depth: RayDepth,
+    ) -> Result<Color, RenderError> {
+        let refracted_ray = refraction_ray(ray, hit, material_ior)?;
+        let reflectance = if refracted_ray.is_some() {
+            optical_interface(ray.direction(), hit.geometry.normal, material_ior)
+                .fresnel_reflectance(ray.direction())
+                .ok_or(RenderError::FresnelReflectanceUnavailable)?
+        } else {
+            TOTAL_INTERNAL_REFLECTANCE
+        };
+
+        let reflected = if reflectance > 0.0 {
+            self.trace_ray(reflection_ray(ray, hit)?, depth + 1)?
+        } else {
+            Color::BLACK
+        };
+        let refracted = match refracted_ray {
+            Some(refracted_ray) if reflectance < 1.0 => self.trace_ray(refracted_ray, depth + 1)?,
+            _ => Color::BLACK,
+        };
+
+        Ok(compose_fresnel(reflected, refracted, reflectance))
     }
 }
 
@@ -173,11 +208,17 @@ const fn can_spawn_secondary_ray(depth: RayDepth) -> bool {
     depth < MAX_RAY_DEPTH
 }
 
-/// Mirror reflection of `ray` about the hit's outward geometric normal, `R = D - 2(D·N)N`,
-/// starting slightly off the surface so it does not re-hit the face it leaves.
+/// Mirror reflection of `ray` about the hit's outward geometric normal, `R = D - 2(D·N)N`.
+///
+/// A reflected ray stays in the medium the incident ray travelled through, so its origin is
+/// offset onto the incident side: `position + N * bias` for a ray arriving from outside and
+/// `position - N * bias` for one arriving from inside the AABB. The inside case keeps a ray
+/// reflecting within glass from being pushed out and immediately re-entering the same face. The
+/// source object is never excluded.
 fn reflection_ray(ray: Ray, hit: SceneHit) -> Result<Ray, RenderError> {
     let normal = hit.geometry.normal;
-    let origin = hit.geometry.position + normal * REFLECTION_RAY_ORIGIN_BIAS;
+    let incident_side = MediumTransition::classify(ray.direction(), normal).oriented_normal(normal);
+    let origin = hit.geometry.position + incident_side * REFLECTION_RAY_ORIGIN_BIAS;
 
     Ray::try_new(origin, ray.direction().reflect(normal))
         .ok_or(RenderError::ReflectionRayGenerationFailed)
@@ -188,50 +229,84 @@ fn blend_reflection(local: Color, reflected: Color, reflectivity: f32) -> Color 
     local.lerp(reflected, reflectivity)
 }
 
-/// Whether a ray crosses a transmissive AABB surface into or out of its material.
+/// Whether a ray crosses an AABB surface into or out of its material.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MediumTransition {
     Entering,
     Exiting,
 }
 
-/// Optical description of one refraction event at an AABB surface.
+impl MediumTransition {
+    /// Classifies an incident direction against a hit's outward geometric normal `N`.
+    ///
+    /// `D·N < 0` arrives from outside and enters; otherwise the ray arrives from inside and exits.
+    /// This is the single source of interface orientation for reflection, refraction, and
+    /// Fresnel; the camera position plays no part.
+    fn classify(direction: Vec3, outward_normal: Vec3) -> Self {
+        if direction.dot(outward_normal) < 0.0 {
+            Self::Entering
+        } else {
+            Self::Exiting
+        }
+    }
+
+    /// Interface normal on the incident side, opposing the incident ray: `N` when entering and
+    /// `-N` when exiting.
+    fn oriented_normal(self, outward_normal: Vec3) -> Vec3 {
+        match self {
+            Self::Entering => outward_normal,
+            Self::Exiting => -outward_normal,
+        }
+    }
+}
+
+/// Optical description of one transmissive interface event at an AABB surface.
 ///
 /// `normal` is the interface normal oriented against the incident ray, used only for the Snell
-/// calculation; the hit's outward geometric normal stays untouched for lighting, reflection,
-/// face identity, and UVs.
+/// and Fresnel calculations; the hit's outward geometric normal stays untouched for lighting,
+/// reflection, face identity, and UVs.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct RefractionInterface {
+struct OpticalInterface {
     transition: MediumTransition,
     eta_incident: f32,
     eta_transmitted: f32,
     normal: Vec3,
 }
 
-/// Classifies an incident direction against a hit's outward geometric normal.
+impl OpticalInterface {
+    /// Incidence cosine `clamp(-D·n, 0, 1)` against the oriented normal `n`.
+    fn incidence_cosine(self, direction: Vec3) -> f32 {
+        (-direction.dot(self.normal)).clamp(0.0, 1.0)
+    }
+
+    /// Schlick reflectance for `direction` crossing this interface from `eta_incident` into
+    /// `eta_transmitted`. Total internal reflection must be handled by the caller.
+    fn fresnel_reflectance(self, direction: Vec3) -> Option<f32> {
+        schlick_reflectance(
+            self.incidence_cosine(direction),
+            self.eta_incident,
+            self.eta_transmitted,
+        )
+    }
+}
+
+/// Describes the interface an incident direction crosses at a transmissive AABB surface.
 ///
 /// Every transmissive AABB is assumed to be surrounded by air: a ray against the outward normal
 /// enters from `AIR_IOR` into `material_ior`, and a ray along it exits back into air. No stack of
-/// nested media is tracked.
-fn refraction_interface(
-    direction: Vec3,
-    outward_normal: Vec3,
-    material_ior: f32,
-) -> RefractionInterface {
-    if direction.dot(outward_normal) < 0.0 {
-        RefractionInterface {
-            transition: MediumTransition::Entering,
-            eta_incident: AIR_IOR,
-            eta_transmitted: material_ior,
-            normal: outward_normal,
-        }
-    } else {
-        RefractionInterface {
-            transition: MediumTransition::Exiting,
-            eta_incident: material_ior,
-            eta_transmitted: AIR_IOR,
-            normal: -outward_normal,
-        }
+/// nested media is tracked, so two touching glass boxes still form glass -> air -> glass.
+fn optical_interface(direction: Vec3, outward_normal: Vec3, material_ior: f32) -> OpticalInterface {
+    let transition = MediumTransition::classify(direction, outward_normal);
+    let (eta_incident, eta_transmitted) = match transition {
+        MediumTransition::Entering => (AIR_IOR, material_ior),
+        MediumTransition::Exiting => (material_ior, AIR_IOR),
+    };
+
+    OpticalInterface {
+        transition,
+        eta_incident,
+        eta_transmitted,
+        normal: transition.oriented_normal(outward_normal),
     }
 }
 
@@ -242,7 +317,7 @@ fn refraction_interface(
 /// (`position + N * bias`), for outward normal `N`. An entering ray therefore starts inside the
 /// box, where AABB intersection reports the exit face. The source object is never excluded.
 fn refraction_ray(ray: Ray, hit: SceneHit, material_ior: f32) -> Result<Option<Ray>, RenderError> {
-    let interface = refraction_interface(ray.direction(), hit.geometry.normal, material_ior);
+    let interface = optical_interface(ray.direction(), hit.geometry.normal, material_ior);
     let eta = interface.eta_incident / interface.eta_transmitted;
     let Some(direction) = ray.direction().refract(interface.normal, eta) else {
         return Ok(None);
@@ -254,12 +329,17 @@ fn refraction_ray(ray: Ray, hit: SceneHit, material_ior: f32) -> Result<Option<R
         .ok_or(RenderError::RefractionRayGenerationFailed)
 }
 
-/// Temporary Phase 3 transmission blend applied after the reflection blend.
+/// Fresnel split of the transmissive optical portion: `reflected * F + refracted * (1 - F)`.
+fn compose_fresnel(reflected: Color, refracted: Color, reflectance: f32) -> Color {
+    reflected.scale(reflectance) + refracted.scale(1.0 - reflectance)
+}
+
+/// Transmissive-material composition: `local * (1 - transparency) + optical * transparency`.
 ///
-/// `transparency` is a constant, angle-independent coefficient; Fresnel composition replaces this
-/// in a later mission.
-fn blend_transmission(base_with_reflection: Color, refracted: Color, transparency: f32) -> Color {
-    base_with_reflection.lerp(refracted, transparency)
+/// `transparency` is the fraction of the surface that behaves as a clear optical interface; the
+/// remainder keeps its textured, lit local appearance.
+fn blend_transmissive(local: Color, optical: Color, transparency: f32) -> Color {
+    local.scale(1.0 - transparency) + optical.scale(transparency)
 }
 
 /// Local surface shading: texture, albedo, and direct lighting with hard-shadow visibility.
@@ -320,10 +400,11 @@ mod tests {
     use std::f32::consts::FRAC_PI_2;
 
     use super::{
-        MAX_RAY_DEPTH, MediumTransition, PRIMARY_RAY_DEPTH, RAY_ORIGIN_BIAS,
-        REFLECTION_RAY_ORIGIN_BIAS, REFRACTION_RAY_ORIGIN_BIAS, RefractionInterface, RenderError,
-        Renderer, Tracer, blend_reflection, blend_transmission, can_spawn_secondary_ray,
-        pixel_center, reflection_ray, refraction_interface, refraction_ray, shade_hit,
+        MAX_RAY_DEPTH, MediumTransition, OpticalInterface, PRIMARY_RAY_DEPTH, RAY_ORIGIN_BIAS,
+        REFLECTION_RAY_ORIGIN_BIAS, REFRACTION_RAY_ORIGIN_BIAS, RenderError, Renderer,
+        TOTAL_INTERNAL_REFLECTANCE, Tracer, blend_reflection, blend_transmissive,
+        can_spawn_secondary_ray, compose_fresnel, optical_interface, pixel_center, reflection_ray,
+        refraction_ray, shade_hit,
     };
     use crate::{
         camera::OrbitalCamera,
@@ -336,7 +417,7 @@ mod tests {
         },
         math::Vec3,
         ray::Ray,
-        render::{Color, Framebuffer},
+        render::{Color, Framebuffer, fresnel::schlick_reflectance},
         scene::{Scene, SceneObject},
     };
 
@@ -558,6 +639,38 @@ mod tests {
         scene
     }
 
+    /// Unit cube of a glass-index material whose `(0.9, 0.1, 0.3)` bottom face is distinguishable
+    /// from its `(0.2, 0.4, 0.6)` top and sides, so paths ending on the bottom are observable.
+    fn two_tone_transmissive_cube_scene(transparency: f32) -> Scene {
+        let mut scene = Scene::new();
+        let top = scene
+            .add_texture(Texture::solid(Color::new(0.2, 0.4, 0.6)))
+            .unwrap();
+        let bottom = scene
+            .add_texture(Texture::solid(Color::new(0.9, 0.1, 0.3)))
+            .unwrap();
+        let material = scene
+            .add_material(
+                Material::try_new(
+                    TextureSelection::TopSideBottom {
+                        top,
+                        side: top,
+                        bottom,
+                    },
+                    Color::WHITE,
+                    0.0,
+                    transparency,
+                    0.0,
+                )
+                .unwrap()
+                .with_ior(GLASS_IOR)
+                .unwrap(),
+            )
+            .unwrap();
+        scene.add(SceneObject::new(unit_cube(), material));
+        scene
+    }
+
     /// Ray refracted into the unit cube by `tilted_top_ray`, with its bottom-face exit hit.
     fn inside_ray_and_exit_hit(scene: &Scene) -> (Ray, crate::scene::SceneHit) {
         let entry = scene
@@ -582,6 +695,63 @@ mod tests {
             lighting,
         )
         .unwrap()
+    }
+
+    /// Schlick reflectance of `ray` at its closest hit on a glass-index surface.
+    fn glass_reflectance(scene: &Scene, ray: Ray) -> f32 {
+        let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+        optical_interface(ray.direction(), hit.geometry.normal, GLASS_IOR)
+            .fresnel_reflectance(ray.direction())
+            .unwrap()
+    }
+
+    /// The Mission 18 transmissive composition written out independently of the tracer:
+    /// `local(1 - t) + (reflected F + refracted (1 - F)) t`, with children traced at `depth + 1`.
+    fn expected_transmissive(
+        tracer: &Tracer,
+        scene: &Scene,
+        ray: Ray,
+        depth: u32,
+        transparency: f32,
+    ) -> Color {
+        let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+        let local = traced_local(scene, ray, tracer.lighting);
+        let reflected = tracer
+            .trace_ray(reflection_ray(ray, hit).unwrap(), depth + 1)
+            .unwrap();
+        let (refracted, reflectance) = match refraction_ray(ray, hit, GLASS_IOR).unwrap() {
+            Some(refracted_ray) => (
+                tracer.trace_ray(refracted_ray, depth + 1).unwrap(),
+                glass_reflectance(scene, ray),
+            ),
+            None => (Color::BLACK, 1.0),
+        };
+        let optical = reflected.scale(reflectance) + refracted.scale(1.0 - reflectance);
+        local.scale(1.0 - transparency) + optical.scale(transparency)
+    }
+
+    /// Ray from inside the unit cube striking its +X face 45 degrees off the normal, beyond
+    /// glass's ~41.8 degree critical angle.
+    fn internal_tir_ray() -> Ray {
+        Ray::try_new(Vec3::new(0.5, 0.9, 0.5), Vec3::new(1.0, -1.0, 0.0)).unwrap()
+    }
+
+    /// Ray striking the unit cube's top face about 87 degrees off the normal.
+    fn grazing_top_ray() -> Ray {
+        Ray::try_new(Vec3::new(-1.5, 1.1, 0.5), Vec3::new(1.0, -0.05, 0.0)).unwrap()
+    }
+
+    fn max_channel_difference(a: Color, b: Color) -> f32 {
+        (a.r - b.r)
+            .abs()
+            .max((a.g - b.g).abs())
+            .max((a.b - b.b).abs())
+    }
+
+    fn assert_strictly_inside_unit_cube(point: Vec3) {
+        for c in [point.x, point.y, point.z] {
+            assert!(c > 0.0 && c < 1.0, "{point:?} is not inside the unit cube");
+        }
     }
 
     #[test]
@@ -1150,8 +1320,8 @@ mod tests {
 
         assert!(ray.direction().dot(hit.geometry.normal) < 0.0);
         assert_eq!(
-            refraction_interface(ray.direction(), hit.geometry.normal, GLASS_IOR),
-            RefractionInterface {
+            optical_interface(ray.direction(), hit.geometry.normal, GLASS_IOR),
+            OpticalInterface {
                 transition: MediumTransition::Entering,
                 eta_incident: AIR_IOR,
                 eta_transmitted: GLASS_IOR,
@@ -1208,8 +1378,8 @@ mod tests {
 
         assert!(inside.direction().dot(exit.geometry.normal) > 0.0);
         assert_eq!(
-            refraction_interface(inside.direction(), exit.geometry.normal, GLASS_IOR),
-            RefractionInterface {
+            optical_interface(inside.direction(), exit.geometry.normal, GLASS_IOR),
+            OpticalInterface {
                 transition: MediumTransition::Exiting,
                 eta_incident: GLASS_IOR,
                 eta_transmitted: AIR_IOR,
@@ -1241,26 +1411,196 @@ mod tests {
     #[test]
     fn total_internal_reflection_spawns_no_refracted_ray() {
         let scene = transmissive_cube_scene(0.0, 1.0);
-        // From inside, 45 degrees onto the +X face exceeds glass's ~41.8 degree critical angle.
-        let ray = Ray::try_new(Vec3::new(0.5, 0.9, 0.5), Vec3::new(1.0, -1.0, 0.0)).unwrap();
+        let ray = internal_tir_ray();
         let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
         assert_eq!(hit.geometry.face, CubeFace::PositiveX);
 
         assert_eq!(refraction_ray(ray, hit, GLASS_IOR), Ok(None));
         // A lower index clears the critical angle, so the geometry alone is not the cause.
         assert!(refraction_ray(ray, hit, 1.2).unwrap().is_some());
+    }
 
-        // With no reflectivity, a fully transparent surface under TIR shows its local shading.
-        let lighting = upward_light_with_ambient();
+    #[test]
+    fn total_internal_reflection_routes_the_optical_portion_to_reflection() {
+        // The +X face is struck from inside and mirrors onto the distinct bottom face.
+        let lighting = ambient_only();
         let environment = environment();
-        for depth in PRIMARY_RAY_DEPTH..=MAX_RAY_DEPTH {
+        let ray = internal_tir_ray();
+        let mut scene = two_tone_transmissive_cube_scene(0.85);
+        let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+        let reflected_ray = reflection_ray(ray, hit).unwrap();
+        assert!(reflected_ray.direction().is_finite() && reflected_ray.origin().is_finite());
+        assert_eq!(TOTAL_INTERNAL_REFLECTANCE, 1.0);
+        let before_witness = Tracer::new(&scene, lighting, &environment)
+            .trace_ray(ray, PRIMARY_RAY_DEPTH)
+            .unwrap();
+
+        // A witness where the ray would transmit with a lower index stays invisible: no refracted
+        // ray is traced.
+        let white = add_solid_material(&mut scene, Color::WHITE);
+        scene.add(SceneObject::new(
+            Aabb::try_new(Vec3::new(1.5, -1.5, 0.0), Vec3::new(2.5, 0.0, 1.0)).unwrap(),
+            white,
+        ));
+        let tracer = Tracer::new(&scene, lighting, &environment);
+        let local = traced_local(&scene, ray, lighting);
+
+        for depth in PRIMARY_RAY_DEPTH..MAX_RAY_DEPTH {
+            let reflected = tracer.trace_ray(reflected_ray, depth + 1).unwrap();
+            let traced = tracer.trace_ray(ray, depth).unwrap();
+
+            assert!(traced.is_finite());
+            // The local interface keeps exactly its `1 - transparency` share.
+            assert_color_approx_eq(traced, local.scale(0.15) + reflected.scale(0.85));
             assert_color_approx_eq(
-                Tracer::new(&scene, lighting, &environment)
-                    .trace_ray(ray, depth)
-                    .unwrap(),
-                traced_local(&scene, ray, lighting),
+                traced,
+                expected_transmissive(&tracer, &scene, ray, depth, 0.85),
+            );
+            // Mission 17 fell back to the local color for the whole transmissive portion.
+            assert!(
+                max_channel_difference(traced, local) > 0.05,
+                "{traced:?} vs {local:?}"
             );
         }
+        assert_eq!(tracer.trace_ray(ray, PRIMARY_RAY_DEPTH), Ok(before_witness));
+    }
+
+    #[test]
+    fn canonical_glass_under_total_internal_reflection_no_longer_shows_its_local_fallback() {
+        let (mut scene, materials) = canonical_scene();
+        scene.add(SceneObject::new(unit_cube(), materials.glass));
+        let lighting = upward_light_with_ambient();
+        let environment = environment();
+        let tracer = Tracer::new(&scene, lighting, &environment);
+        let ray = internal_tir_ray();
+        let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+        let reflected = tracer
+            .trace_ray(reflection_ray(ray, hit).unwrap(), 1)
+            .unwrap();
+        let local = traced_local(&scene, ray, lighting);
+
+        let traced = tracer.trace_ray(ray, PRIMARY_RAY_DEPTH).unwrap();
+
+        assert_color_approx_eq(traced, local.scale(0.15) + reflected.scale(0.85));
+        // The Mission 17 result was lerp(local, reflected, reflectivity): mostly local color,
+        // which made total-internal-reflection edges glow with the lit interface texture.
+        let mission_17_fallback = local.lerp(reflected, 0.15);
+        assert!((traced.r - mission_17_fallback.r).abs() > 0.1);
+    }
+
+    #[test]
+    fn interfaces_choose_indices_and_a_normal_opposing_the_incident_ray() {
+        let scene = transmissive_cube_scene(0.0, 1.0);
+        let (inside, _) = inside_ray_and_exit_hit(&scene);
+        let cases = [
+            (downward_ray(), MediumTransition::Entering),
+            (tilted_top_ray(), MediumTransition::Entering),
+            (angled_top_ray(), MediumTransition::Entering),
+            (grazing_top_ray(), MediumTransition::Entering),
+            (inside, MediumTransition::Exiting),
+            (internal_tir_ray(), MediumTransition::Exiting),
+        ];
+
+        for (ray, transition) in cases {
+            let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+            let outward = hit.geometry.normal;
+            let interface = optical_interface(ray.direction(), outward, GLASS_IOR);
+            let expected_etas = match transition {
+                MediumTransition::Entering => (AIR_IOR, GLASS_IOR),
+                MediumTransition::Exiting => (GLASS_IOR, AIR_IOR),
+            };
+
+            assert_eq!(
+                MediumTransition::classify(ray.direction(), outward),
+                transition
+            );
+            assert_eq!(interface.transition, transition);
+            assert_eq!(
+                (interface.eta_incident, interface.eta_transmitted),
+                expected_etas
+            );
+            assert_eq!(interface.normal, transition.oriented_normal(outward));
+            assert!(ray.direction().dot(interface.normal) < 0.0);
+            let cosine = interface.incidence_cosine(ray.direction());
+            assert!((cosine - ray.direction().dot(outward).abs()).abs() < 1.0e-6);
+            assert!((0.0..=1.0).contains(&cosine));
+            // The oriented normal is derived; the stored normal stays the outward face normal.
+            assert_eq!(scene.closest_hit(ray, 0.0, f32::INFINITY), Some(hit));
+            assert_eq!(outward, hit.geometry.face.normal());
+        }
+    }
+
+    #[test]
+    fn exterior_reflection_origin_lies_outside_the_object() {
+        let scene = transmissive_cube_scene(0.0, 1.0);
+
+        for ray in [
+            downward_ray(),
+            tilted_top_ray(),
+            angled_top_ray(),
+            grazing_top_ray(),
+        ] {
+            let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+            let reflected = reflection_ray(ray, hit).unwrap();
+
+            assert_eq!(
+                reflected.origin(),
+                hit.geometry.position + hit.geometry.normal * REFLECTION_RAY_ORIGIN_BIAS
+            );
+            assert!(reflected.origin().y > 1.0);
+            assert_eq!(scene.closest_hit(reflected, 0.0, f32::INFINITY), None);
+        }
+    }
+
+    #[test]
+    fn interior_reflection_origin_stays_inside_the_glass() {
+        let scene = transmissive_cube_scene(0.0, 1.0);
+        let ray = internal_tir_ray();
+        let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+        assert_eq!(hit.geometry.face, CubeFace::PositiveX);
+
+        let reflected = reflection_ray(ray, hit).unwrap();
+
+        assert_eq!(REFLECTION_RAY_ORIGIN_BIAS, 1.0e-4);
+        assert_eq!(
+            reflected.origin(),
+            hit.geometry.position - hit.geometry.normal * REFLECTION_RAY_ORIGIN_BIAS
+        );
+        assert_strictly_inside_unit_cube(reflected.origin());
+        // Still inside, the mirrored ray crosses the interior to the bottom face, where it is
+        // again an exiting ray, instead of re-entering the face it reflected from.
+        let next = scene.closest_hit(reflected, 0.0, f32::INFINITY).unwrap();
+        assert_eq!(next.geometry.face, CubeFace::NegativeY);
+        assert!((next.geometry.t - 0.4 * std::f32::consts::SQRT_2).abs() < 1.0e-3);
+        assert_eq!(
+            MediumTransition::classify(reflected.direction(), next.geometry.normal),
+            MediumTransition::Exiting
+        );
+
+        // The Mission 17 exterior origin put the same ray just outside, re-entering at once.
+        let pushed_outside = Ray::try_new(
+            hit.geometry.position + hit.geometry.normal * REFLECTION_RAY_ORIGIN_BIAS,
+            reflected.direction(),
+        )
+        .unwrap();
+        let reentry = scene
+            .closest_hit(pushed_outside, 0.0, f32::INFINITY)
+            .unwrap();
+        assert_eq!(reentry.geometry.face, CubeFace::PositiveX);
+        assert!(reentry.geometry.t < 1.0e-3);
+    }
+
+    #[test]
+    fn interior_partial_reflection_continues_through_the_interior() {
+        let scene = transmissive_cube_scene(0.0, 1.0);
+        let (inside, exit) = inside_ray_and_exit_hit(&scene);
+
+        let reflected = reflection_ray(inside, exit).unwrap();
+
+        assert_strictly_inside_unit_cube(reflected.origin());
+        let next = scene.closest_hit(reflected, 0.0, f32::INFINITY).unwrap();
+        assert_eq!(next.geometry.face, CubeFace::PositiveY);
+        assert!(next.geometry.t > 0.9);
     }
 
     #[test]
@@ -1269,41 +1609,24 @@ mod tests {
         // so every depth below the maximum visibly blends in the refracted contribution.
         let lighting = ambient_only();
         let environment = environment();
-        let mut scene = Scene::new();
-        let top = scene
-            .add_texture(Texture::solid(Color::new(0.2, 0.4, 0.6)))
-            .unwrap();
-        let bottom = scene
-            .add_texture(Texture::solid(Color::new(0.9, 0.1, 0.3)))
-            .unwrap();
-        let material = scene
-            .add_material(
-                Material::try_new(
-                    TextureSelection::TopSideBottom {
-                        top,
-                        side: top,
-                        bottom,
-                    },
-                    Color::WHITE,
-                    0.0,
-                    0.5,
-                    0.0,
-                )
-                .unwrap()
-                .with_ior(GLASS_IOR)
-                .unwrap(),
-            )
-            .unwrap();
-        scene.add(SceneObject::new(unit_cube(), material));
+        let scene = two_tone_transmissive_cube_scene(0.5);
         let tracer = Tracer::new(&scene, lighting, &environment);
         let ray = tilted_top_ray();
         let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+        let reflected_ray = reflection_ray(ray, hit).unwrap();
         let refracted_ray = refraction_ray(ray, hit, GLASS_IOR).unwrap().unwrap();
+        let reflectance = glass_reflectance(&scene, ray);
         let local = traced_local(&scene, ray, lighting);
 
         for depth in PRIMARY_RAY_DEPTH..MAX_RAY_DEPTH {
+            // Both children are traced exactly one level deeper than their parent.
+            let reflected = tracer.trace_ray(reflected_ray, depth + 1).unwrap();
             let refracted = tracer.trace_ray(refracted_ray, depth + 1).unwrap();
-            let expected = blend_transmission(local, refracted, 0.5);
+            let expected = blend_transmissive(
+                local,
+                compose_fresnel(reflected, refracted, reflectance),
+                0.5,
+            );
 
             assert_ne!(expected, local);
             assert_color_approx_eq(tracer.trace_ray(ray, depth).unwrap(), expected);
@@ -1322,35 +1645,70 @@ mod tests {
             .trace_ray(ray, MAX_RAY_DEPTH)
             .unwrap();
 
+        // Witnesses on both the transmitted and the mirrored path stay invisible: neither
+        // branch is traced, yet the terminal hit still receives its full local shading.
         let white = add_solid_material(&mut scene, Color::WHITE);
-        scene.add(SceneObject::new(
-            Aabb::try_new(Vec3::new(0.0, -2.0, 0.0), Vec3::new(2.0, -1.0, 1.0)).unwrap(),
-            white,
-        ));
+        for (min, max) in [
+            (Vec3::new(0.0, -2.0, 0.0), Vec3::new(2.0, -1.0, 1.0)),
+            (Vec3::new(0.6, 2.3, 0.0), Vec3::new(1.3, 2.8, 1.0)),
+        ] {
+            scene.add(SceneObject::new(Aabb::try_new(min, max).unwrap(), white));
+        }
+        let tracer = Tracer::new(&scene, lighting, &environment);
 
         assert_eq!(without_witness, local);
-        assert_eq!(
-            Tracer::new(&scene, lighting, &environment).trace_ray(ray, MAX_RAY_DEPTH),
-            Ok(local)
-        );
+        assert_ne!(local, Color::BLACK);
+        assert_eq!(tracer.trace_ray(ray, MAX_RAY_DEPTH), Ok(local));
+        assert_ne!(tracer.trace_ray(ray, MAX_RAY_DEPTH - 1), Ok(local));
     }
 
     #[test]
     fn refracted_miss_samples_environment_through_common_miss_path() {
         let environment = environment();
         let scene = transmissive_cube_scene(0.0, 1.0);
-        let ray = tilted_top_ray();
-        let entry = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
-        let inside = refraction_ray(ray, entry, GLASS_IOR).unwrap().unwrap();
-        let exit = scene.closest_hit(inside, 0.0, f32::INFINITY).unwrap();
+        let tracer = Tracer::new(&scene, ambient_only(), &environment);
+        let (inside, exit) = inside_ray_and_exit_hit(&scene);
         let outgoing = refraction_ray(inside, exit, GLASS_IOR).unwrap().unwrap();
+        let internal = reflection_ray(inside, exit).unwrap();
         assert_eq!(scene.closest_hit(outgoing, 0.0, f32::INFINITY), None);
+        let sky = environment.sample(outgoing.direction());
+        assert_eq!(tracer.trace_ray(outgoing, MAX_RAY_DEPTH), Ok(sky));
+
+        // One level above the limit, the exiting ray's refracted child is that environment sample.
+        let reflectance = glass_reflectance(&scene, inside);
+        let expected = compose_fresnel(
+            tracer.trace_ray(internal, MAX_RAY_DEPTH).unwrap(),
+            sky,
+            reflectance,
+        );
+
+        assert!(reflectance < 0.05);
+        assert_color_approx_eq(
+            tracer.trace_ray(inside, MAX_RAY_DEPTH - 1).unwrap(),
+            expected,
+        );
+    }
+
+    #[test]
+    fn glass_reflected_miss_samples_environment_through_common_miss_path() {
+        let environment = environment();
+        let scene = transmissive_cube_scene(0.0, 1.0);
+        let tracer = Tracer::new(&scene, ambient_only(), &environment);
+        let ray = tilted_top_ray();
+        let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+        let reflected = reflection_ray(ray, hit).unwrap();
+        let refracted = refraction_ray(ray, hit, GLASS_IOR).unwrap().unwrap();
+        assert_eq!(scene.closest_hit(reflected, 0.0, f32::INFINITY), None);
+        let sky = environment.sample(reflected.direction());
+        assert_eq!(tracer.trace_ray(reflected, MAX_RAY_DEPTH), Ok(sky));
 
         assert_color_approx_eq(
-            Tracer::new(&scene, ambient_only(), &environment)
-                .trace_ray(ray, PRIMARY_RAY_DEPTH)
-                .unwrap(),
-            environment.sample(outgoing.direction()),
+            tracer.trace_ray(ray, MAX_RAY_DEPTH - 1).unwrap(),
+            compose_fresnel(
+                sky,
+                tracer.trace_ray(refracted, MAX_RAY_DEPTH).unwrap(),
+                glass_reflectance(&scene, ray),
+            ),
         );
     }
 
@@ -1379,22 +1737,19 @@ mod tests {
         };
         let environment = environment();
         let ray = tilted_top_ray();
-
-        let at_refracted_path = slab_scene(1.2, 1.55);
-        let at_straight_path = slab_scene(1.55, 1.85);
-
-        assert_color_approx_eq(
-            Tracer::new(&at_refracted_path, ambient_only(), &environment)
+        let trace = |scene: &Scene| {
+            Tracer::new(scene, ambient_only(), &environment)
                 .trace_ray(ray, PRIMARY_RAY_DEPTH)
-                .unwrap(),
-            witness_color,
-        );
-        assert_color_approx_eq(
-            Tracer::new(&at_straight_path, ambient_only(), &environment)
-                .trace_ray(ray, PRIMARY_RAY_DEPTH)
-                .unwrap(),
-            environment.sample(ray.direction()),
-        );
+                .unwrap()
+        };
+
+        let unobstructed = trace(&slab_scene(10.0, 11.0));
+        let at_refracted_path = trace(&slab_scene(1.2, 1.55));
+        let at_straight_path = trace(&slab_scene(1.55, 1.85));
+
+        // Both near-normal interfaces transmit about 96%, so the witness dominates the pixel.
+        assert!(at_refracted_path.r - unobstructed.r > 0.5);
+        assert_eq!(at_straight_path, unobstructed);
     }
 
     #[test]
@@ -1445,7 +1800,7 @@ mod tests {
         fn stack_value<T: Copy>() {}
         stack_value::<Ray>();
         stack_value::<crate::scene::SceneHit>();
-        stack_value::<RefractionInterface>();
+        stack_value::<OpticalInterface>();
         stack_value::<Color>();
     }
 
@@ -1470,15 +1825,32 @@ mod tests {
     }
 
     #[test]
-    fn transmission_blend_is_exact_linear_interpolation() {
-        let base = Color::new(0.2, 0.4, 0.6);
-        let refracted = Color::new(1.0, 0.0, 0.5);
+    fn fresnel_composition_splits_reflected_and_refracted_radiance_exactly() {
+        let reflected = Color::new(0.9, 0.1, 0.3);
+        let refracted = Color::new(0.2, 0.4, 0.6);
 
-        assert_color_approx_eq(blend_transmission(base, refracted, 0.0), base);
-        assert_color_approx_eq(blend_transmission(base, refracted, 1.0), refracted);
+        assert_eq!(compose_fresnel(reflected, refracted, 0.0), refracted);
+        assert_eq!(compose_fresnel(reflected, refracted, 1.0), reflected);
         assert_color_approx_eq(
-            blend_transmission(base, refracted, 0.85),
-            base.scale(0.15) + refracted.scale(0.85),
+            compose_fresnel(reflected, refracted, 0.04),
+            reflected.scale(0.04) + refracted.scale(0.96),
+        );
+        assert_color_approx_eq(
+            compose_fresnel(reflected, refracted, 0.7),
+            Color::new(0.69, 0.19, 0.39),
+        );
+    }
+
+    #[test]
+    fn transmissive_blend_weights_local_by_one_minus_transparency() {
+        let local = Color::new(0.2, 0.4, 0.6);
+        let optical = Color::new(1.0, 0.0, 0.5);
+
+        assert_eq!(blend_transmissive(local, optical, 0.0), local);
+        assert_eq!(blend_transmissive(local, optical, 1.0), optical);
+        assert_color_approx_eq(
+            blend_transmissive(local, optical, 0.85),
+            local.scale(0.15) + optical.scale(0.85),
         );
     }
 
@@ -1505,42 +1877,82 @@ mod tests {
     }
 
     #[test]
-    fn full_transparency_selects_refracted_radiance() {
+    fn full_transparency_yields_only_the_fresnel_optical_composition() {
         let lighting = upward_light_with_ambient();
         let environment = environment();
         let scene = transmissive_cube_scene(0.0, 1.0);
         let tracer = Tracer::new(&scene, lighting, &environment);
         let ray = tilted_top_ray();
         let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
-        let refracted_ray = refraction_ray(ray, hit, GLASS_IOR).unwrap().unwrap();
+        let reflected = tracer
+            .trace_ray(reflection_ray(ray, hit).unwrap(), 1)
+            .unwrap();
+        let refracted = tracer
+            .trace_ray(refraction_ray(ray, hit, GLASS_IOR).unwrap().unwrap(), 1)
+            .unwrap();
+        let reflectance = glass_reflectance(&scene, ray);
 
         assert_color_approx_eq(
             tracer.trace_ray(ray, PRIMARY_RAY_DEPTH).unwrap(),
-            tracer.trace_ray(refracted_ray, 1).unwrap(),
+            reflected.scale(reflectance) + refracted.scale(1.0 - reflectance),
         );
     }
 
     #[test]
-    fn composition_blends_reflection_then_transmission_with_constant_coefficients() {
-        // No Fresnel: head-on, oblique, and TIR-inducing incidences use the same coefficients.
+    fn zero_transparency_transmissive_material_yields_local_shading_only() {
+        // Glass index and no reflectivity, but nothing transmits: only the local surface shows.
+        let lighting = upward_light_with_ambient();
+        let environment = environment();
+        let scene = transmissive_cube_scene(0.0, 0.0);
+        let tracer = Tracer::new(&scene, lighting, &environment);
+
+        for ray in [downward_ray(), tilted_top_ray(), grazing_top_ray()] {
+            for depth in PRIMARY_RAY_DEPTH..=MAX_RAY_DEPTH {
+                assert_eq!(
+                    tracer.trace_ray(ray, depth),
+                    Ok(traced_local(&scene, ray, lighting))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn intermediate_transparency_matches_the_exact_fresnel_equation() {
         let lighting = upward_light_with_ambient();
         let environment = environment();
         let scene = transmissive_cube_scene(0.25, 0.4);
         let tracer = Tracer::new(&scene, lighting, &environment);
 
-        for ray in [downward_ray(), tilted_top_ray(), angled_top_ray()] {
+        for ray in [
+            downward_ray(),
+            tilted_top_ray(),
+            angled_top_ray(),
+            grazing_top_ray(),
+            internal_tir_ray(),
+        ] {
             let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+            let local = traced_local(&scene, ray, lighting);
             let reflected = tracer
                 .trace_ray(reflection_ray(ray, hit).unwrap(), 1)
                 .unwrap();
-            let refracted = tracer
-                .trace_ray(refraction_ray(ray, hit, GLASS_IOR).unwrap().unwrap(), 1)
-                .unwrap();
-            let base = traced_local(&scene, ray, lighting).lerp(reflected, 0.25);
+            // Every exterior ray here enters from air; the cosine is |D·N| by construction.
+            let (refracted, reflectance) = match refraction_ray(ray, hit, GLASS_IOR).unwrap() {
+                Some(refracted_ray) => (
+                    tracer.trace_ray(refracted_ray, 1).unwrap(),
+                    schlick_reflectance(
+                        ray.direction().dot(hit.geometry.normal).abs(),
+                        AIR_IOR,
+                        GLASS_IOR,
+                    )
+                    .unwrap(),
+                ),
+                None => (Color::BLACK, 1.0),
+            };
+            let optical = reflected.scale(reflectance) + refracted.scale(1.0 - reflectance);
 
             assert_color_approx_eq(
                 tracer.trace_ray(ray, PRIMARY_RAY_DEPTH).unwrap(),
-                base.lerp(refracted, 0.4),
+                local.scale(0.6) + optical.scale(0.4),
             );
         }
     }
@@ -1565,11 +1977,149 @@ mod tests {
             .trace_ray(refraction_ray(ray, hit, GLASS_IOR).unwrap().unwrap(), 1)
             .unwrap();
         let local = traced_local(&scene, ray, lighting);
+        let reflectance = glass_reflectance(&scene, ray);
 
         let traced = tracer.trace_ray(ray, PRIMARY_RAY_DEPTH).unwrap();
 
-        assert_color_approx_eq(traced, local.lerp(reflected, 0.15).lerp(refracted, 0.85));
-        assert_ne!(traced, local.lerp(reflected, 0.15));
+        // The stored 0.15 reflectivity plays no part: Fresnel alone splits the 85% optical share.
+        assert_color_approx_eq(
+            traced,
+            local.scale(0.15)
+                + (reflected.scale(reflectance) + refracted.scale(1.0 - reflectance)).scale(0.85),
+        );
+        assert_color_approx_eq(traced, expected_transmissive(&tracer, &scene, ray, 0, 0.85));
+        let mission_17 = local.lerp(reflected, 0.15).lerp(refracted, 0.85);
+        assert!(max_channel_difference(traced, mission_17) > 1.0e-3);
+    }
+
+    #[test]
+    fn normal_incidence_glass_is_mostly_refraction() {
+        let lighting = ambient_only();
+        let environment = environment();
+        let scene = transmissive_cube_scene(0.0, 1.0);
+        let tracer = Tracer::new(&scene, lighting, &environment);
+        let ray = downward_ray();
+        let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+        let reflected = tracer
+            .trace_ray(reflection_ray(ray, hit).unwrap(), 1)
+            .unwrap();
+        let refracted = tracer
+            .trace_ray(refraction_ray(ray, hit, GLASS_IOR).unwrap().unwrap(), 1)
+            .unwrap();
+        let reflectance = glass_reflectance(&scene, ray);
+
+        assert!((reflectance - 0.04).abs() < 1.0e-6);
+        assert_color_approx_eq(
+            tracer.trace_ray(ray, PRIMARY_RAY_DEPTH).unwrap(),
+            reflected.scale(0.04) + refracted.scale(0.96),
+        );
+    }
+
+    #[test]
+    fn grazing_glass_reflects_more_than_normal_incidence() {
+        let lighting = ambient_only();
+        let environment = environment();
+        let scene = transmissive_cube_scene(0.0, 1.0);
+        let tracer = Tracer::new(&scene, lighting, &environment);
+
+        let normal = glass_reflectance(&scene, downward_ray());
+        let oblique = glass_reflectance(&scene, angled_top_ray());
+        let grazing = glass_reflectance(&scene, grazing_top_ray());
+
+        assert!(normal < oblique && oblique < grazing);
+        assert!(normal < 0.05 && oblique < 0.1 && grazing > 0.75);
+        for ray in [downward_ray(), angled_top_ray(), grazing_top_ray()] {
+            assert_color_approx_eq(
+                tracer.trace_ray(ray, PRIMARY_RAY_DEPTH).unwrap(),
+                expected_transmissive(&tracer, &scene, ray, PRIMARY_RAY_DEPTH, 1.0),
+            );
+        }
+    }
+
+    #[test]
+    fn stored_reflectivity_is_not_double_counted_for_transmissive_materials() {
+        let lighting = upward_light_with_ambient();
+        let environment = environment();
+        let unreflective = transmissive_cube_scene(0.0, 0.85);
+        let reflective = transmissive_cube_scene(0.9, 0.85);
+
+        for ray in [
+            downward_ray(),
+            tilted_top_ray(),
+            grazing_top_ray(),
+            internal_tir_ray(),
+        ] {
+            for depth in PRIMARY_RAY_DEPTH..=MAX_RAY_DEPTH {
+                assert_eq!(
+                    Tracer::new(&reflective, lighting, &environment).trace_ray(ray, depth),
+                    Tracer::new(&unreflective, lighting, &environment).trace_ray(ray, depth)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn obsidian_reflection_stays_constant_and_non_fresnel() {
+        let (mut scene, materials) = canonical_scene();
+        scene.add(SceneObject::new(unit_cube(), materials.obsidian));
+        let obsidian = scene.material(materials.obsidian).unwrap();
+        assert_eq!(obsidian.reflectivity(), 0.35);
+        assert_eq!(obsidian.transparency(), 0.0);
+        let lighting = upward_light_with_ambient();
+        let environment = environment();
+        let tracer = Tracer::new(&scene, lighting, &environment);
+
+        for ray in [downward_ray(), angled_top_ray(), grazing_top_ray()] {
+            let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+            let reflected = tracer
+                .trace_ray(reflection_ray(ray, hit).unwrap(), 1)
+                .unwrap();
+
+            assert_color_approx_eq(
+                tracer.trace_ray(ray, PRIMARY_RAY_DEPTH).unwrap(),
+                traced_local(&scene, ray, lighting).scale(0.65) + reflected.scale(0.35),
+            );
+        }
+    }
+
+    #[test]
+    fn glass_below_maximum_depth_shows_geometry_in_both_branches() {
+        // `tilted_top_ray` mirrors up through the first witness and, refracted twice, leaves the
+        // cube's bottom toward the second.
+        let reflection_witness = (Vec3::new(0.6, 2.3, 0.0), Vec3::new(1.3, 2.8, 1.0));
+        let refraction_witness = (Vec3::new(0.8, -2.0, 0.0), Vec3::new(1.6, -1.2, 1.0));
+        let scene_with = |witnesses: &[(Vec3, Vec3)]| {
+            let mut scene = transmissive_cube_scene(0.0, 1.0);
+            let witness = add_solid_material(&mut scene, Color::new(0.9, 0.1, 0.3));
+            for &(min, max) in witnesses {
+                scene.add(SceneObject::new(Aabb::try_new(min, max).unwrap(), witness));
+            }
+            scene
+        };
+        let environment = environment();
+        let ray = tilted_top_ray();
+        let bare = scene_with(&[]);
+        let bare_color = Tracer::new(&bare, ambient_only(), &environment)
+            .trace_ray(ray, PRIMARY_RAY_DEPTH)
+            .unwrap();
+
+        for witnesses in [
+            &[reflection_witness][..],
+            &[refraction_witness][..],
+            &[reflection_witness, refraction_witness][..],
+        ] {
+            let scene = scene_with(witnesses);
+            let tracer = Tracer::new(&scene, ambient_only(), &environment);
+            let traced = tracer.trace_ray(ray, PRIMARY_RAY_DEPTH).unwrap();
+
+            assert!(max_channel_difference(traced, bare_color) > 1.0e-3);
+            for depth in PRIMARY_RAY_DEPTH..MAX_RAY_DEPTH {
+                assert_color_approx_eq(
+                    tracer.trace_ray(ray, depth).unwrap(),
+                    expected_transmissive(&tracer, &scene, ray, depth, 1.0),
+                );
+            }
+        }
     }
 
     #[test]
