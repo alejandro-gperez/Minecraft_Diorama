@@ -14,7 +14,8 @@ larger EggWars world and advanced optical effects are planned work, not current 
 ## Current Status
 
 Phase 1 — Core Raytracer — is complete. Phase 2 — Materials, Textures, and Lighting — is now
-underway, beginning with CPU texture and material data rather than final texture art or lighting.
+underway. Classic block textures and CPU-side material selection are integrated; lighting and
+final optical tuning remain future Phase 2 work.
 
 The current implementation includes:
 
@@ -32,7 +33,9 @@ The current implementation includes:
 - separate CPU render timing and presentation FPS diagnostics;
 - automated unit tests for the mathematical and geometric foundation;
 - CPU-owned, arbitrary-size textures with deterministic nearest-neighbor sampling;
-- validated material properties and compact IDs shared by scene objects;
+- project-owned binary P6 PPM loading with explicit validation errors;
+- a CPU-owned texture registry addressed by compact, stable `TextureId` values;
+- validated material properties and uniform or top/side/bottom texture selection;
 - face-aware, local AABB UV coordinates propagated directly from slab intersections.
 
 ## Architecture
@@ -116,7 +119,10 @@ optional future polish.
 
 PPM cannot preserve alpha. Offline conversion composites transparent glass texels against white,
 retaining the cyan edge pattern as RGB; physical transparency remains a material property for a
-later raytracing phase. Raylib is not used to load or sample surface textures.
+later raytracing phase. At startup, the project-owned P6 loader validates headers, dimensions,
+the `255` maximum channel value, and exact RGB payload size before registering textures. Materials
+store compact texture IDs rather than owning or cloning texture data. Raylib is not used to load
+or sample surface textures.
 
 ## Performance
 
@@ -131,10 +137,11 @@ complexity.
 
 ## Testing
 
-The current suite contains 102 tests covering vector arithmetic and normalization, ray invariants,
-AABB construction and edge cases, camera basis/ray generation/orbit limits, textures, materials,
-cube-face UV orientation, scene closest-hit behavior, framebuffer and color conversion, PPM output, and
-presentation-independent camera and RGBA conversion helpers.
+The current suite contains 116 tests covering vector arithmetic and normalization, ray invariants,
+AABB construction and edge cases, camera basis/ray generation/orbit limits, texture sampling and
+registration, P6 parsing and malformed input, material face selection, cube-face UV orientation,
+scene closest-hit behavior, renderer texture resolution, framebuffer and color conversion, PPM
+output, and presentation-independent camera and RGBA conversion helpers.
 
 ## Project Constraints
 
@@ -150,7 +157,7 @@ presentation-independent camera and RGBA conversion helpers.
 
 The following belong to later phases and are not yet implemented:
 
-- Minecraft-style textures and five distinct materials;
+- final optical tuning for the five primary textured materials;
 - lighting and shadows;
 - reflection, refraction, and normal mapping;
 - emissive lava;
@@ -167,7 +174,7 @@ The following belong to later phases and are not yet implemented:
 | --- | --- |
 | 3D CPU raytracing foundation | Implemented in Phase 1 |
 | Orbital viewing and zoom | Implemented in Phase 1 |
-| Five textured materials | Planned |
+| Five textured materials | Asset infrastructure and temporary visual-validation materials implemented |
 | Lighting, shadows, reflection, refraction | Planned |
 | Normal mapping and emissive lava | Planned |
 | Sunset/night skybox | Planned |

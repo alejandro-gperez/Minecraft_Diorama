@@ -1,6 +1,6 @@
-use crate::color::Color;
+use crate::{color::Color, geometry::CubeFace};
 
-use super::Texture;
+use super::TextureId;
 
 /// Stable index into the scene's material storage.
 #[repr(transparent)]
@@ -19,16 +19,42 @@ impl MaterialId {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Material {
-    texture: Texture,
+    textures: TextureSelection,
     albedo: Color,
     specular: f32,
     transparency: f32,
     reflectivity: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextureSelection {
+    Uniform(TextureId),
+    TopSideBottom {
+        top: TextureId,
+        side: TextureId,
+        bottom: TextureId,
+    },
+}
+
+impl TextureSelection {
+    pub const fn for_face(self, face: CubeFace) -> TextureId {
+        match self {
+            Self::Uniform(texture) => texture,
+            Self::TopSideBottom { top, side, bottom } => match face {
+                CubeFace::PositiveY => top,
+                CubeFace::NegativeY => bottom,
+                CubeFace::NegativeX
+                | CubeFace::PositiveX
+                | CubeFace::NegativeZ
+                | CubeFace::PositiveZ => side,
+            },
+        }
+    }
+}
+
 impl Material {
     pub fn try_new(
-        texture: Texture,
+        textures: TextureSelection,
         albedo: Color,
         specular: f32,
         transparency: f32,
@@ -43,7 +69,7 @@ impl Material {
         }
 
         Some(Self {
-            texture,
+            textures,
             albedo,
             specular,
             transparency,
@@ -51,8 +77,8 @@ impl Material {
         })
     }
 
-    pub const fn texture(&self) -> &Texture {
-        &self.texture
+    pub const fn textures(&self) -> TextureSelection {
+        self.textures
     }
 
     pub const fn albedo(&self) -> Color {
@@ -87,8 +113,10 @@ fn color_is_normalized(color: Color) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Material, MaterialId};
-    use crate::{color::Color, material::Texture};
+    use super::{Material, MaterialId, TextureSelection};
+    use crate::{color::Color, geometry::CubeFace, material::TextureId};
+
+    const TEXTURE_ID: TextureId = TextureId::new(7);
 
     fn material_with(
         albedo: Color,
@@ -97,7 +125,7 @@ mod tests {
         reflectivity: f32,
     ) -> Option<Material> {
         Material::try_new(
-            Texture::solid(Color::new(0.8, 0.6, 0.4)),
+            TextureSelection::Uniform(TEXTURE_ID),
             albedo,
             specular,
             transparency,
@@ -107,11 +135,11 @@ mod tests {
 
     #[test]
     fn constructs_valid_material_and_retains_properties() {
-        let texture = Texture::solid(Color::new(0.8, 0.6, 0.4));
+        let textures = TextureSelection::Uniform(TEXTURE_ID);
         let material =
-            Material::try_new(texture.clone(), Color::new(0.5, 1.0, 0.25), 0.3, 0.1, 0.2).unwrap();
+            Material::try_new(textures, Color::new(0.5, 1.0, 0.25), 0.3, 0.1, 0.2).unwrap();
 
-        assert_eq!(material.texture(), &texture);
+        assert_eq!(material.textures(), textures);
         assert_eq!(material.albedo(), Color::new(0.5, 1.0, 0.25));
         assert_eq!(material.specular(), 0.3);
         assert_eq!(material.transparency(), 0.1);
@@ -120,6 +148,41 @@ mod tests {
             material.surface_color(Color::new(0.8, 0.6, 0.4)),
             Color::new(0.4, 0.6, 0.1)
         );
+    }
+
+    #[test]
+    fn uniform_selection_uses_one_texture_for_every_face() {
+        let selection = TextureSelection::Uniform(TEXTURE_ID);
+
+        for face in [
+            CubeFace::NegativeX,
+            CubeFace::PositiveX,
+            CubeFace::NegativeY,
+            CubeFace::PositiveY,
+            CubeFace::NegativeZ,
+            CubeFace::PositiveZ,
+        ] {
+            assert_eq!(selection.for_face(face), TEXTURE_ID);
+        }
+    }
+
+    #[test]
+    fn top_side_bottom_selection_respects_y_axis_orientation() {
+        let top = TextureId::new(1);
+        let side = TextureId::new(2);
+        let bottom = TextureId::new(3);
+        let selection = TextureSelection::TopSideBottom { top, side, bottom };
+
+        assert_eq!(selection.for_face(CubeFace::PositiveY), top);
+        assert_eq!(selection.for_face(CubeFace::NegativeY), bottom);
+        for face in [
+            CubeFace::NegativeX,
+            CubeFace::PositiveX,
+            CubeFace::NegativeZ,
+            CubeFace::PositiveZ,
+        ] {
+            assert_eq!(selection.for_face(face), side);
+        }
     }
 
     #[test]

@@ -1,4 +1,7 @@
-use crate::{camera::OrbitalCamera, scene::Scene};
+use crate::{
+    camera::OrbitalCamera,
+    scene::{Scene, SceneHit},
+};
 
 use super::{Color, Framebuffer};
 
@@ -13,6 +16,7 @@ pub enum RenderError {
     AspectRatioMismatch,
     PrimaryRayGenerationFailed,
     MaterialNotFound,
+    TextureNotFound,
     SurfaceUvUnavailable,
     TextureSamplingFailed,
 }
@@ -40,17 +44,7 @@ impl Renderer {
                     .ray_for_viewport(u, v)
                     .ok_or(RenderError::PrimaryRayGenerationFailed)?;
                 let color = match scene.closest_hit(ray, PRIMARY_RAY_T_MIN, f32::INFINITY) {
-                    Some(hit) => {
-                        let material = scene
-                            .material(hit.material_id)
-                            .ok_or(RenderError::MaterialNotFound)?;
-                        let uv = hit.geometry.uv.ok_or(RenderError::SurfaceUvUnavailable)?;
-                        let texture_sample = material
-                            .texture()
-                            .sample_nearest(uv.u, uv.v)
-                            .ok_or(RenderError::TextureSamplingFailed)?;
-                        debug_shade(material.surface_color(texture_sample), hit.geometry.normal)
-                    }
+                    Some(hit) => shade_hit(scene, hit)?,
                     None => background(v),
                 };
 
@@ -60,6 +54,25 @@ impl Renderer {
 
         Ok(())
     }
+}
+
+fn shade_hit(scene: &Scene, hit: SceneHit) -> Result<Color, RenderError> {
+    let material = scene
+        .material(hit.material_id)
+        .ok_or(RenderError::MaterialNotFound)?;
+    let texture_id = material.textures().for_face(hit.geometry.face);
+    let texture = scene
+        .texture(texture_id)
+        .ok_or(RenderError::TextureNotFound)?;
+    let uv = hit.geometry.uv.ok_or(RenderError::SurfaceUvUnavailable)?;
+    let texture_sample = texture
+        .sample_nearest(uv.u, uv.v)
+        .ok_or(RenderError::TextureSamplingFailed)?;
+
+    Ok(debug_shade(
+        material.surface_color(texture_sample),
+        hit.geometry.normal,
+    ))
 }
 
 fn pixel_center(x: usize, y: usize, width: usize, height: usize) -> (f32, f32) {
@@ -89,20 +102,29 @@ fn background(v: f32) -> Color {
 mod tests {
     use std::f32::consts::FRAC_PI_2;
 
-    use super::{RenderError, Renderer, pixel_center};
+    use super::{RenderError, Renderer, pixel_center, shade_hit};
     use crate::{
         camera::OrbitalCamera,
         geometry::Aabb,
-        material::{Material, MaterialId, Texture},
+        material::{Material, MaterialId, Texture, TextureId, TextureSelection},
         math::Vec3,
+        ray::Ray,
         render::{Color, Framebuffer},
         scene::{Scene, SceneObject},
     };
 
     fn add_solid_material(scene: &mut Scene, color: Color) -> MaterialId {
+        let texture_id = scene.add_texture(Texture::solid(color)).unwrap();
         scene
             .add_material(
-                Material::try_new(Texture::solid(color), Color::WHITE, 0.0, 0.0, 0.0).unwrap(),
+                Material::try_new(
+                    TextureSelection::Uniform(texture_id),
+                    Color::WHITE,
+                    0.0,
+                    0.0,
+                    0.0,
+                )
+                .unwrap(),
             )
             .unwrap()
     }
@@ -172,8 +194,18 @@ mod tests {
         )
         .unwrap();
         let mut scene = Scene::new();
+        let texture_id = scene.add_texture(texture).unwrap();
         let material_id = scene
-            .add_material(Material::try_new(texture, Color::WHITE, 0.0, 0.0, 0.0).unwrap())
+            .add_material(
+                Material::try_new(
+                    TextureSelection::Uniform(texture_id),
+                    Color::WHITE,
+                    0.0,
+                    0.0,
+                    0.0,
+                )
+                .unwrap(),
+            )
             .unwrap();
         scene.add(SceneObject::new(
             Aabb::try_new(Vec3::new(-3.0, -3.0, -0.5), Vec3::new(3.0, 3.0, 0.5)).unwrap(),
@@ -187,6 +219,60 @@ mod tests {
         assert_eq!(framebuffer.pixel(1, 0), Some(Color::new(0.0, 0.75, 0.0)));
         assert_eq!(framebuffer.pixel(0, 1), Some(Color::new(0.0, 0.0, 0.75)));
         assert_eq!(framebuffer.pixel(1, 1), Some(Color::new(0.75, 0.75, 0.75)));
+    }
+
+    #[test]
+    fn renderer_selects_top_side_and_bottom_textures_from_hit_face() {
+        let mut scene = Scene::new();
+        let top = scene
+            .add_texture(Texture::solid(Color::new(1.0, 0.0, 0.0)))
+            .unwrap();
+        let side = scene
+            .add_texture(Texture::solid(Color::new(0.0, 1.0, 0.0)))
+            .unwrap();
+        let bottom = scene
+            .add_texture(Texture::solid(Color::new(0.0, 0.0, 1.0)))
+            .unwrap();
+        let material_id = scene
+            .add_material(
+                Material::try_new(
+                    TextureSelection::TopSideBottom { top, side, bottom },
+                    Color::WHITE,
+                    0.0,
+                    0.0,
+                    0.0,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        scene.add(SceneObject::new(
+            Aabb::try_new(Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).unwrap(),
+            material_id,
+        ));
+
+        let cases = [
+            (
+                Vec3::new(0.5, 2.0, 0.5),
+                Vec3::new(0.0, -1.0, 0.0),
+                Color::new(1.0, 0.0, 0.0),
+            ),
+            (
+                Vec3::new(0.5, 0.5, 2.0),
+                Vec3::new(0.0, 0.0, -1.0),
+                Color::new(0.0, 0.75, 0.0),
+            ),
+            (
+                Vec3::new(0.5, -1.0, 0.5),
+                Vec3::new(0.0, 1.0, 0.0),
+                Color::new(0.0, 0.0, 0.55),
+            ),
+        ];
+
+        for (origin, direction, expected) in cases {
+            let ray = Ray::try_new(origin, direction).unwrap();
+            let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+            assert_eq!(shade_hit(&scene, hit), Ok(expected));
+        }
     }
 
     #[test]
@@ -214,6 +300,34 @@ mod tests {
         assert_eq!(
             Renderer::render(&camera, &scene, &mut framebuffer),
             Err(RenderError::MaterialNotFound)
+        );
+    }
+
+    #[test]
+    fn rejects_material_with_unknown_texture() {
+        let camera = OrbitalCamera::try_new(Vec3::ZERO, 0.0, 0.0, 5.0, FRAC_PI_2, 1.0).unwrap();
+        let mut scene = Scene::new();
+        let material_id = scene
+            .add_material(
+                Material::try_new(
+                    TextureSelection::Uniform(TextureId::new(0)),
+                    Color::WHITE,
+                    0.0,
+                    0.0,
+                    0.0,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        scene.add(SceneObject::new(
+            Aabb::try_new(Vec3::new(-0.5, -0.5, -0.5), Vec3::new(0.5, 0.5, 0.5)).unwrap(),
+            material_id,
+        ));
+        let mut framebuffer = Framebuffer::try_new(3, 3).unwrap();
+
+        assert_eq!(
+            Renderer::render(&camera, &scene, &mut framebuffer),
+            Err(RenderError::TextureNotFound)
         );
     }
 }

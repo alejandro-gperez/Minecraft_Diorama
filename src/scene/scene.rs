@@ -1,6 +1,6 @@
 use crate::{
     geometry::{Aabb, AabbHit},
-    material::{Material, MaterialId},
+    material::{Material, MaterialId, Texture, TextureId, TextureRegistry},
     ray::Ray,
 };
 
@@ -29,6 +29,7 @@ pub struct SceneHit {
 pub struct Scene {
     objects: Vec<SceneObject>,
     materials: Vec<Material>,
+    textures: TextureRegistry,
 }
 
 impl Scene {
@@ -36,6 +37,7 @@ impl Scene {
         Self {
             objects: Vec::new(),
             materials: Vec::new(),
+            textures: TextureRegistry::new(),
         }
     }
 
@@ -43,7 +45,16 @@ impl Scene {
         Self {
             objects: Vec::with_capacity(capacity),
             materials: Vec::new(),
+            textures: TextureRegistry::new(),
         }
+    }
+
+    pub fn add_texture(&mut self, texture: Texture) -> Option<TextureId> {
+        self.textures.insert(texture)
+    }
+
+    pub fn texture(&self, id: TextureId) -> Option<&Texture> {
+        self.textures.get(id)
     }
 
     pub fn add_material(&mut self, material: Material) -> Option<MaterialId> {
@@ -93,6 +104,10 @@ impl Scene {
     pub fn material_count(&self) -> usize {
         self.materials.len()
     }
+
+    pub fn texture_count(&self) -> usize {
+        self.textures.len()
+    }
 }
 
 #[cfg(test)]
@@ -101,7 +116,7 @@ mod tests {
     use crate::{
         color::Color,
         geometry::{Aabb, CubeFace, Uv},
-        material::{Material, MaterialId, Texture},
+        material::{Material, MaterialId, Texture, TextureId, TextureSelection},
         math::Vec3,
         ray::Ray,
     };
@@ -111,7 +126,14 @@ mod tests {
     }
 
     fn material(color: Color) -> Material {
-        Material::try_new(Texture::solid(color), Color::WHITE, 0.0, 0.0, 0.0).unwrap()
+        Material::try_new(
+            TextureSelection::Uniform(TextureId::new(0)),
+            color,
+            0.0,
+            0.0,
+            0.0,
+        )
+        .unwrap()
     }
 
     fn object(min: Vec3, max: Vec3, material_id: MaterialId) -> SceneObject {
@@ -248,7 +270,16 @@ mod tests {
     #[test]
     fn multiple_objects_share_one_centrally_owned_material() {
         let mut scene = Scene::new();
-        let material_id = scene.add_material(material(Color::WHITE)).unwrap();
+        let texture_id = scene.add_texture(Texture::solid(Color::WHITE)).unwrap();
+        let shared_material = Material::try_new(
+            TextureSelection::Uniform(texture_id),
+            Color::WHITE,
+            0.0,
+            0.0,
+            0.0,
+        )
+        .unwrap();
+        let material_id = scene.add_material(shared_material).unwrap();
 
         scene.add(object(Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0), material_id));
         scene.add(object(
@@ -259,6 +290,48 @@ mod tests {
 
         assert_eq!(scene.len(), 2);
         assert_eq!(scene.material_count(), 1);
-        assert_eq!(scene.material(material_id).unwrap().texture().width(), 1);
+        assert_eq!(scene.texture_count(), 1);
+        assert_eq!(scene.texture(texture_id).unwrap().width(), 1);
+        assert_eq!(
+            scene.material(material_id).unwrap().textures(),
+            TextureSelection::Uniform(texture_id)
+        );
+    }
+
+    #[test]
+    fn multiple_materials_can_reference_one_registered_texture() {
+        let mut scene = Scene::new();
+        let texture_id = scene
+            .add_texture(Texture::solid(Color::new(0.4, 0.5, 0.6)))
+            .unwrap();
+        let first = Material::try_new(
+            TextureSelection::Uniform(texture_id),
+            Color::WHITE,
+            0.0,
+            0.0,
+            0.0,
+        )
+        .unwrap();
+        let second = Material::try_new(
+            TextureSelection::Uniform(texture_id),
+            Color::new(0.5, 0.5, 0.5),
+            0.3,
+            0.0,
+            0.1,
+        )
+        .unwrap();
+
+        let first_id = scene.add_material(first).unwrap();
+        let second_id = scene.add_material(second).unwrap();
+
+        assert_eq!(scene.texture_count(), 1);
+        assert_eq!(
+            scene.material(first_id).unwrap().textures(),
+            TextureSelection::Uniform(texture_id)
+        );
+        assert_eq!(
+            scene.material(second_id).unwrap().textures(),
+            TextureSelection::Uniform(texture_id)
+        );
     }
 }
