@@ -1,7 +1,7 @@
 use crate::{
     camera::OrbitalCamera,
     environment::Environment,
-    lighting::{Lighting, shade_surface},
+    lighting::{Lighting, PointLight, shade_point_light, shade_surface},
     material::AIR_IOR,
     math::Vec3,
     ray::Ray,
@@ -31,6 +31,12 @@ const SHADOW_RAY_T_MAX: f32 = f32::INFINITY;
 /// If a later scene spans substantially different world scales, this assumption should be
 /// revisited together with the scene's numerical precision requirements.
 const RAY_ORIGIN_BIAS: f32 = 1.0e-4;
+/// Fixed world-space offset along the geometric normal for point-light shadow rays.
+///
+/// Numerically equal to `RAY_ORIGIN_BIAS` today, but kept separate because point-light shadow rays
+/// have a finite interval and aim at a position rather than along a direction. Same unit-scale
+/// assumption.
+const POINT_LIGHT_SHADOW_BIAS: f32 = 1.0e-4;
 /// Fixed world-space offset moving a reflected ray onto the incident side of its hit surface.
 ///
 /// Numerically equal to `RAY_ORIGIN_BIAS` today, but kept separate: reflection and shadow rays
@@ -342,10 +348,18 @@ fn blend_transmissive(local: Color, optical: Color, transparency: f32) -> Color 
     local.scale(1.0 - transparency) + optical.scale(transparency)
 }
 
-/// Local surface shading: texture, albedo, and direct lighting with hard-shadow visibility.
+/// Local surface shading: texture, albedo, direct lighting, point lights, and emission.
 ///
-/// The shadow ray is an any-hit visibility query rather than a radiance ray, so it takes no
-/// recursion depth and is cast identically at every traced depth.
+/// ```text
+/// local = ambient
+///       + directional_visible * (directional_diffuse + directional_specular)
+///       + sum(point_visible * (point_diffuse + point_specular))
+///       + emission
+/// ```
+///
+/// Emission is self-radiance added last: it is not scaled by any light term and is never
+/// shadowed. Shadow rays are any-hit visibility queries rather than radiance rays, so they take no
+/// recursion depth and are cast identically at every traced depth. Emission spawns no rays.
 fn shade_hit(
     scene: &Scene,
     hit: SceneHit,
@@ -378,13 +392,70 @@ fn shade_hit(
             true
         };
 
-    Ok(shade_surface(
-        material.surface_color(texture_sample),
+    let base_color = material.surface_color(texture_sample);
+    let mut color = shade_surface(
+        base_color,
         hit.geometry.normal,
         view_direction,
         material.specular(),
         direct_light_visible,
         lighting,
+    );
+    for point_light in scene.point_lights() {
+        color = color
+            + point_light_contribution(
+                scene,
+                *point_light,
+                hit,
+                base_color,
+                view_direction,
+                material.specular(),
+            )?;
+    }
+    if material.is_emissive() {
+        color = color + material.emitted_radiance(texture_sample);
+    }
+
+    Ok(color)
+}
+
+/// Diffuse and specular contribution of one point light, or black when it cannot reach the hit.
+///
+/// Out-of-radius lights, inert lights, and surfaces facing away are rejected before any shadow ray
+/// is traced. The shadow ray starts `POINT_LIGHT_SHADOW_BIAS` off the surface along the geometric
+/// normal and aims at the light, with `t_max` equal to the remaining distance to the light. The
+/// light is a point, not geometry, so a blocker beyond it cannot shadow it. Glass blocks the ray
+/// like any other AABB.
+fn point_light_contribution(
+    scene: &Scene,
+    light: PointLight,
+    hit: SceneHit,
+    base_color: Color,
+    view_direction: Vec3,
+    material_specular: f32,
+) -> Result<Color, RenderError> {
+    let Some(incidence) = light.incidence_at(hit.geometry.position, hit.geometry.normal) else {
+        return Ok(Color::BLACK);
+    };
+
+    let shadow_origin = hit.geometry.position + hit.geometry.normal * POINT_LIGHT_SHADOW_BIAS;
+    let to_light = light.position() - shadow_origin;
+    // The biased origin can only coincide with the light when the light sits on the surface, where
+    // it has no defined direction and, like `incidence_at`, contributes nothing. This must not be
+    // a render error: a light placed against geometry would otherwise abort the whole frame.
+    let Some(shadow_ray) = Ray::try_new(shadow_origin, to_light) else {
+        return Ok(Color::BLACK);
+    };
+    if scene.is_occluded(shadow_ray, SHADOW_RAY_T_MIN, to_light.length()) {
+        return Ok(Color::BLACK);
+    }
+
+    Ok(shade_point_light(
+        incidence,
+        base_color,
+        hit.geometry.normal,
+        view_direction,
+        material_specular,
     ))
 }
 
@@ -400,20 +471,20 @@ mod tests {
     use std::f32::consts::FRAC_PI_2;
 
     use super::{
-        MAX_RAY_DEPTH, MediumTransition, OpticalInterface, PRIMARY_RAY_DEPTH, RAY_ORIGIN_BIAS,
-        REFLECTION_RAY_ORIGIN_BIAS, REFRACTION_RAY_ORIGIN_BIAS, RenderError, Renderer,
-        TOTAL_INTERNAL_REFLECTANCE, Tracer, blend_reflection, blend_transmissive,
-        can_spawn_secondary_ray, compose_fresnel, optical_interface, pixel_center, reflection_ray,
-        refraction_ray, shade_hit,
+        MAX_RAY_DEPTH, MediumTransition, OpticalInterface, POINT_LIGHT_SHADOW_BIAS,
+        PRIMARY_RAY_DEPTH, RAY_ORIGIN_BIAS, REFLECTION_RAY_ORIGIN_BIAS, REFRACTION_RAY_ORIGIN_BIAS,
+        RenderError, Renderer, TOTAL_INTERNAL_REFLECTANCE, Tracer, blend_reflection,
+        blend_transmissive, can_spawn_secondary_ray, compose_fresnel, optical_interface,
+        pixel_center, reflection_ray, refraction_ray, shade_hit,
     };
     use crate::{
         camera::OrbitalCamera,
         environment::Environment,
         geometry::{Aabb, CubeFace},
-        lighting::{AmbientLight, DirectionalLight, Lighting, shade_surface},
+        lighting::{AmbientLight, DirectionalLight, Lighting, PointLight, shade_surface},
         material::{
-            AIR_IOR, CanonicalMaterials, CanonicalTextureIds, GLASS_IOR, Material, MaterialId,
-            Texture, TextureId, TextureSelection,
+            AIR_IOR, CanonicalMaterials, CanonicalTextureIds, GLASS_IOR, LAVA_EMISSION_COLOR,
+            LAVA_EMISSION_STRENGTH, Material, MaterialId, Texture, TextureId, TextureSelection,
         },
         math::Vec3,
         ray::Ray,
@@ -2232,6 +2303,9 @@ mod tests {
         }
     }
 
+    /// Showcase lava light position; mirrors `main.rs`.
+    const SHOWCASE_LAVA_LIGHT: Vec3 = Vec3::new(2.3, 1.0, -1.15);
+
     #[test]
     fn showcase_layout_renders_finite_colors_across_camera_poses() {
         // The five-block diagnostic layout from `main.rs`, swept over orbit, elevation, and zoom.
@@ -2265,6 +2339,10 @@ mod tests {
         ] {
             scene.add(SceneObject::new(Aabb::try_new(min, max).unwrap(), material));
         }
+        scene.add_point_light(
+            PointLight::try_new(SHOWCASE_LAVA_LIGHT, Color::new(1.0, 0.45, 0.12), 3.0, 5.0)
+                .unwrap(),
+        );
         let lighting = Lighting::new(
             AmbientLight::try_new(Color::new(0.30, 0.34, 0.46), 0.50).unwrap(),
             DirectionalLight::try_new(Vec3::new(0.6, 1.0, 0.8), Color::new(1.0, 0.84, 0.70), 1.0)
@@ -2294,14 +2372,139 @@ mod tests {
         }
     }
 
+    /// Opaque, non-reflective material that emits `emission_color * strength` through its texture.
+    fn add_emissive_material(
+        scene: &mut Scene,
+        texture_color: Color,
+        emission_color: Color,
+        strength: f32,
+    ) -> MaterialId {
+        let texture_id = scene.add_texture(Texture::solid(texture_color)).unwrap();
+        scene
+            .add_material(
+                Material::try_new(
+                    TextureSelection::Uniform(texture_id),
+                    Color::WHITE,
+                    0.0,
+                    0.0,
+                    0.0,
+                )
+                .unwrap()
+                .with_emission(emission_color, strength)
+                .unwrap(),
+            )
+            .unwrap()
+    }
+
+    /// Unit cube emitting `(0.5, 0.25, 0.1)`: white texture, emission color `(1, 0.5, 0.2)` at 0.5.
+    fn emissive_cube_scene() -> Scene {
+        let mut scene = Scene::new();
+        let material =
+            add_emissive_material(&mut scene, Color::WHITE, Color::new(1.0, 0.5, 0.2), 0.5);
+        scene.add(SceneObject::new(unit_cube(), material));
+        scene
+    }
+
+    const CUBE_EMISSION: Color = Color::new(0.5, 0.25, 0.1);
+
+    /// Light straight below a surface that faces up: zero Lambert diffuse and no shadow ray.
+    fn downward_facing_light() -> Lighting {
+        Lighting::new(
+            AmbientLight::try_new(Color::BLACK, 0.0).unwrap(),
+            DirectionalLight::try_new(Vec3::new(0.0, -1.0, 0.0), Color::WHITE, 1.0).unwrap(),
+        )
+    }
+
     #[test]
-    fn lava_does_not_emit_yet() {
+    fn emissive_surface_shows_its_emission_with_no_light_at_all() {
+        let scene = emissive_cube_scene();
+        let (hit, camera_position) = top_hit(&scene);
+
+        assert_color_approx_eq(
+            shade_hit(&scene, hit, camera_position, darkness()).unwrap(),
+            CUBE_EMISSION,
+        );
+    }
+
+    #[test]
+    fn emission_remains_when_directional_diffuse_is_zero() {
+        let scene = emissive_cube_scene();
+        let (hit, camera_position) = top_hit(&scene);
+
+        // The top face looks away from a light below it: no Lambert term and no ambient.
+        assert_color_approx_eq(
+            shade_hit(&scene, hit, camera_position, downward_facing_light()).unwrap(),
+            CUBE_EMISSION,
+        );
+    }
+
+    #[test]
+    fn emission_remains_when_the_directional_light_is_occluded() {
+        let mut scene = emissive_cube_scene();
+        let (hit, camera_position) = top_hit(&scene);
+        let lighting = upward_light_with_ambient();
+        let unblocked = shade_hit(&scene, hit, camera_position, lighting).unwrap();
+
+        add_blocker(
+            &mut scene,
+            Vec3::new(0.25, 1.5, 0.25),
+            Vec3::new(0.75, 1.9, 0.75),
+        );
+        let blocked = shade_hit(&scene, hit, camera_position, lighting).unwrap();
+
+        assert!(unblocked.r > blocked.r);
+        // Ambient (0.2) plus the untouched emission.
+        assert_color_approx_eq(blocked, Color::new(0.2, 0.2, 0.2) + CUBE_EMISSION);
+    }
+
+    #[test]
+    fn emission_is_added_to_lighting_rather_than_scaled_by_it() {
+        let emissive = emissive_cube_scene();
+        let plain = unit_cube_scene();
+        let (hit, camera_position) = top_hit(&emissive);
+        let lighting = upward_light_with_ambient();
+
+        let lit_emissive = shade_hit(&emissive, hit, camera_position, lighting).unwrap();
+        let lit_plain = shade_hit(&plain, hit, camera_position, lighting).unwrap();
+
+        assert!(lit_plain.r > 1.0);
+        assert_color_approx_eq(lit_emissive, lit_plain + CUBE_EMISSION);
+    }
+
+    #[test]
+    fn emission_follows_the_texture_and_ignores_albedo() {
+        let mut scene = Scene::new();
+        let texture = scene
+            .add_texture(Texture::solid(Color::new(0.8, 0.4, 0.2)))
+            .unwrap();
+        let material = scene
+            .add_material(
+                Material::try_new(
+                    TextureSelection::Uniform(texture),
+                    Color::BLACK,
+                    0.0,
+                    0.0,
+                    0.0,
+                )
+                .unwrap()
+                .with_emission(Color::WHITE, 2.0)
+                .unwrap(),
+            )
+            .unwrap();
+        scene.add(SceneObject::new(unit_cube(), material));
+        let (hit, camera_position) = top_hit(&scene);
+
+        assert_color_approx_eq(
+            shade_hit(&scene, hit, camera_position, darkness()).unwrap(),
+            Color::new(1.6, 0.8, 0.4),
+        );
+    }
+
+    #[test]
+    fn canonical_lava_emits_under_zero_light() {
         let (mut scene, materials) = canonical_scene();
         let white = add_solid_material(&mut scene, Color::WHITE);
-        scene.add(SceneObject::new(
-            Aabb::try_new(Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).unwrap(),
-            materials.lava,
-        ));
+        scene.add(SceneObject::new(unit_cube(), materials.lava));
         scene.add(SceneObject::new(
             Aabb::try_new(Vec3::new(1.0, 0.0, 0.0), Vec3::new(2.0, 1.0, 1.0)).unwrap(),
             white,
@@ -2311,21 +2514,572 @@ mod tests {
         let onto_lava = downward_ray();
         let onto_neighbor =
             Ray::try_new(Vec3::new(1.5, 2.0, 0.5), Vec3::new(0.0, -1.0, 0.0)).unwrap();
+        let texture = Color::new(0.6, 0.5, 0.4);
+        let emission = texture * LAVA_EMISSION_COLOR.scale(LAVA_EMISSION_STRENGTH);
         let lava_reflectivity = scene.material(materials.lava).unwrap().reflectivity();
-        let reflected_sky = environment
-            .sample(Vec3::new(0.0, 1.0, 0.0))
-            .scale(lava_reflectivity);
+        let reflected_sky = environment.sample(Vec3::new(0.0, 1.0, 0.0));
 
         for depth in PRIMARY_RAY_DEPTH..=MAX_RAY_DEPTH {
-            // Under zero light, lava shows only its small stored reflection, never emitted light.
+            // Emission is part of the local result; lava's small stored reflection blends with it
+            // below the maximum depth, and only the reflected fraction is ever environment light.
             let expected = if can_spawn_secondary_ray(depth) {
-                reflected_sky
+                blend_reflection(emission, reflected_sky, lava_reflectivity)
             } else {
-                Color::BLACK
+                emission
             };
             assert_color_approx_eq(tracer.trace_ray(onto_lava, depth).unwrap(), expected);
             assert_eq!(tracer.trace_ray(onto_neighbor, depth), Ok(Color::BLACK));
         }
+    }
+
+    #[test]
+    fn non_lava_canonical_materials_stay_dark_under_zero_light() {
+        let environment = environment();
+
+        let selectors: [fn(CanonicalMaterials) -> MaterialId; 2] = [|m| m.grass, |m| m.cobblestone];
+        for select in selectors {
+            let (mut scene, materials) = canonical_scene();
+            scene.add(SceneObject::new(unit_cube(), select(materials)));
+            let tracer = Tracer::new(&scene, darkness(), &environment);
+
+            for depth in PRIMARY_RAY_DEPTH..=MAX_RAY_DEPTH {
+                let traced = tracer.trace_ray(downward_ray(), depth).unwrap();
+                // Only the stored reflection of the environment may remain, never self-light.
+                assert!(traced.r <= 0.05 * environment.sample(Vec3::new(0.0, 1.0, 0.0)).r + 1.0e-5);
+            }
+        }
+
+        let (mut scene, materials) = canonical_scene();
+        scene.add(SceneObject::new(unit_cube(), materials.glass));
+        assert_eq!(
+            Tracer::new(&scene, darkness(), &environment).trace_ray(downward_ray(), MAX_RAY_DEPTH),
+            Ok(Color::BLACK)
+        );
+        let (mut scene, materials) = canonical_scene();
+        scene.add(SceneObject::new(unit_cube(), materials.obsidian));
+        assert_eq!(
+            Tracer::new(&scene, darkness(), &environment).trace_ray(downward_ray(), MAX_RAY_DEPTH),
+            Ok(Color::BLACK)
+        );
+    }
+
+    #[test]
+    fn emission_spawns_no_secondary_radiance_rays() {
+        // Opaque, non-reflective emissive material: the ordinary depth policy spawns nothing, so
+        // the traced result equals local shading at every depth, including the terminal one.
+        let scene = emissive_cube_scene();
+        let environment = environment();
+        let lighting = upward_light_with_ambient();
+        let tracer = Tracer::new(&scene, lighting, &environment);
+        let ray = downward_ray();
+        let local = traced_local(&scene, ray, lighting);
+
+        assert!(local.r > CUBE_EMISSION.r);
+        for depth in PRIMARY_RAY_DEPTH..=MAX_RAY_DEPTH {
+            assert_eq!(tracer.trace_ray(ray, depth), Ok(local));
+        }
+    }
+
+    #[test]
+    fn obsidian_reflection_shows_emissive_lava() {
+        let (mut scene, materials) = canonical_scene();
+        scene.add(SceneObject::new(unit_cube(), materials.obsidian));
+        let (min, max) = REFLECTION_WITNESS;
+        scene.add(SceneObject::new(
+            Aabb::try_new(min, max).unwrap(),
+            materials.lava,
+        ));
+        let environment = environment();
+        let ray = angled_top_ray();
+        let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+        let reflected_ray = reflection_ray(ray, hit).unwrap();
+        let lava_hit = scene
+            .closest_hit(reflected_ray, 0.0, f32::INFINITY)
+            .unwrap();
+        assert_eq!(lava_hit.material_id, materials.lava);
+
+        let traced = Tracer::new(&scene, darkness(), &environment)
+            .trace_ray(ray, PRIMARY_RAY_DEPTH)
+            .unwrap();
+
+        // Obsidian is black under zero light, so its whole output is its reflectivity times the
+        // radiance of the lava ray reached through the ordinary `trace_ray` path.
+        let obsidian_reflectivity = scene.material(materials.obsidian).unwrap().reflectivity();
+        let lava_radiance = Tracer::new(&scene, darkness(), &environment)
+            .trace_ray(reflected_ray, PRIMARY_RAY_DEPTH + 1)
+            .unwrap();
+        assert!(lava_radiance.r > 0.5);
+        assert_color_approx_eq(traced, lava_radiance.scale(obsidian_reflectivity));
+    }
+
+    #[test]
+    fn glass_refraction_shows_emissive_lava() {
+        let environment = environment();
+        let build = |emissive: bool| {
+            let (mut scene, materials) = canonical_scene();
+            let dark = add_solid_material(&mut scene, Color::new(0.05, 0.05, 0.05));
+            scene.add(SceneObject::new(unit_cube(), materials.glass));
+            // Directly below the glass cube along the vertical view ray.
+            scene.add(SceneObject::new(
+                Aabb::try_new(Vec3::new(0.0, -2.0, 0.0), Vec3::new(1.0, -1.0, 1.0)).unwrap(),
+                if emissive { materials.lava } else { dark },
+            ));
+            scene
+        };
+
+        let with_lava = Tracer::new(&build(true), darkness(), &environment)
+            .trace_ray(downward_ray(), PRIMARY_RAY_DEPTH)
+            .unwrap();
+        let with_dark = Tracer::new(&build(false), darkness(), &environment)
+            .trace_ray(downward_ray(), PRIMARY_RAY_DEPTH)
+            .unwrap();
+
+        assert!(with_lava.r > with_dark.r + 0.05);
+        assert!(with_lava.g > with_dark.g);
+        assert!(with_lava.is_finite());
+    }
+
+    #[test]
+    fn recursion_through_emissive_and_point_lit_materials_stays_bounded() {
+        let (mut scene, materials) = canonical_scene();
+        for (min, max, material) in [
+            (
+                Vec3::new(-4.0, -0.5, -3.0),
+                Vec3::new(4.0, 0.0, 3.0),
+                materials.obsidian,
+            ),
+            (
+                Vec3::new(0.2, 0.0, -0.2),
+                Vec3::new(1.4, 1.6, 1.0),
+                materials.glass,
+            ),
+            (
+                Vec3::new(1.7, 0.0, -0.8),
+                Vec3::new(2.9, 1.3, 0.4),
+                materials.lava,
+            ),
+        ] {
+            scene.add(SceneObject::new(Aabb::try_new(min, max).unwrap(), material));
+        }
+        scene.add_point_light(
+            PointLight::try_new(
+                Vec3::new(1.55, 0.9, 0.7),
+                Color::new(1.0, 0.45, 0.12),
+                2.0,
+                4.0,
+            )
+            .unwrap(),
+        );
+        let environment = environment();
+        let tracer = Tracer::new(&scene, upward_light_with_ambient(), &environment);
+
+        for (origin, direction) in [
+            (Vec3::new(0.8, 3.0, 0.4), Vec3::new(0.3, -1.0, 0.1)),
+            (Vec3::new(-3.0, 1.0, 0.4), Vec3::new(1.0, -0.1, 0.0)),
+            (Vec3::new(0.8, 0.8, 4.0), Vec3::new(0.2, -0.05, -1.0)),
+        ] {
+            let ray = Ray::try_new(origin, direction).unwrap();
+            assert!(
+                tracer
+                    .trace_ray(ray, PRIMARY_RAY_DEPTH)
+                    .unwrap()
+                    .is_finite()
+            );
+            assert_eq!(
+                tracer.trace_ray(ray, MAX_RAY_DEPTH + 1),
+                Err(RenderError::RayDepthExceeded)
+            );
+        }
+    }
+
+    /// Unit-intensity white point light above the unit cube's top-face center, radius 4.
+    const LIGHT_ABOVE: Vec3 = Vec3::new(0.5, 2.0, 0.5);
+
+    fn add_light_above(scene: &mut Scene) {
+        scene.add_point_light(PointLight::try_new(LIGHT_ABOVE, Color::WHITE, 1.0, 4.0).unwrap());
+    }
+
+    /// Point-light diffuse at distance 1 of radius 4 on a white, upward-facing surface.
+    const POINT_DIFFUSE_AT_ONE: f32 = 0.5625;
+
+    /// Shades the unit cube's top-face center using the cube hit found in a blocker-free scene, so
+    /// blockers added afterwards cannot replace the shaded hit. The cube must be material `0`.
+    fn point_lit_top(scene: &Scene, lighting: Lighting) -> Color {
+        let (hit, camera_position) = top_hit(&unit_cube_scene());
+        shade_hit(scene, hit, camera_position, lighting).unwrap()
+    }
+
+    #[test]
+    fn unobstructed_point_light_illuminates_the_surface() {
+        let mut scene = unit_cube_scene();
+        add_light_above(&mut scene);
+
+        assert_color_approx_eq(
+            point_lit_top(&scene, darkness()),
+            Color::new(
+                POINT_DIFFUSE_AT_ONE,
+                POINT_DIFFUSE_AT_ONE,
+                POINT_DIFFUSE_AT_ONE,
+            ),
+        );
+    }
+
+    #[test]
+    fn blocker_between_surface_and_point_light_removes_its_contribution() {
+        let mut scene = unit_cube_scene();
+        add_light_above(&mut scene);
+        add_blocker(
+            &mut scene,
+            Vec3::new(0.25, 1.3, 0.25),
+            Vec3::new(0.75, 1.6, 0.75),
+        );
+
+        assert_eq!(point_lit_top(&scene, darkness()), Color::BLACK);
+    }
+
+    #[test]
+    fn point_light_shadow_removes_specular_as_well_as_diffuse() {
+        let mut scene = Scene::new();
+        let texture_id = scene.add_texture(Texture::solid(Color::BLACK)).unwrap();
+        let shiny = scene
+            .add_material(
+                Material::try_new(
+                    TextureSelection::Uniform(texture_id),
+                    Color::WHITE,
+                    1.0,
+                    0.0,
+                    0.0,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        scene.add(SceneObject::new(unit_cube(), shiny));
+        add_light_above(&mut scene);
+        let (hit, camera_position) = top_hit(&scene);
+        let visible = shade_hit(&scene, hit, camera_position, darkness()).unwrap();
+
+        add_blocker(
+            &mut scene,
+            Vec3::new(0.25, 1.3, 0.25),
+            Vec3::new(0.75, 1.6, 0.75),
+        );
+        let blocked = shade_hit(&scene, hit, camera_position, darkness()).unwrap();
+
+        assert!(visible.r > 0.0);
+        assert_eq!(blocked, Color::BLACK);
+    }
+
+    #[test]
+    fn blocker_beyond_the_point_light_does_not_shadow_it() {
+        let mut scene = unit_cube_scene();
+        add_light_above(&mut scene);
+        let baseline = point_lit_top(&scene, darkness());
+
+        // Directly behind the light, on the same line from the surface.
+        add_blocker(
+            &mut scene,
+            Vec3::new(0.25, 2.2, 0.25),
+            Vec3::new(0.75, 2.8, 0.75),
+        );
+
+        assert!(baseline.r > 0.0);
+        assert_eq!(point_lit_top(&scene, darkness()), baseline);
+    }
+
+    #[test]
+    fn blocker_behind_the_surface_or_off_the_path_does_not_shadow_the_point_light() {
+        let mut scene = unit_cube_scene();
+        add_light_above(&mut scene);
+        let baseline = point_lit_top(&scene, darkness());
+
+        add_blocker(
+            &mut scene,
+            Vec3::new(0.25, -2.0, 0.25),
+            Vec3::new(0.75, -1.5, 0.75),
+        );
+        add_blocker(
+            &mut scene,
+            Vec3::new(2.0, 1.2, 2.0),
+            Vec3::new(3.0, 2.2, 3.0),
+        );
+
+        assert_eq!(point_lit_top(&scene, darkness()), baseline);
+    }
+
+    #[test]
+    fn nearby_legitimate_blocker_is_not_skipped_by_the_point_light_bias() {
+        let mut scene = unit_cube_scene();
+        add_light_above(&mut scene);
+        let min_y = 1.0 + POINT_LIGHT_SHADOW_BIAS * 1.5;
+        add_blocker(
+            &mut scene,
+            Vec3::new(0.25, min_y, 0.25),
+            Vec3::new(0.75, min_y + POINT_LIGHT_SHADOW_BIAS, 0.75),
+        );
+
+        assert_eq!(point_lit_top(&scene, darkness()), Color::BLACK);
+    }
+
+    #[test]
+    fn ambient_remains_when_a_point_light_is_blocked() {
+        let mut scene = unit_cube_scene();
+        add_light_above(&mut scene);
+        add_blocker(
+            &mut scene,
+            Vec3::new(0.25, 1.3, 0.25),
+            Vec3::new(0.75, 1.6, 0.75),
+        );
+
+        assert_color_approx_eq(
+            point_lit_top(&scene, ambient_only()),
+            Color::new(1.0, 1.0, 1.0),
+        );
+    }
+
+    #[test]
+    fn emission_remains_when_a_point_light_is_blocked() {
+        let mut scene = emissive_cube_scene();
+        add_light_above(&mut scene);
+        add_blocker(
+            &mut scene,
+            Vec3::new(0.25, 1.3, 0.25),
+            Vec3::new(0.75, 1.6, 0.75),
+        );
+
+        assert_color_approx_eq(point_lit_top(&scene, darkness()), CUBE_EMISSION);
+    }
+
+    #[test]
+    fn point_light_bias_prevents_self_shadowing_on_every_face() {
+        let center = Vec3::new(0.5, 0.5, 0.5);
+        let faces = [
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(0.0, 0.0, -1.0),
+        ];
+
+        for outward in faces {
+            let mut scene = unit_cube_scene();
+            scene.add_point_light(
+                PointLight::try_new(center + outward * 1.0, Color::WHITE, 1.0, 4.0).unwrap(),
+            );
+            let ray = Ray::try_new(center + outward * 3.0, -outward).unwrap();
+            let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+            let lit = shade_hit(&scene, hit, ray.origin(), darkness()).unwrap();
+
+            assert!(lit.r > 0.3, "face {outward:?} was self-shadowed: {lit:?}");
+        }
+    }
+
+    #[test]
+    fn point_light_just_above_the_surface_is_not_self_shadowed() {
+        let mut scene = unit_cube_scene();
+        scene.add_point_light(
+            PointLight::try_new(Vec3::new(0.5, 1.01, 0.5), Color::WHITE, 1.0, 4.0).unwrap(),
+        );
+
+        assert!(point_lit_top(&scene, darkness()).r > 0.9);
+    }
+
+    #[test]
+    fn point_light_on_or_inside_the_bias_of_the_surface_is_not_a_render_error() {
+        for height in [1.0, 1.0 + POINT_LIGHT_SHADOW_BIAS * 0.5, 1.0 + 1.0e-7] {
+            let mut scene = unit_cube_scene();
+            scene.add_point_light(
+                PointLight::try_new(Vec3::new(0.5, height, 0.5), Color::WHITE, 1.0, 4.0).unwrap(),
+            );
+            let (hit, camera_position) = top_hit(&scene);
+
+            let color = shade_hit(&scene, hit, camera_position, darkness()).unwrap();
+
+            assert!(color.is_finite());
+        }
+    }
+
+    #[test]
+    fn glass_blocks_point_light_like_any_other_aabb() {
+        let (mut scene, materials) = canonical_scene();
+        let white = add_solid_material(&mut scene, Color::WHITE);
+        scene.add(SceneObject::new(unit_cube(), white));
+        add_light_above(&mut scene);
+        let (hit, camera_position) = top_hit(&scene);
+        let open = shade_hit(&scene, hit, camera_position, darkness()).unwrap();
+
+        scene.add(SceneObject::new(
+            Aabb::try_new(Vec3::new(0.25, 1.3, 0.25), Vec3::new(0.75, 1.6, 0.75)).unwrap(),
+            materials.glass,
+        ));
+
+        assert!(open.r > 0.0);
+        assert_eq!(
+            shade_hit(&scene, hit, camera_position, darkness()),
+            Ok(Color::BLACK)
+        );
+    }
+
+    #[test]
+    fn point_light_outside_its_radius_adds_nothing() {
+        let mut scene = unit_cube_scene();
+        scene.add_point_light(PointLight::try_new(LIGHT_ABOVE, Color::WHITE, 1.0, 1.0).unwrap());
+
+        // The hit is exactly one radius away.
+        assert_eq!(point_lit_top(&scene, darkness()), Color::BLACK);
+
+        let mut far = unit_cube_scene();
+        far.add_point_light(
+            PointLight::try_new(Vec3::new(0.5, 20.0, 0.5), Color::WHITE, 100.0, 4.0).unwrap(),
+        );
+        assert_eq!(point_lit_top(&far, darkness()), Color::BLACK);
+    }
+
+    #[test]
+    fn point_light_behind_a_surface_adds_nothing() {
+        let mut scene = unit_cube_scene();
+        scene.add_point_light(
+            PointLight::try_new(Vec3::new(0.5, 0.5, 0.5), Color::WHITE, 1.0, 4.0).unwrap(),
+        );
+
+        assert_eq!(point_lit_top(&scene, darkness()), Color::BLACK);
+    }
+
+    #[test]
+    fn point_lights_add_to_each_other_and_to_the_directional_light() {
+        let lighting = upward_light_with_ambient();
+        let mut first_only = unit_cube_scene();
+        first_only.add_point_light(
+            PointLight::try_new(
+                Vec3::new(0.5, 2.0, 0.5),
+                Color::new(1.0, 0.5, 0.2),
+                1.0,
+                4.0,
+            )
+            .unwrap(),
+        );
+        let mut second_only = unit_cube_scene();
+        second_only.add_point_light(
+            PointLight::try_new(
+                Vec3::new(0.3, 1.5, 0.6),
+                Color::new(0.2, 0.4, 1.0),
+                0.5,
+                3.0,
+            )
+            .unwrap(),
+        );
+        let mut both = unit_cube_scene();
+        for scene in [&first_only, &second_only] {
+            for light in scene.point_lights() {
+                both.add_point_light(*light);
+            }
+        }
+        let without = point_lit_top(&unit_cube_scene(), lighting);
+
+        let first = point_lit_top(&first_only, lighting);
+        let second = point_lit_top(&second_only, lighting);
+
+        assert!(first.r > without.r);
+        assert!(second.b > without.b);
+        assert_color_approx_eq(
+            point_lit_top(&both, lighting),
+            first + second + without.scale(-1.0),
+        );
+    }
+
+    #[test]
+    fn point_light_color_tints_the_lit_surface() {
+        let mut scene = unit_cube_scene();
+        scene.add_point_light(
+            PointLight::try_new(LIGHT_ABOVE, Color::new(1.0, 0.5, 0.0), 1.0, 4.0).unwrap(),
+        );
+
+        let lit = point_lit_top(&scene, darkness());
+
+        assert_color_approx_eq(
+            lit,
+            Color::new(POINT_DIFFUSE_AT_ONE, POINT_DIFFUSE_AT_ONE * 0.5, 0.0),
+        );
+    }
+
+    #[test]
+    fn point_lights_do_not_change_environment_misses() {
+        let mut scene = unit_cube_scene();
+        add_light_above(&mut scene);
+        let environment = environment();
+        let tracer = Tracer::new(&scene, darkness(), &environment);
+
+        for direction in miss_directions() {
+            let ray = Ray::try_new(Vec3::new(3.0, 0.5, 3.0), direction).unwrap();
+            assert_eq!(
+                tracer.trace_ray(ray, PRIMARY_RAY_DEPTH),
+                Ok(environment.sample(ray.direction()))
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_depth_hits_still_receive_point_light_shading() {
+        let mut scene = unit_cube_scene();
+        add_light_above(&mut scene);
+        let environment = environment();
+        let tracer = Tracer::new(&scene, darkness(), &environment);
+
+        for depth in PRIMARY_RAY_DEPTH..=MAX_RAY_DEPTH {
+            assert_color_approx_eq(
+                tracer.trace_ray(downward_ray(), depth).unwrap(),
+                Color::new(
+                    POINT_DIFFUSE_AT_ONE,
+                    POINT_DIFFUSE_AT_ONE,
+                    POINT_DIFFUSE_AT_ONE,
+                ),
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_obsidian_shows_a_point_light_highlight() {
+        let (mut scene, materials) = canonical_scene();
+        scene.add(SceneObject::new(unit_cube(), materials.obsidian));
+        let warm = Color::new(1.0, 0.45, 0.12);
+        scene.add_point_light(PointLight::try_new(LIGHT_ABOVE, warm, 1.0, 4.0).unwrap());
+        let (hit, camera_position) = top_hit(&scene);
+
+        let lit = shade_hit(&scene, hit, camera_position, darkness()).unwrap();
+
+        // Aligned view and light: diffuse of the tinted texture plus a warm specular highlight.
+        assert!(lit.r > lit.g && lit.g > lit.b);
+        let diffuse_only = Color::new(0.6, 0.5, 0.4)
+            * Color::new(0.90, 0.90, 1.00)
+            * warm.scale(POINT_DIFFUSE_AT_ONE);
+        let specular = scene.material(materials.obsidian).unwrap().specular();
+        assert_color_approx_eq(
+            lit,
+            diffuse_only + warm.scale(POINT_DIFFUSE_AT_ONE * specular),
+        );
+    }
+
+    #[test]
+    fn reflected_rays_see_point_lit_surfaces() {
+        let ray = angled_top_ray();
+        let witness = Color::new(0.9, 0.1, 0.3);
+        let unlit = mirror_and_witness_scene(1.0, witness);
+        let mut lit = mirror_and_witness_scene(1.0, witness);
+        // Just below the witness's underside, where the mirror reflection lands.
+        lit.add_point_light(
+            PointLight::try_new(Vec3::new(1.5, 1.7, 0.5), Color::WHITE, 1.0, 2.0).unwrap(),
+        );
+        let environment = environment();
+
+        let without = Tracer::new(&unlit, darkness(), &environment)
+            .trace_ray(ray, PRIMARY_RAY_DEPTH)
+            .unwrap();
+        let with = Tracer::new(&lit, darkness(), &environment)
+            .trace_ray(ray, PRIMARY_RAY_DEPTH)
+            .unwrap();
+
+        assert_eq!(without, Color::BLACK);
+        assert!(with.r > 0.1);
     }
 
     #[test]

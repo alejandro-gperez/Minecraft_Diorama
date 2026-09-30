@@ -6,7 +6,7 @@ pub mod texture_registry;
 
 pub use canonical::{
     CanonicalMaterialDefinitions, CanonicalMaterials, CanonicalTextureIds, GLASS_IOR,
-    canonical_material_definitions,
+    LAVA_EMISSION_COLOR, LAVA_EMISSION_STRENGTH, canonical_material_definitions,
 };
 pub use material::{AIR_IOR, Material, MaterialId, TextureSelection};
 pub use ppm::{PpmLoadError, load_ppm, parse_ppm};

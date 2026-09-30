@@ -1,5 +1,6 @@
 use crate::{
     geometry::{Aabb, AabbHit},
+    lighting::PointLight,
     material::{
         CanonicalMaterials, CanonicalTextureIds, Material, MaterialId, Texture, TextureId,
         TextureRegistry, canonical_material_definitions,
@@ -33,6 +34,7 @@ pub struct Scene {
     objects: Vec<SceneObject>,
     materials: Vec<Material>,
     textures: TextureRegistry,
+    point_lights: Vec<PointLight>,
 }
 
 impl Scene {
@@ -41,6 +43,7 @@ impl Scene {
             objects: Vec::new(),
             materials: Vec::new(),
             textures: TextureRegistry::new(),
+            point_lights: Vec::new(),
         }
     }
 
@@ -49,6 +52,7 @@ impl Scene {
             objects: Vec::with_capacity(capacity),
             materials: Vec::new(),
             textures: TextureRegistry::new(),
+            point_lights: Vec::new(),
         }
     }
 
@@ -92,6 +96,18 @@ impl Scene {
         self.materials.get(id.index())
     }
 
+    /// Registers a local point light.
+    ///
+    /// Every shaded hit iterates every point light, so the set is meant to stay small: one or a
+    /// few representative lights per emissive region, not one per emissive block.
+    pub fn add_point_light(&mut self, light: PointLight) {
+        self.point_lights.push(light);
+    }
+
+    pub fn point_lights(&self) -> &[PointLight] {
+        &self.point_lights
+    }
+
     pub fn add(&mut self, object: SceneObject) {
         self.objects.push(object);
     }
@@ -119,7 +135,8 @@ impl Scene {
 
     /// Returns as soon as any opaque scene AABB intersects the requested ray interval.
     ///
-    /// Phase 2 treats every AABB as an opaque blocker, regardless of material transparency.
+    /// Every AABB is an opaque blocker, regardless of material transparency: glass blocks both
+    /// directional and point-light shadow rays.
     pub fn is_occluded(&self, ray: Ray, t_min: f32, t_max: f32) -> bool {
         for object in &self.objects {
             if object.bounds.intersects(ray, t_min, t_max) {
@@ -153,6 +170,7 @@ mod tests {
     use crate::{
         color::Color,
         geometry::{Aabb, CubeFace, Uv},
+        lighting::PointLight,
         material::{Material, MaterialId, Texture, TextureId, TextureSelection},
         math::Vec3,
         ray::Ray,
@@ -474,6 +492,46 @@ mod tests {
 
         assert!(scene.is_occluded(
             ray(Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0)),
+            0.0,
+            f32::INFINITY,
+        ));
+    }
+
+    #[test]
+    fn scene_starts_without_point_lights_and_retains_added_ones_in_order() {
+        let mut scene = Scene::new();
+        assert!(scene.point_lights().is_empty());
+
+        let first = PointLight::try_new(Vec3::ZERO, Color::WHITE, 1.0, 2.0).unwrap();
+        let second = PointLight::try_new(
+            Vec3::new(1.0, 2.0, 3.0),
+            Color::new(1.0, 0.5, 0.2),
+            0.5,
+            3.0,
+        )
+        .unwrap();
+        scene.add_point_light(first);
+        scene.add_point_light(second);
+
+        assert_eq!(scene.point_lights(), &[first, second]);
+    }
+
+    #[test]
+    fn point_lights_are_not_scene_geometry() {
+        let mut scene = Scene::new();
+        scene.add_point_light(PointLight::try_new(Vec3::ZERO, Color::WHITE, 1.0, 2.0).unwrap());
+
+        assert!(scene.is_empty());
+        assert_eq!(
+            scene.closest_hit(
+                ray(Vec3::new(0.0, 0.0, 5.0), Vec3::new(0.0, 0.0, -1.0)),
+                0.0,
+                f32::INFINITY,
+            ),
+            None
+        );
+        assert!(!scene.is_occluded(
+            ray(Vec3::new(0.0, 0.0, 5.0), Vec3::new(0.0, 0.0, -1.0)),
             0.0,
             f32::INFINITY,
         ));

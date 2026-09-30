@@ -8,7 +8,7 @@ use app::run;
 use camera::OrbitalCamera;
 use environment::Environment;
 use geometry::Aabb;
-use lighting::{AmbientLight, DirectionalLight, Lighting};
+use lighting::{AmbientLight, DirectionalLight, Lighting, PointLight};
 use material::{CanonicalTextureIds, PpmLoadError, TextureId, load_ppm};
 use math::Vec3;
 use render::{Color, Framebuffer};
@@ -30,6 +30,16 @@ pub mod scene;
 const WIDTH: usize = 320;
 const HEIGHT: usize = 180;
 const OUTPUT_PATH: &str = "output/phase1.ppm";
+
+/// Position, color, intensity, and radius of the one representative light for the showcase lava.
+///
+/// It stands just outside the lava block's camera-facing (-Z) face (the block spans `x 1.7..2.9`,
+/// `y 0..1.3`, `z -0.8..0.4`) so it is not shadowed by the block it represents. A future lava
+/// region should likewise get one or a few such lights, never one per lava voxel.
+const LAVA_LIGHT_POSITION: Vec3 = Vec3::new(2.3, 1.0, -1.15);
+const LAVA_LIGHT_COLOR: Color = Color::new(1.0, 0.45, 0.12);
+const LAVA_LIGHT_INTENSITY: f32 = 3.0;
+const LAVA_LIGHT_RADIUS: f32 = 5.0;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let aspect_ratio = WIDTH as f32 / HEIGHT as f32;
@@ -106,6 +116,15 @@ fn phase2_test_scene() -> Result<Scene, PpmLoadError> {
         Aabb::try_new(Vec3::new(1.7, 0.0, -0.8), Vec3::new(2.9, 1.3, 0.4)).unwrap(),
         materials.lava,
     ));
+    scene.add_point_light(
+        PointLight::try_new(
+            LAVA_LIGHT_POSITION,
+            LAVA_LIGHT_COLOR,
+            LAVA_LIGHT_INTENSITY,
+            LAVA_LIGHT_RADIUS,
+        )
+        .expect("showcase lava light configuration must be valid"),
+    );
 
     Ok(scene)
 }

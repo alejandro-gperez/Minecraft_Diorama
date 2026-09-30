@@ -7,6 +7,18 @@ use super::{Material, MaterialId, TextureId, TextureSelection};
 /// The other canonical materials do not transmit light and keep the neutral default `AIR_IOR`.
 pub const GLASS_IOR: f32 = 1.5;
 
+/// Emission color of canonical lava.
+///
+/// The lava texture already carries the orange-to-yellow color; emission modulates the texture
+/// (see `Material::emitted_radiance`), so this tint only nudges it slightly warmer and leaves most
+/// of the painted detail to the texture.
+pub const LAVA_EMISSION_COLOR: Color = Color::new(1.00, 0.88, 0.72);
+/// Emission strength of canonical lava.
+///
+/// Above `1` on purpose: the average lava texel (about `0.85, 0.41, 0.10`) then emits roughly
+/// `1.3, 0.5, 0.1`, so the bright texels saturate while the darker crust stays readable.
+pub const LAVA_EMISSION_STRENGTH: f32 = 1.5;
+
 /// Texture identities required by the five Phase 2 rubric materials.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CanonicalTextureIds {
@@ -83,13 +95,17 @@ pub fn canonical_material_definitions(
             0.10,
             0.0,
             0.05,
-        )?,
+        )?
+        .with_emission(LAVA_EMISSION_COLOR, LAVA_EMISSION_STRENGTH)?,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CanonicalMaterials, CanonicalTextureIds, GLASS_IOR};
+    use super::{
+        CanonicalMaterials, CanonicalTextureIds, GLASS_IOR, LAVA_EMISSION_COLOR,
+        LAVA_EMISSION_STRENGTH,
+    };
     use crate::{
         color::Color,
         geometry::CubeFace,
@@ -209,6 +225,29 @@ mod tests {
             0.05,
             AIR_IOR,
         );
+    }
+
+    #[test]
+    fn canonical_lava_is_the_only_emissive_material() {
+        let (scene, _, materials) = registered_scene();
+
+        let lava = scene.material(materials.lava).unwrap();
+        assert!(lava.is_emissive());
+        assert_eq!(lava.emission_color(), LAVA_EMISSION_COLOR);
+        assert_eq!(lava.emission_strength(), LAVA_EMISSION_STRENGTH);
+        assert!(LAVA_EMISSION_STRENGTH > 1.0);
+
+        for id in [
+            materials.grass,
+            materials.cobblestone,
+            materials.obsidian,
+            materials.glass,
+        ] {
+            let material = scene.material(id).unwrap();
+            assert!(!material.is_emissive());
+            assert_eq!(material.emission_strength(), 0.0);
+            assert_eq!(material.emission_color(), Color::BLACK);
+        }
     }
 
     #[test]

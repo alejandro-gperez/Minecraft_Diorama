@@ -10,9 +10,9 @@ sky.
 
 Phase 1 provides the correct, testable 3D foundation and Phase 2 provides the audited surface and
 lighting system. Phase 3 is underway with a procedural sunset/night environment, bounded
-recursive ray infrastructure, recursive reflections, recursive glass refraction, and Schlick
-Fresnel composition for glass; emission, normal mapping, and the larger EggWars world remain
-planned work.
+recursive ray infrastructure, recursive reflections, recursive glass refraction, Schlick
+Fresnel composition for glass, and emissive lava with a local lava point light; normal mapping and
+the larger EggWars world remain planned work.
 
 ## Current Status
 
@@ -21,7 +21,8 @@ audited. Phase 3 — Raytracing Effects — is underway. Primary-ray misses now 
 procedural sunset/night environment in world space. Every radiance ray flows through one
 bounded, depth-aware trace path; reflective materials launch recursive reflection rays and
 transparent materials launch recursive Snell refraction rays whose split with reflection follows
-Schlick's Fresnel approximation. Emission and normal mapping are not implemented.
+Schlick's Fresnel approximation. Lava is self-luminous and lights nearby surfaces through a finite
+local point light. Normal mapping is not implemented.
 
 The current implementation includes:
 
@@ -52,6 +53,9 @@ The current implementation includes:
 - bounded recursive Snell refraction with a validated per-material index of refraction.
 - angle-dependent Schlick Fresnel composition of glass reflection and refraction, with total
   internal reflection routed to reflection.
+- validated per-material emission, used by canonical lava as visible self-radiance.
+- finite-radius local point lights with squared falloff, Lambert diffuse, Blinn-Phong specular, and
+  hard point-light shadow rays.
 
 ## Architecture
 
@@ -109,7 +113,8 @@ Local surface shading is separate from the point where recursive contributions a
 Reflection and refraction are the secondary radiance rays; each spawns at `depth + 1`, so a
 transparent hit below the maximum depth branches into two child rays (only the reflected one
 under total internal reflection). A transparent hit at `MAX_RAY_DEPTH` spawns neither branch and returns its full,
-unweighted local shading rather than black. Lava does not emit.
+unweighted local shading rather than black. Local shading includes emission and point lights, so a
+terminal hit on lava still glows. Emission spawns no rays of its own.
 Hard-shadow rays are any-hit visibility queries, not radiance rays, and do not consume depth.
 Recursion uses only small stack values and shared borrows, with no per-ray allocation.
 
@@ -227,6 +232,82 @@ Known limitations:
   Merging connected glass is a concern for the later voxel world.
 - Faces struck from inside glass are locally lit with their outward geometric normal.
 
+## Emission and Local Lava Lighting
+
+Lava is the project's primary emissive material. Two deliberately separate mechanisms make it
+visible in the scene: the material's own **emission**, which is how the lava surface appears, and
+a small number of explicit **point lights**, which are how lava lights its surroundings. Nothing
+here is global illumination, path tracing, photon mapping, or area-light sampling.
+
+### Material emission
+
+`Material` stores an `emission_color` and a non-negative `emission_strength` (default: none).
+Emission is validated: the color must be finite and non-negative per channel, the strength must be
+finite and `>= 0`, and their product must be finite. Invalid values are rejected, not clamped.
+Unlike albedo, emission is not limited to `[0, 1]`: it is radiance, and intermediate `Color`
+values may exceed the displayable range. The framebuffer already clamps only when converting to
+RGB8, so no HDR or tone-mapping stage was added. Tone mapping is not implemented.
+
+```text
+emission = texture_sample * emission_color * emission_strength
+local    = ambient
+         + directional_visible * (directional_diffuse + directional_specular)
+         + sum over point lights of point_visible * (point_diffuse + point_specular)
+         + emission
+```
+
+Emission is self-radiance added to the local result. It is not multiplied by Lambert diffuse and is
+not shadowed, so lava stays bright on its unlit side, inside a shadow, and in the dark. The
+texture modulates the emission (albedo does not), which keeps the painted lava detail readable
+instead of flattening it into one saturated color. Because emission is part of local shading, a
+reflection or refraction ray that reaches lava sees the same emissive radiance through the
+ordinary `trace_ray` path; there is no lava-specific reflection code.
+
+Canonical lava uses `emission_color = (1.00, 0.88, 0.72)` and `emission_strength = 1.5`. The lava
+texture averages about `(0.85, 0.41, 0.10)`, so an average texel emits roughly `(1.3, 0.5, 0.1)`:
+bright texels saturate while the darker crust remains readable. Grass, cobblestone, obsidian, and
+glass do not emit, and none of their other optical parameters changed.
+
+### Point lights
+
+`PointLight` has a position, a color, an intensity, and a radius. The position must be finite, the
+color finite and non-negative, the intensity finite and `>= 0` (zero is an inert light), and the
+radius finite and `> 0`. A point light is not geometry and never blocks rays. The scene owns a small
+list of them; each shaded hit iterates that list without allocating, cloning, or dynamic dispatch.
+
+For a hit at `P` with geometric normal `N` and a light at `L`:
+
+```text
+distance    = |L - P|
+attenuation = clamp(1 - distance / radius, 0, 1)²
+radiance    = color * intensity * attenuation
+diffuse     = base_color * radiance * max(N·L_dir, 0)
+specular    = radiance * material_specular * max(N·H, 0)^32
+```
+
+The falloff is intentionally not inverse-square: it gives a predictable artistic radius, exactly
+zero influence at and beyond it, and a cheap evaluation. The specular term reuses the directional
+light's Blinn-Phong model and shininess. Lights beyond the radius, inert lights, lights on the
+surface, and back-facing surfaces return before any shadow ray or specular work; materials with
+zero specular skip the highlight. Shading still uses the geometric normal; normal mapping is
+Mission 20.
+
+Each potentially lit hit casts one any-hit shadow ray from `P + N * POINT_LIGHT_SHADOW_BIAS`
+(`1.0e-4`, a unit-scale assumption like the other biases) toward the light, limited to the remaining
+distance to it. The interval is finite because the light is a point, not a surface: a blocker
+beyond the light cannot shadow it. The shadow ray reuses the existing `Scene::is_occluded` query.
+As for the directional light, glass is an opaque blocker of point-light shadow rays; transparent
+or colored shadows are not implemented.
+
+### Representing lava regions
+
+The intended future architecture is many connected lava voxels reduced to one or a few
+representative point lights per region, not one light per lava voxel. The procedural region
+extraction is not implemented. The showcase places a single warm light, color `(1.00, 0.45, 0.12)`,
+intensity `3.0`, radius `5.0`, at `(2.3, 1.0, -1.15)`, just outside the lava block's face toward the
+default camera so the block does not shadow its own light. It visibly warms the nearby grass and
+fades with distance; glass and obsidian inside its radius receive a fainter contribution.
+
 ## Controls
 
 - Arrow keys: orbit horizontally and vertically.
@@ -305,13 +386,14 @@ parameters are registered once at startup and resolved during rendering through 
 | Cobblestone | `cobblestone` on all faces | `(1.00, 1.00, 1.00)` | 0.08 | 0.00 | 0.03 | 1.0 | Normal mapping planned |
 | Obsidian | `obsidian` on all faces | `(0.90, 0.90, 1.00)` | 0.55 | 0.00 | 0.35 | 1.0 | Reflection (implemented) |
 | Glass | `glass` on all faces | `(0.90, 0.97, 1.00)` | 0.80 | 0.85 | 0.15 | 1.5 | Refraction + Fresnel (implemented) |
-| Lava | `lava` on all faces | `(1.00, 0.95, 0.90)` | 0.10 | 0.00 | 0.05 | 1.0 | Emission planned |
+| Lava | `lava` on all faces | `(1.00, 0.95, 0.90)` | 0.10 | 0.00 | 0.05 | 1.0 | Emission + local lava light (implemented) |
 
 Texture, albedo, specular, reflectivity, transparency, and index of refraction all affect
 rendering, except that transparent glass's stored reflectivity is superseded by Fresnel. The
 `1.0` IOR of the non-transmissive materials is the neutral default and has no optical effect.
-Glass still blocks shadow rays as an opaque AABB. Lava does not emit light and cobblestone still
-uses its geometric AABB normal. Emission and normal mapping remain Phase 3 work.
+Lava additionally stores `emission_color = (1.00, 0.88, 0.72)` and `emission_strength = 1.5`; the
+other four materials do not emit. Glass still blocks shadow rays as an opaque AABB, and cobblestone
+still uses its geometric AABB normal. Normal mapping remains Phase 3 work.
 
 ## Performance
 
@@ -354,9 +436,29 @@ their weights. The extra default-view cost is plausibly from inside-glass reflec
 stay inside and hit glass again instead of escaping, but that attribution was not profiled.
 These are local observations, not a formal benchmark.
 
+With emission and the lava point light, forty warmed 320×180 release renders per view (ten warm-up
+renders discarded) were measured in one process for the Mission 18 build and for the new build,
+using the same harness and scene layout in the same session. Medians in ms:
+
+| View | Mission 18 build | Emission + point light |
+| --- | ---: | ---: |
+| Default | 3.82 | 4.19 |
+| Top-down | 5.52 | 6.47 |
+| Back | 5.56 | 6.30 |
+| Close lava | 9.57 | 12.99 |
+| Close glass | 14.19 | 18.13 |
+
+That is roughly 10–17% more for wide views and 28–36% more for close lava and glass views. The new
+cost is the point-light evaluation and its shadow ray at every shaded hit inside the light's
+radius, so it grows with the number of such hits (including secondary rays through glass and
+reflections), the number of lights, and their radii. Six `cargo run --release` startups measured
+4.47–4.95 ms (4.95, 4.47, 4.69, 4.48, 4.47, 4.50). These are same-session comparisons on the
+development machine; the absolute values are not comparable with the earlier figures above, and
+none of this is a formal benchmark.
+
 ## Testing
 
-The current suite contains 246 tests covering vector arithmetic and normalization, ray invariants,
+The current suite contains 311 tests covering vector arithmetic and normalization, ray invariants,
 AABB construction and edge cases, camera basis/ray generation/orbit limits, texture sampling and
 registration, P6 parsing and malformed input, material face selection, cube-face UV orientation,
 scene closest-hit behavior, ambient/Lambert/Blinn-Phong behavior, renderer lighting and texture
@@ -367,7 +469,9 @@ reflection depth behavior, canonical reflectivity, index-of-refraction validatio
 refraction and total internal reflection, entering/exiting classification and origin bias,
 recursive refraction depth behavior, Schlick Fresnel reflectance and input validation, interface
 orientation, inside and outside reflection origins, Fresnel transparency composition, total
-internal reflection routing, canonical glass refraction, a camera-pose render sweep, framebuffer and color conversion, PPM output, and
+internal reflection routing, canonical glass refraction, material emission validation and
+self-radiance that survives zero diffuse and occlusion, point-light validation, falloff, diffuse,
+specular, bounded shadow rays, glass blocking, recursive emissive lava, a camera-pose render sweep, framebuffer and color conversion, PPM output, and
 presentation-independent camera and RGBA conversion helpers. Every AABB remains an opaque shadow
 blocker, including glass.
 
@@ -391,7 +495,7 @@ The following belong to later phases and are not yet implemented:
 
 - normal mapping;
 - transparent or colored shadows through glass, absorption, and nested or merged glass media;
-- emissive lava;
+- procedural lava-region extraction into representative point lights;
 - deterministic procedural 16×16 floating islands and configurable seeds;
 - ores and the EggWars battle-aftermath scene;
 - a voxel grid and 3D DDA traversal;
@@ -408,7 +512,8 @@ The following belong to later phases and are not yet implemented:
 | Lighting, shadows, reflection | Direct lighting, hard shadows, and bounded recursive reflection implemented |
 | Refraction | Implemented: recursive Snell refraction through glass (IOR 1.5) |
 | Fresnel | Implemented: Schlick reflection/refraction split for glass, TIR routed to reflection |
-| Normal mapping and emissive lava | Planned |
+| Emissive lava | Implemented: visible self-radiance plus a local lava point light with hard shadows |
+| Normal mapping | Planned |
 | Sunset/night skybox/environment | Procedural CPU environment implemented; shared miss path for every traced ray |
 | Procedural floating-island terrain | Planned |
 | Voxel traversal and parallel rendering | Planned |
