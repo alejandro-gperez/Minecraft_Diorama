@@ -9,7 +9,21 @@ use crate::{
 
 use super::{Color, Framebuffer};
 
-const PRIMARY_RAY_T_MIN: f32 = 0.0;
+/// Recursion depth of a radiance ray, counted upward from the camera.
+///
+/// `0` is a primary camera ray, `1` is a ray spawned by a depth-0 hit, `2` is a ray spawned by a
+/// depth-1 hit, and so on. Shadow visibility queries are not radiance rays and carry no depth.
+type RayDepth = u32;
+
+const PRIMARY_RAY_DEPTH: RayDepth = 0;
+/// Deepest radiance ray the renderer may trace.
+///
+/// A ray at this depth is still intersected, locally shaded, and shadow-tested, and still samples
+/// the environment on a miss; it only may not spawn a further secondary radiance ray.
+const MAX_RAY_DEPTH: RayDepth = 3;
+
+/// Secondary-ray origin handling is deliberately deferred to the missions that spawn such rays.
+const RADIANCE_RAY_T_MIN: f32 = 0.0;
 const SHADOW_RAY_T_MIN: f32 = 0.0;
 const SHADOW_RAY_T_MAX: f32 = f32::INFINITY;
 /// Fixed world-space offset for the current unit-scale AABB scene.
@@ -29,6 +43,7 @@ pub enum RenderError {
     TextureSamplingFailed,
     ViewDirectionUnavailable,
     ShadowRayGenerationFailed,
+    RayDepthExceeded,
 }
 
 pub struct Renderer;
@@ -49,16 +64,15 @@ impl Renderer {
             return Err(RenderError::AspectRatioMismatch);
         }
 
+        let tracer = Tracer::new(scene, *lighting, environment);
+
         for y in 0..height {
             for x in 0..width {
                 let (u, v) = pixel_center(x, y, width, height);
                 let ray = camera
                     .ray_for_viewport(u, v)
                     .ok_or(RenderError::PrimaryRayGenerationFailed)?;
-                let color = match scene.closest_hit(ray, PRIMARY_RAY_T_MIN, f32::INFINITY) {
-                    Some(hit) => shade_hit(scene, hit, camera.position(), *lighting)?,
-                    None => environment.sample(ray.direction()),
-                };
+                let color = tracer.trace_ray(ray, PRIMARY_RAY_DEPTH)?;
 
                 framebuffer.set_pixel(x, y, color);
             }
@@ -68,10 +82,65 @@ impl Renderer {
     }
 }
 
+/// Shared, borrowed inputs for every radiance ray traced during one render.
+struct Tracer<'a> {
+    scene: &'a Scene,
+    lighting: Lighting,
+    environment: &'a Environment,
+}
+
+impl<'a> Tracer<'a> {
+    const fn new(scene: &'a Scene, lighting: Lighting, environment: &'a Environment) -> Self {
+        Self {
+            scene,
+            lighting,
+            environment,
+        }
+    }
+
+    /// Returns the radiance arriving along `ray`, traced at recursion `depth`.
+    ///
+    /// Every radiance ray, primary or secondary, shares one miss path: the world-space
+    /// environment. The viewer for local specular shading is the ray origin, which is the camera
+    /// position for primary rays and the spawning surface point for secondary rays.
+    fn trace_ray(&self, ray: Ray, depth: RayDepth) -> Result<Color, RenderError> {
+        if depth > MAX_RAY_DEPTH {
+            return Err(RenderError::RayDepthExceeded);
+        }
+
+        let Some(hit) = self
+            .scene
+            .closest_hit(ray, RADIANCE_RAY_T_MIN, f32::INFINITY)
+        else {
+            return Ok(self.environment.sample(ray.direction()));
+        };
+
+        let local = shade_hit(self.scene, hit, ray.origin(), self.lighting)?;
+
+        // Secondary radiance contributions belong here, each gated by
+        // `can_spawn_secondary_ray(depth)` and traced with `depth + 1`. No material launches one
+        // yet, so local shading is the complete result.
+        Ok(local)
+    }
+}
+
+/// Reports whether a ray traced at `depth` may spawn a radiance ray at `depth + 1`.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "no material launches secondary radiance rays yet")
+)]
+const fn can_spawn_secondary_ray(depth: RayDepth) -> bool {
+    depth < MAX_RAY_DEPTH
+}
+
+/// Local surface shading: texture, albedo, and direct lighting with hard-shadow visibility.
+///
+/// The shadow ray is an any-hit visibility query rather than a radiance ray, so it takes no
+/// recursion depth and is cast identically at every traced depth.
 fn shade_hit(
     scene: &Scene,
     hit: SceneHit,
-    camera_position: Vec3,
+    viewer_position: Vec3,
     lighting: Lighting,
 ) -> Result<Color, RenderError> {
     let material = scene
@@ -86,7 +155,7 @@ fn shade_hit(
         .sample_nearest(uv.u, uv.v)
         .ok_or(RenderError::TextureSamplingFailed)?;
 
-    let view_direction = (camera_position - hit.geometry.position)
+    let view_direction = (viewer_position - hit.geometry.position)
         .try_normalized()
         .ok_or(RenderError::ViewDirectionUnavailable)?;
     let light = lighting.directional();
@@ -121,13 +190,19 @@ fn pixel_center(x: usize, y: usize, width: usize, height: usize) -> (f32, f32) {
 mod tests {
     use std::f32::consts::FRAC_PI_2;
 
-    use super::{RAY_ORIGIN_BIAS, RenderError, Renderer, pixel_center, shade_hit};
+    use super::{
+        MAX_RAY_DEPTH, PRIMARY_RAY_DEPTH, RAY_ORIGIN_BIAS, RenderError, Renderer, Tracer,
+        can_spawn_secondary_ray, pixel_center, shade_hit,
+    };
     use crate::{
         camera::OrbitalCamera,
         environment::Environment,
         geometry::Aabb,
         lighting::{AmbientLight, DirectionalLight, Lighting},
-        material::{Material, MaterialId, Texture, TextureId, TextureSelection},
+        material::{
+            CanonicalMaterials, CanonicalTextureIds, Material, MaterialId, Texture, TextureId,
+            TextureSelection,
+        },
         math::Vec3,
         ray::Ray,
         render::{Color, Framebuffer},
@@ -187,6 +262,383 @@ mod tests {
             Aabb::try_new(min, max).unwrap(),
             MaterialId::new(u32::MAX),
         ));
+    }
+
+    fn darkness() -> Lighting {
+        Lighting::new(
+            AmbientLight::try_new(Color::BLACK, 0.0).unwrap(),
+            DirectionalLight::try_new(Vec3::new(0.0, 1.0, 0.0), Color::WHITE, 0.0).unwrap(),
+        )
+    }
+
+    fn unit_cube_scene() -> Scene {
+        let mut scene = Scene::new();
+        let material_id = add_solid_material(&mut scene, Color::WHITE);
+        scene.add(SceneObject::new(
+            Aabb::try_new(Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).unwrap(),
+            material_id,
+        ));
+        scene
+    }
+
+    fn downward_ray() -> Ray {
+        Ray::try_new(Vec3::new(0.5, 2.0, 0.5), Vec3::new(0.0, -1.0, 0.0)).unwrap()
+    }
+
+    fn miss_directions() -> [Vec3; 4] {
+        [
+            Vec3::new(0.6, 0.2, 0.8),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(-0.3, 0.05, 1.0),
+            Vec3::new(0.2, -1.0, 0.1),
+        ]
+    }
+
+    /// Registers the canonical materials over one shared solid test texture.
+    fn canonical_scene() -> (Scene, CanonicalMaterials) {
+        let mut scene = Scene::new();
+        let texture = scene
+            .add_texture(Texture::solid(Color::new(0.6, 0.5, 0.4)))
+            .unwrap();
+        let materials = scene
+            .add_canonical_materials(CanonicalTextureIds {
+                grass_top: texture,
+                grass_side: texture,
+                dirt: texture,
+                cobblestone: texture,
+                obsidian: texture,
+                glass: texture,
+                lava: texture,
+            })
+            .unwrap();
+        (scene, materials)
+    }
+
+    fn all_canonical(materials: CanonicalMaterials) -> [MaterialId; 5] {
+        [
+            materials.grass,
+            materials.cobblestone,
+            materials.obsidian,
+            materials.glass,
+            materials.lava,
+        ]
+    }
+
+    /// Diagonal ray striking the unit cube's top face at `(0.5, 1.0, 0.5)`.
+    fn angled_top_ray() -> Ray {
+        Ray::try_new(Vec3::new(-0.5, 2.0, 0.5), Vec3::new(1.0, -1.0, 0.0)).unwrap()
+    }
+
+    // Bright blocks placed where a mirror reflection or straight transmission of
+    // `angled_top_ray` would arrive; neither blocks the incoming ray or its upward shadow ray.
+    const REFLECTION_WITNESS: (Vec3, Vec3) = (Vec3::new(1.5, 2.0, 0.0), Vec3::new(2.5, 3.0, 1.0));
+    const TRANSMISSION_WITNESS: (Vec3, Vec3) =
+        (Vec3::new(1.5, -1.5, 0.0), Vec3::new(2.5, -0.5, 1.0));
+
+    /// Traces `angled_top_ray` onto a unit cube of the selected canonical material at every valid
+    /// depth, with and without the witness blocks, and expects exactly its local shading.
+    fn assert_only_local_shading(select: impl Fn(CanonicalMaterials) -> MaterialId) {
+        let lighting = upward_light_with_ambient();
+        let environment = environment();
+        let ray = angled_top_ray();
+        let (mut scene, materials) = canonical_scene();
+        let material_id = select(materials);
+        scene.add(SceneObject::new(
+            Aabb::try_new(Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).unwrap(),
+            material_id,
+        ));
+        let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+        assert_eq!(hit.material_id, material_id);
+        let local = shade_hit(&scene, hit, ray.origin(), lighting).unwrap();
+
+        let mut witnessed = scene.clone();
+        let white = add_solid_material(&mut witnessed, Color::WHITE);
+        for (min, max) in [REFLECTION_WITNESS, TRANSMISSION_WITNESS] {
+            witnessed.add(SceneObject::new(Aabb::try_new(min, max).unwrap(), white));
+        }
+
+        for depth in PRIMARY_RAY_DEPTH..=MAX_RAY_DEPTH {
+            for candidate in [&scene, &witnessed] {
+                assert_eq!(
+                    Tracer::new(candidate, lighting, &environment).trace_ray(ray, depth),
+                    Ok(local)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn primary_rays_enter_tracing_at_depth_zero() {
+        assert_eq!(PRIMARY_RAY_DEPTH, 0);
+
+        let camera = OrbitalCamera::try_new(Vec3::ZERO, 0.0, 0.0, 5.0, FRAC_PI_2, 1.0).unwrap();
+        let mut scene = Scene::new();
+        let red = add_solid_material(&mut scene, Color::new(1.0, 0.0, 0.0));
+        scene.add(SceneObject::new(
+            Aabb::try_new(Vec3::new(-0.5, -0.5, -0.5), Vec3::new(0.5, 0.5, 0.5)).unwrap(),
+            red,
+        ));
+        let lighting = upward_light_with_ambient();
+        let environment = environment();
+        let tracer = Tracer::new(&scene, lighting, &environment);
+        let mut framebuffer = Framebuffer::try_new(3, 3).unwrap();
+
+        Renderer::render(&camera, &scene, &lighting, &environment, &mut framebuffer).unwrap();
+
+        for y in 0..3 {
+            for x in 0..3 {
+                let (u, v) = pixel_center(x, y, 3, 3);
+                let ray = camera.ray_for_viewport(u, v).unwrap();
+                assert_eq!(
+                    framebuffer.pixel(x, y),
+                    Some(tracer.trace_ray(ray, PRIMARY_RAY_DEPTH).unwrap())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_valid_depth_receives_ordinary_local_hit_shading() {
+        let scene = unit_cube_scene();
+        let lighting = upward_light_with_ambient();
+        let environment = environment();
+        let tracer = Tracer::new(&scene, lighting, &environment);
+        let ray = downward_ray();
+        let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+        let local = shade_hit(&scene, hit, ray.origin(), lighting).unwrap();
+
+        for depth in PRIMARY_RAY_DEPTH..=MAX_RAY_DEPTH {
+            assert_eq!(tracer.trace_ray(ray, depth), Ok(local));
+        }
+    }
+
+    #[test]
+    fn miss_at_primary_depth_samples_environment() {
+        let scene = Scene::new();
+        let environment = environment();
+        let tracer = Tracer::new(&scene, ambient_only(), &environment);
+
+        for direction in miss_directions() {
+            let ray = Ray::try_new(Vec3::new(0.0, 0.5, 0.0), direction).unwrap();
+            assert_eq!(
+                tracer.trace_ray(ray, PRIMARY_RAY_DEPTH),
+                Ok(environment.sample(ray.direction()))
+            );
+        }
+    }
+
+    #[test]
+    fn miss_at_maximum_depth_samples_environment() {
+        let scene = unit_cube_scene();
+        let environment = environment();
+        let tracer = Tracer::new(&scene, ambient_only(), &environment);
+
+        for direction in miss_directions() {
+            let ray = Ray::try_new(Vec3::new(3.0, 0.5, 3.0), direction).unwrap();
+            assert_eq!(scene.closest_hit(ray, 0.0, f32::INFINITY), None);
+            assert_eq!(
+                tracer.trace_ray(ray, MAX_RAY_DEPTH),
+                Ok(environment.sample(ray.direction()))
+            );
+        }
+    }
+
+    #[test]
+    fn hit_at_maximum_depth_receives_local_surface_shading() {
+        let scene = unit_cube_scene();
+        let environment = environment();
+        let ray = downward_ray();
+
+        let lit = Tracer::new(&scene, upward_light_with_ambient(), &environment)
+            .trace_ray(ray, MAX_RAY_DEPTH)
+            .unwrap();
+        let ambient = Tracer::new(&scene, ambient_only(), &environment)
+            .trace_ray(ray, MAX_RAY_DEPTH)
+            .unwrap();
+
+        assert!(lit.r > 1.0 && lit.g > 1.0 && lit.b > 1.0);
+        assert_eq!(ambient, Color::WHITE);
+    }
+
+    #[test]
+    fn depth_policy_forbids_spawning_beyond_maximum() {
+        for depth in PRIMARY_RAY_DEPTH..MAX_RAY_DEPTH {
+            let child_depth = depth + 1;
+            assert!(can_spawn_secondary_ray(depth));
+            assert!(child_depth <= MAX_RAY_DEPTH);
+        }
+
+        assert!(!can_spawn_secondary_ray(MAX_RAY_DEPTH));
+        assert!(!can_spawn_secondary_ray(MAX_RAY_DEPTH + 1));
+        assert!(!can_spawn_secondary_ray(u32::MAX));
+    }
+
+    #[test]
+    fn tracing_beyond_maximum_depth_is_rejected() {
+        let hit_scene = unit_cube_scene();
+        let empty_scene = Scene::new();
+        let environment = environment();
+
+        for scene in [&hit_scene, &empty_scene] {
+            let tracer = Tracer::new(scene, ambient_only(), &environment);
+            for depth in [MAX_RAY_DEPTH + 1, u32::MAX] {
+                assert_eq!(
+                    tracer.trace_ray(downward_ray(), depth),
+                    Err(RenderError::RayDepthExceeded)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shadow_queries_do_not_consume_recursive_depth() {
+        let mut scene = unit_cube_scene();
+        let lighting = upward_light_with_ambient();
+        let environment = environment();
+        let ray = angled_top_ray();
+        let unblocked = Tracer::new(&scene, lighting, &environment)
+            .trace_ray(ray, MAX_RAY_DEPTH)
+            .unwrap();
+
+        add_blocker(
+            &mut scene,
+            Vec3::new(0.25, 1.5, 0.25),
+            Vec3::new(0.75, 1.9, 0.75),
+        );
+        let tracer = Tracer::new(&scene, lighting, &environment);
+
+        // A depth-limited ray may spawn no radiance ray, yet its shadow query still runs.
+        assert!(!can_spawn_secondary_ray(MAX_RAY_DEPTH));
+        assert!(unblocked.r > 1.0);
+        for depth in PRIMARY_RAY_DEPTH..=MAX_RAY_DEPTH {
+            assert_eq!(tracer.trace_ray(ray, depth), Ok(Color::new(0.2, 0.2, 0.2)));
+        }
+    }
+
+    #[test]
+    fn trace_resolves_face_specific_textures() {
+        let mut scene = Scene::new();
+        let top = scene
+            .add_texture(Texture::solid(Color::new(1.0, 0.0, 0.0)))
+            .unwrap();
+        let side = scene
+            .add_texture(Texture::solid(Color::new(0.0, 1.0, 0.0)))
+            .unwrap();
+        let bottom = scene
+            .add_texture(Texture::solid(Color::new(0.0, 0.0, 1.0)))
+            .unwrap();
+        let material_id = scene
+            .add_material(
+                Material::try_new(
+                    TextureSelection::TopSideBottom { top, side, bottom },
+                    Color::WHITE,
+                    0.0,
+                    0.0,
+                    0.0,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        scene.add(SceneObject::new(
+            Aabb::try_new(Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).unwrap(),
+            material_id,
+        ));
+        let environment = environment();
+        let tracer = Tracer::new(&scene, ambient_only(), &environment);
+
+        for (origin, direction, expected) in [
+            (
+                Vec3::new(0.5, 2.0, 0.5),
+                Vec3::new(0.0, -1.0, 0.0),
+                Color::new(1.0, 0.0, 0.0),
+            ),
+            (
+                Vec3::new(0.5, 0.5, 2.0),
+                Vec3::new(0.0, 0.0, -1.0),
+                Color::new(0.0, 1.0, 0.0),
+            ),
+            (
+                Vec3::new(0.5, -1.0, 0.5),
+                Vec3::new(0.0, 1.0, 0.0),
+                Color::new(0.0, 0.0, 1.0),
+            ),
+        ] {
+            let ray = Ray::try_new(origin, direction).unwrap();
+            assert_eq!(tracer.trace_ray(ray, PRIMARY_RAY_DEPTH), Ok(expected));
+        }
+    }
+
+    #[test]
+    fn trace_preserves_directional_lighting_and_hard_shadows() {
+        let mut scene = unit_cube_scene();
+        let environment = environment();
+        let ray = angled_top_ray();
+        let lit = Tracer::new(&scene, upward_light_with_ambient(), &environment)
+            .trace_ray(ray, PRIMARY_RAY_DEPTH)
+            .unwrap();
+        let unlit = Tracer::new(&scene, darkness(), &environment)
+            .trace_ray(ray, PRIMARY_RAY_DEPTH)
+            .unwrap();
+
+        add_blocker(
+            &mut scene,
+            Vec3::new(0.25, 1.5, 0.25),
+            Vec3::new(0.75, 1.9, 0.75),
+        );
+        let shadowed = Tracer::new(&scene, upward_light_with_ambient(), &environment)
+            .trace_ray(ray, PRIMARY_RAY_DEPTH)
+            .unwrap();
+
+        assert_eq!(unlit, Color::BLACK);
+        assert!(lit.r > shadowed.r);
+        assert_eq!(shadowed, Color::new(0.2, 0.2, 0.2));
+    }
+
+    #[test]
+    fn canonical_materials_produce_no_recursive_contribution() {
+        for index in 0..5 {
+            assert_only_local_shading(|materials| all_canonical(materials)[index]);
+        }
+    }
+
+    #[test]
+    fn glass_remains_opaque() {
+        let (scene, materials) = canonical_scene();
+        assert!(scene.material(materials.glass).unwrap().transparency() > 0.0);
+
+        assert_only_local_shading(|m| m.glass);
+    }
+
+    #[test]
+    fn obsidian_does_not_reflect_yet() {
+        let (scene, materials) = canonical_scene();
+        assert!(scene.material(materials.obsidian).unwrap().reflectivity() > 0.0);
+
+        assert_only_local_shading(|m| m.obsidian);
+    }
+
+    #[test]
+    fn lava_does_not_emit_yet() {
+        let (mut scene, materials) = canonical_scene();
+        let white = add_solid_material(&mut scene, Color::WHITE);
+        scene.add(SceneObject::new(
+            Aabb::try_new(Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).unwrap(),
+            materials.lava,
+        ));
+        scene.add(SceneObject::new(
+            Aabb::try_new(Vec3::new(1.0, 0.0, 0.0), Vec3::new(2.0, 1.0, 1.0)).unwrap(),
+            white,
+        ));
+        let environment = environment();
+        let tracer = Tracer::new(&scene, darkness(), &environment);
+        let onto_lava = downward_ray();
+        let onto_neighbor =
+            Ray::try_new(Vec3::new(1.5, 2.0, 0.5), Vec3::new(0.0, -1.0, 0.0)).unwrap();
+
+        for depth in PRIMARY_RAY_DEPTH..=MAX_RAY_DEPTH {
+            assert_eq!(tracer.trace_ray(onto_lava, depth), Ok(Color::BLACK));
+            assert_eq!(tracer.trace_ray(onto_neighbor, depth), Ok(Color::BLACK));
+        }
     }
 
     #[test]

@@ -90,6 +90,8 @@ impl Lighting {
 /// `normal`, `view_direction`, and the stored light direction are expected to be normalized.
 /// A non-positive Lambert term gates both direct components so back-facing surfaces cannot
 /// receive a specular highlight.
+// Called once per shaded hit; measured renders slow down when LLVM leaves it out of line.
+#[inline]
 pub fn shade_surface(
     base_color: Color,
     normal: Vec3,

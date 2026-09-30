@@ -9,15 +9,17 @@ bridges, damaged defenses, opened chests, exposed resources, and lava beneath a 
 sky.
 
 Phase 1 provides the correct, testable 3D foundation and Phase 2 provides the audited surface and
-lighting system. Phase 3 is underway with a procedural sunset/night environment; recursive rays
-and the larger EggWars world remain planned work.
+lighting system. Phase 3 is underway with a procedural sunset/night environment and bounded
+recursive ray infrastructure; reflection, refraction, and the larger EggWars world remain planned
+work.
 
 ## Current Status
 
 Phase 1 — Core Raytracer — and Phase 2 — Materials, Textures, and Lighting — are complete and
 audited. Phase 3 — Raytracing Effects — is underway. Primary-ray misses now sample a project-owned
-procedural sunset/night environment in world space; recursive reflection and refraction are not
-implemented yet.
+procedural sunset/night environment in world space. Every radiance ray now flows through one
+bounded, depth-aware trace path, but no material launches secondary rays yet; reflection and
+refraction are not implemented.
 
 The current implementation includes:
 
@@ -27,6 +29,7 @@ The current implementation includes:
 - an orbital camera with yaw, pitch, zoom, and perspective ray generation;
 - a CPU-owned framebuffer;
 - closest-hit traversal over a small scene of AABBs;
+- a bounded, depth-aware radiance trace path shared by primary and future secondary rays;
 - deterministic world-space sunset/night environment sampling;
 - procedural sun, sparse seeded stars, and a dark lower-hemisphere void;
 - binary PPM output;
@@ -85,8 +88,22 @@ A dot-product threshold creates the disc and a wider smooth threshold creates it
 Sparse stars use a fixed seed, `0xE6677A2D`, and a hash of quantized world-direction cells. There
 is no stored star collection or mutable RNG, so sampling is deterministic and allocation-free.
 Stars are restricted to the darker upper sky. The environment uses no cubemap, image skybox,
-filesystem access, Raylib sky API, shader, or GPU rendering. The same sampler is ready for future
-secondary-ray misses, but Mission 14 does not launch secondary rays.
+filesystem access, Raylib sky API, shader, or GPU rendering. Every traced radiance ray that misses
+the scene uses this sampler, whatever its depth.
+
+## Ray Depth
+
+The renderer traces every radiance ray through one private `trace_ray(ray, depth)` path. Depth
+counts upward from the camera: primary rays are depth `0`, a ray spawned by a depth-0 hit is depth
+`1`, and so on up to `MAX_RAY_DEPTH = 3`. A ray at the maximum depth is still intersected, locally
+textured and lit, and shadow-tested, and it still samples the environment on a miss; it only may
+not spawn a further secondary ray. Tracing above the maximum returns an explicit render error.
+
+Local surface shading is separate from the point where recursive contributions will be composed.
+No material currently spawns a secondary ray, so obsidian does not reflect, glass remains opaque,
+and lava does not emit. Hard-shadow rays are any-hit visibility queries, not radiance rays, and do
+not consume depth. Recursion uses only small stack values and shared borrows, with no per-ray
+allocation.
 
 ## Controls
 
@@ -184,17 +201,22 @@ measured approximately 2.83 ms, 2.82 ms, 2.80 ms, and 2.77 ms. The Phase 2 basel
 3.1–3.3 ms. Because the diagnostic camera and miss coverage changed, this is only a regression
 sanity check—not evidence of an optimization or a formal benchmark.
 
+After the bounded trace-path refactor, eight interleaved startups each of the previous and new
+builds measured typically 2.77–2.87 ms and 2.70–2.80 ms respectively, with a byte-identical image.
+The infrastructure alone adds no measurable cost while no secondary rays are active.
+
 ## Testing
 
-The current suite contains 158 tests covering vector arithmetic and normalization, ray invariants,
+The current suite contains 172 tests covering vector arithmetic and normalization, ray invariants,
 AABB construction and edge cases, camera basis/ray generation/orbit limits, texture sampling and
 registration, P6 parsing and malformed input, material face selection, cube-face UV orientation,
 scene closest-hit behavior, ambient/Lambert/Blinn-Phong behavior, renderer lighting and texture
 resolution, canonical material registration and texture selection, shadow-ray occlusion and origin
 bias, procedural environment regions, sun, stars, invalid directions, renderer miss integration,
-framebuffer and color conversion, PPM output, and presentation-independent camera and RGBA
-conversion helpers. Every AABB remains an opaque shadow blocker, including materials whose
-transparency behavior belongs to a later Phase 3 mission.
+ray-depth policy and trace-path equivalence at every valid depth, the absence of secondary
+contributions from the canonical materials, framebuffer and color conversion, PPM output, and
+presentation-independent camera and RGBA conversion helpers. Every AABB remains an opaque shadow
+blocker, including materials whose transparency behavior belongs to a later Phase 3 mission.
 
 The audit validation also regenerates the runtime assets with `scripts/prepare_assets.sh`, then
 runs `cargo fmt --check`, `cargo test`, `cargo check`, `cargo build --release`, and
@@ -231,7 +253,7 @@ The following belong to later phases and are not yet implemented:
 | Five textured materials | Canonical definitions and temporary five-material showcase implemented |
 | Lighting, shadows, reflection, refraction | Direct lighting and hard shadows implemented; advanced effects planned |
 | Normal mapping and emissive lava | Planned |
-| Sunset/night skybox/environment | Procedural CPU environment implemented; secondary-ray integration planned |
+| Sunset/night skybox/environment | Procedural CPU environment implemented; shared miss path for every traced ray |
 | Procedural floating-island terrain | Planned |
 | Voxel traversal and parallel rendering | Planned |
 
