@@ -5,8 +5,9 @@
 //! turned into an `Aabb`, and a block resolves to its optical behavior through a lightweight
 //! `BlockType -> MaterialId` mapping. `VoxelGrid::intersect` is the 3D DDA traversal: it steps
 //! through the grid's integer cells directly and reports the first occupied surface as a
-//! `VoxelHit`, which normalizes into the same `SceneHit` that AABB objects produce. The renderer
-//! and `Scene` queries do not call it yet.
+//! `VoxelHit`, which normalizes into the same `SceneHit` that AABB objects produce;
+//! `VoxelGrid::intersects` is its any-hit form for shadow rays. `Scene` queries call both
+//! alongside their AABB objects, so the renderer never touches the grid directly.
 
 pub mod block;
 pub mod grid;

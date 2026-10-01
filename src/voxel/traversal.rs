@@ -1,4 +1,5 @@
-//! 3D DDA traversal: the first occupied voxel surface along a ray.
+//! 3D DDA traversal: the first occupied voxel surface along a ray (`intersect`), or whether one
+//! exists (`intersects`), both from one shared stepping loop.
 //!
 //! The ray is clipped once against the grid's overall bounds, then steps from cell to cell in the
 //! Amanatides–Woo manner, reading block identity straight from contiguous storage. No voxel is
@@ -37,6 +38,15 @@ use crate::{
 
 use super::{BlockMaterials, BlockType, LocalVoxelPosition, Voxel, VoxelGrid, VoxelHit};
 
+/// The first occupied voxel surface the DDA reaches, before any material or UV work.
+#[derive(Clone, Copy, Debug)]
+struct OccupiedSurface {
+    cell: LocalVoxelPosition,
+    block: BlockType,
+    face: CubeFace,
+    t: f32,
+}
+
 impl VoxelGrid {
     /// First occupied voxel surface the ray crosses within `[t_min, t_max]`.
     ///
@@ -51,21 +61,32 @@ impl VoxelGrid {
         t_min: f32,
         t_max: f32,
     ) -> Option<VoxelHit> {
-        self.traverse(ray, materials, t_min, t_max, |_| {})
+        let surface = self.first_occupied(ray, t_min, t_max, |_| {})?;
+        self.surface_hit(ray, surface, materials)
     }
 
-    /// `intersect` that reports each cell it examines to `visit`, in traversal order.
+    /// Reports whether any occupied voxel surface lies within `[t_min, t_max]`.
+    ///
+    /// The any-hit counterpart of `intersect`, as `Aabb::intersects` is of `Aabb::intersect`: the
+    /// same traversal and conventions, so it equals `intersect(..).is_some()`, but it stops at the
+    /// first occupied cell without snapping a position, computing a UV, resolving a material, or
+    /// building a `VoxelHit`. Every block type is an opaque blocker, glass and lava included.
+    pub fn intersects(&self, ray: Ray, t_min: f32, t_max: f32) -> bool {
+        self.first_occupied(ray, t_min, t_max, |_| {}).is_some()
+    }
+
+    /// The shared DDA behind `intersect` and `intersects`: the first occupied surface in the
+    /// interval, reporting each cell it examines to `visit` in traversal order.
     ///
     /// Production passes a no-op that compiles away; tests use it to check cell progression and
     /// count visited cells.
-    fn traverse(
+    fn first_occupied(
         &self,
         ray: Ray,
-        materials: &BlockMaterials,
         t_min: f32,
         t_max: f32,
         mut visit: impl FnMut(LocalVoxelPosition),
-    ) -> Option<VoxelHit> {
+    ) -> Option<OccupiedSurface> {
         if t_min.is_nan() || t_max.is_nan() || t_min > t_max || !ray.origin().is_finite() {
             return None;
         }
@@ -128,9 +149,12 @@ impl VoxelGrid {
 
         if let Voxel::Block(block) = voxels[index] {
             let (t, face) = start_cell_surface(&axes, t_start)?;
-            return (t <= t_max)
-                .then(|| self.surface_hit(ray, cell, face, t, block, materials))
-                .flatten();
+            return (t <= t_max).then_some(OccupiedSurface {
+                cell,
+                block,
+                face,
+                t,
+            });
         }
 
         // Every iteration advances at least one axis, and an axis can advance at most
@@ -155,7 +179,12 @@ impl VoxelGrid {
             visit(cell);
 
             if let Voxel::Block(block) = voxels[index] {
-                return self.surface_hit(ray, cell, entry_face?, t_cross, block, materials);
+                return Some(OccupiedSurface {
+                    cell,
+                    block,
+                    face: entry_face?,
+                    t: t_cross,
+                });
             }
         }
 
@@ -166,19 +195,22 @@ impl VoxelGrid {
         None
     }
 
-    /// Builds the hit on `face` of the occupied local cell `cell` at parameter `t`.
+    /// Builds the hit for an occupied surface found by `first_occupied`.
     ///
     /// `ray.at(t)` misses the face plane by rounding error, so only the coordinate along the face
     /// normal is snapped onto the exact integer plane; the in-face coordinates stay ray-derived.
     fn surface_hit(
         &self,
         ray: Ray,
-        cell: LocalVoxelPosition,
-        face: CubeFace,
-        t: f32,
-        block: BlockType,
+        surface: OccupiedSurface,
         materials: &BlockMaterials,
     ) -> Option<VoxelHit> {
+        let OccupiedSurface {
+            cell,
+            block,
+            face,
+            t,
+        } = surface;
         let voxel = self.local_to_world(cell)?;
         let min = voxel.min_corner();
         let mut position = ray.at(t);
@@ -488,7 +520,7 @@ mod tests {
     /// World voxels the traversal examines, in order.
     fn visited(grid: &VoxelGrid, ray: Ray, t_min: f32, t_max: f32) -> Vec<VoxelPosition> {
         let mut cells = Vec::new();
-        grid.traverse(ray, &materials(), t_min, t_max, |cell| {
+        grid.first_occupied(ray, t_min, t_max, |cell| {
             cells.push(grid.local_to_world(cell).unwrap());
         });
         cells
@@ -1870,6 +1902,198 @@ mod tests {
         assert!(misses > 50_000, "{misses}");
         assert!(exits > 1_000, "{exits}");
         assert!(ambiguous * 200 < hits + misses, "{ambiguous}");
+    }
+
+    // ---------------------------------------------------------------- any-hit
+
+    fn intersects(grid: &VoxelGrid, ray: Ray, t_min: f32, t_max: f32) -> bool {
+        let blocked = grid.intersects(ray, t_min, t_max);
+        assert_eq!(
+            blocked,
+            intersect(grid, ray, t_min, t_max).is_some(),
+            "any-hit and nearest-hit disagree: {ray:?} [{t_min}, {t_max}]"
+        );
+        blocked
+    }
+
+    #[test]
+    fn any_hit_on_an_empty_grid_is_false() {
+        let grid = empty_grid(world(-4, -4, -4), 8, 8, 8);
+        for direction in CubeFace::ALL.map(CubeFace::normal) {
+            assert!(!intersects(
+                &grid,
+                ray(v(0.5, 0.5, 0.5), direction),
+                0.0,
+                INF
+            ));
+        }
+        assert!(!intersects(
+            &grid,
+            ray(v(-9.0, -7.0, -8.0), v(1.0, 0.9, 0.8)),
+            0.0,
+            INF
+        ));
+    }
+
+    #[test]
+    fn any_hit_finds_an_occupied_cell_in_every_travel_direction() {
+        let grid = grid_with(world(-2, -2, -2), (5, 5, 5), &[world(0, 0, 0)]);
+        for direction in CubeFace::ALL.map(CubeFace::normal) {
+            let toward = ray(v(0.5, 0.5, 0.5) - direction * 2.0, direction);
+            let away = ray(v(0.5, 0.5, 0.5) + direction * 1.2, direction);
+            assert!(intersects(&grid, toward, 0.0, INF), "{direction:?}");
+            assert!(!intersects(&grid, away, 0.0, INF), "{direction:?}");
+        }
+        // Negative and mixed-sign oblique directions.
+        assert!(intersects(
+            &grid,
+            ray(v(2.3, 2.1, 2.4), v(-1.0, -0.9, -1.1)),
+            0.0,
+            INF
+        ));
+        assert!(intersects(
+            &grid,
+            ray(v(-1.7, 2.2, 0.4), v(1.0, -0.8, 0.05)),
+            0.0,
+            INF
+        ));
+    }
+
+    #[test]
+    fn any_hit_respects_the_inclusive_interval() {
+        let grid = grid_with(world(0, 0, 0), (8, 1, 1), &[world(2, 0, 0), world(5, 0, 0)]);
+        let ray = ray(v(0.5, 0.5, 0.5), v(1.0, 0.0, 0.0));
+
+        assert!(!intersects(&grid, ray, 0.0, 1.499));
+        assert!(intersects(&grid, ray, 0.0, 1.5));
+        assert!(intersects(&grid, ray, 0.0, 3.0));
+        assert!(intersects(&grid, ray, 1.6, 2.5));
+        assert!(!intersects(&grid, ray, 2.6, 4.4999));
+        assert!(intersects(&grid, ray, 2.6, 4.5));
+        assert!(!intersects(&grid, ray, 5.6, INF));
+    }
+
+    #[test]
+    fn any_hit_ignores_blockers_beyond_a_point_light_segment() {
+        let grid = grid_with(world(0, 0, 0), (8, 1, 1), &[world(2, 0, 0), world(5, 0, 0)]);
+        let from = v(3.5, 0.5, 0.5);
+        let segment = |light: Vec3| (ray(from, light - from), (light - from).length());
+
+        let (open, distance) = segment(v(4.5, 0.5, 0.5));
+        assert!(!intersects(&grid, open, 0.0, distance));
+        let (blocked, distance) = segment(v(7.5, 0.5, 0.5));
+        assert!(intersects(&grid, blocked, 0.0, distance));
+        let (behind, distance) = segment(v(3.1, 0.5, 0.5));
+        assert!(!intersects(&grid, behind, 0.0, distance));
+        let (sun, _) = segment(v(-10.0, 0.5, 0.5));
+        assert!(intersects(&grid, sun, 0.0, INF));
+    }
+
+    #[test]
+    fn any_hit_from_inside_an_occupied_voxel_sees_its_exit_within_the_interval() {
+        let grid = grid_with(world(0, 0, 0), (3, 1, 1), &[world(1, 0, 0)]);
+        let inside = ray(v(1.25, 0.5, 0.5), v(1.0, 0.0, 0.0));
+
+        // The exit face is at t = 0.75: no `t = 0` occupancy hit.
+        assert!(!intersects(&grid, inside, 0.0, 0.7));
+        assert!(intersects(&grid, inside, 0.0, 0.75));
+        assert!(intersects(&grid, inside, 0.0, INF));
+        assert!(!intersects(&grid, inside, 0.8, INF));
+        // A biased origin just inside the entry face behaves the same way.
+        let biased = ray(v(1.0 + ORIGIN_BIAS, 0.5, 0.5), v(1.0, 0.0, 0.0));
+        assert!(!intersects(&grid, biased, 0.0, 0.99));
+        assert!(intersects(&grid, biased, 0.0, 1.0));
+    }
+
+    #[test]
+    fn any_hit_handles_zero_direction_components() {
+        let grid = grid_with(world(0, 0, 0), (4, 4, 4), &[world(2, 1, 3)]);
+
+        // Two zero components: a single row.
+        assert!(intersects(
+            &grid,
+            ray(v(2.5, 1.5, -1.0), v(0.0, 0.0, 1.0)),
+            0.0,
+            INF
+        ));
+        assert!(!intersects(
+            &grid,
+            ray(v(2.5, 2.5, -1.0), v(0.0, 0.0, 1.0)),
+            0.0,
+            INF
+        ));
+        // One zero component: steps only X and Z.
+        assert!(intersects(
+            &grid,
+            ray(v(0.5, 1.5, 1.5), v(1.0, 0.0, 1.0)),
+            0.0,
+            INF
+        ));
+        // Parallel to a slab the ray lies outside of: never enters the grid.
+        assert!(!intersects(
+            &grid,
+            ray(v(2.5, 4.0, -1.0), v(0.0, 0.0, 1.0)),
+            0.0,
+            INF
+        ));
+    }
+
+    #[test]
+    fn any_hit_on_a_translated_negative_grid() {
+        let grid = grid_with(world(-10, -6, 3), (6, 4, 5), &[world(-7, -4, 5)]);
+        let target = v(-6.5, -3.5, 5.5);
+        let origin = v(-12.0, 1.0, 1.0);
+        let toward = ray(origin, target - origin);
+        let distance = (target - origin).length();
+
+        assert!(intersects(&grid, toward, 0.0, INF));
+        assert!(intersects(&grid, toward, 0.0, distance));
+        assert!(!intersects(&grid, toward, 0.0, distance * 0.5));
+        assert!(!intersects(&grid, ray(origin, origin - target), 0.0, INF));
+    }
+
+    #[test]
+    fn any_hit_treats_every_block_type_as_an_opaque_blocker() {
+        for block in BlockType::ALL {
+            let mut grid = empty_grid(world(0, 0, 0), 3, 1, 1);
+            grid.set_world(world(1, 0, 0), Voxel::Block(block)).unwrap();
+            assert!(
+                intersects(&grid, ray(v(0.5, 0.5, 0.5), v(1.0, 0.0, 0.0)), 0.0, INF),
+                "{block:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn any_hit_rejects_invalid_intervals_and_origins() {
+        let mut grid = empty_grid(world(0, 0, 0), 2, 2, 2);
+        grid.fill(Voxel::Block(BlockType::Glass));
+        let valid = ray(v(-1.0, 0.5, 0.5), v(1.0, 0.0, 0.0));
+
+        assert!(intersects(&grid, valid, 0.0, INF));
+        assert!(!intersects(&grid, valid, f32::NAN, INF));
+        assert!(!intersects(&grid, valid, 0.0, f32::NAN));
+        assert!(!intersects(&grid, valid, 2.0, 1.0));
+    }
+
+    #[test]
+    fn any_hit_matches_nearest_hit_on_the_oracle_rays() {
+        let grid = oracle_grid();
+        let mut blocked = 0;
+        let mut open = 0;
+        for origin in oracle_origins() {
+            for direction in oracle_directions() {
+                let ray = ray(origin, direction);
+                for (t_min, t_max) in [(0.0, INF), (0.7, INF), (0.0, 2.9), (1.6, 4.4)] {
+                    if intersects(&grid, ray, t_min, t_max) {
+                        blocked += 1;
+                    } else {
+                        open += 1;
+                    }
+                }
+            }
+        }
+        assert!(blocked > 15_000 && open > 50_000, "{blocked} {open}");
     }
 
     // ---------------------------------------------------------------- traversal cost
