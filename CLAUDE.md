@@ -18,30 +18,29 @@ player entity or gameplay system.
 
 - Phase 1 — Core Raytracer: complete.
 - Phase 2 — Materials, Textures, and Lighting: complete.
-- Phase 3 — Raytracing Effects: all feature missions (14–20) implemented and audited; awaiting the
-  user's formal acceptance and the `AGENTS.md` update.
-- Mission 14 environment, 15 bounded recursion (`MAX_RAY_DEPTH = 3`), 16 reflection, 17 refraction
-  + IOR, 18 Schlick Fresnel, 19 lava emission + point lights, 20 derived cobblestone normal
-  mapping: complete.
-- Current suite: 343 passing tests.
+- Phase 3 — Raytracing Effects: complete (missions 14–20).
+- Phase 4 — Performance Architecture: in progress.
+- Mission 21 voxel grid foundation: complete. `src/voxel/` holds `BlockType`, one-byte `Voxel`,
+  integer `VoxelPosition`, a dense `VoxelGrid` with a configurable origin, and the
+  `BlockMaterials` mapping. The renderer does not use it yet; ore materials are not registered.
+- Current suite: 373 passing tests.
 - Development resolution: 320×180, presented at 960×540.
 - Pre-Phase-4 baseline (local, single-threaded, brute-force AABB traversal): default view about
   4.9 ms, close cobblestone about 10.7 ms, close lava about 18 ms, close glass about 30 ms. These
   are local development observations, not universal benchmarks; the README has the full table.
 - Compiler state: no rustc warnings; clippy reports only the known `clippy::module_inception`
-  warnings.
-- Next work: Phase 3 acceptance, then Phase 4 planning. Phase 4 is not current and is not
-  authorized until the user updates `AGENTS.md`.
+  warnings (plus two pre-existing `assertions_on_constants` warnings in test code).
+- Next work: Mission 22, as specified by the user.
 
 The repository is expected to begin each mission from a clean checkpoint. Verify the actual
 repository state instead of assuming this section is current.
 
 ## Mission boundary
 
-Do not implement Phase 4 (voxel grid, 3D DDA, tiled multithreading, SIMD) or Phase 5 (procedural
-terrain, the EggWars scene) from this handoff. The user and planning assistant will provide the
-exact prompt and API for each future mission. Do not implement future missions early. Stop at
-mission boundaries.
+Do not implement remaining Phase 4 work (3D DDA, renderer integration of the voxel grid, tiled
+multithreading, SIMD) or Phase 5 (procedural terrain, the EggWars scene) from this handoff. The
+user and planning assistant will provide the exact prompt and API for each future mission. Do not
+implement future missions early. Stop at mission boundaries.
 
 ## Working protocol
 
@@ -96,8 +95,9 @@ user explicitly requests it.
 - Terrain will later use a configurable deterministic seed.
 - Future performance architecture is a voxel grid, 3D DDA, and dynamic tile-based CPU
   multithreading.
-- Do not introduce the voxel grid, 3D DDA, dynamic tiles, multithreading, SIMD, or final
-  procedural terrain during Phase 3.
+- The voxel grid stores block identity only: no per-voxel `Aabb` or `Material`, and interior
+  voxels stay stored. Do not introduce 3D DDA, dynamic tiles, multithreading, SIMD, or procedural
+  terrain before their missions.
 
 ## Phase 3 summary
 
@@ -129,4 +129,4 @@ Do not fix these without an explicit mission:
 
 ## Handoff safety
 
-Do not modify `AGENTS.md` to record progress. Do not start Phase 4 from this handoff alone.
+Do not modify `AGENTS.md` to record progress. Do not start a new mission from this handoff alone.

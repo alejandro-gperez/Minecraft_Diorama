@@ -13,15 +13,15 @@ lighting system. Phase 3 is underway with a procedural sunset/night environment,
 recursive ray infrastructure, recursive reflections, recursive glass refraction, Schlick
 Fresnel composition for glass, emissive lava with a local lava point light, and a derived normal map
 for cobblestone. Every planned Phase 3 rubric effect is implemented and Phase 3 has passed a
-correctness, architecture, and performance-boundary audit. The larger EggWars world, the
-performance architecture (voxel grid, 3D DDA, tiled multithreading), and the final scene remain
-planned work.
+correctness, architecture, and performance-boundary audit. Phase 4 (performance architecture) is
+in progress: the dense voxel grid foundation exists, while 3D DDA traversal, tiled multithreading,
+the larger EggWars world, and the final scene remain planned work.
 
 ## Current Status
 
 Phase 1 — Core Raytracer — and Phase 2 — Materials, Textures, and Lighting — are complete and
-audited. Phase 3 — Raytracing Effects — has all of its planned effects implemented and audited,
-pending formal acceptance. Phase 4 (performance architecture) has not started. Primary-ray misses now sample a project-owned
+audited. Phase 3 — Raytracing Effects — is complete. Phase 4 — Performance Architecture — is in
+progress with a logical voxel grid that the renderer does not use yet. Primary-ray misses now sample a project-owned
 procedural sunset/night environment in world space. Every radiance ray flows through one
 bounded, depth-aware trace path; reflective materials launch recursive reflection rays and
 transparent materials launch recursive Snell refraction rays whose split with reflection follows
@@ -60,6 +60,8 @@ The current implementation includes:
 - validated per-material emission, used by canonical lava as visible self-radiance.
 - finite-radius local point lights with squared falloff, Lambert diffuse, Blinn-Phong specular, and
   hard point-light shadow rays.
+- a dense, contiguous voxel grid of `BlockType` identities with integer world coordinates and a
+  configurable, possibly negative origin (not yet used for rendering).
 
 ## Architecture
 
@@ -395,6 +397,41 @@ intensity `3.0`, radius `5.0`, at `(2.3, 1.0, -1.15)`, just outside the lava blo
 default camera so the block does not shadow its own light. It visibly warms the nearby grass and
 fades with distance; glass and obsidian inside its radius receive a fainter contribution.
 
+## Voxel Grid Foundation (Phase 4)
+
+`src/voxel/` holds the logical Minecraft-style world that future 3D DDA traversal and procedural
+terrain will use. **3D DDA is not implemented yet, and the renderer does not query the grid**: the
+current image still comes from the brute-force AABB scene, byte-identical to before. The grid adds
+no performance improvement on its own.
+
+- `BlockType` (`repr(u8)`, one byte) is a block's identity: grass, cobblestone, obsidian, glass,
+  lava, and coal/iron/gold/diamond ore. It is separate from `MaterialId`, which describes optical
+  behavior. `BlockMaterials` resolves each block type to a registered `MaterialId` with an
+  exhaustive `match`; voxels store no material and lookup involves no strings, hashing, or
+  allocation. The canonical blocks map to the canonical materials; ore materials are supplied by
+  the caller and are not registered yet.
+- `Voxel` is `Empty` or `Block(BlockType)`, still one byte because `Empty` uses a spare
+  discriminant value.
+- `VoxelPosition` is an integer world voxel coordinate (`i32` per axis). Voxel `(x, y, z)` owns
+  the half-open unit cell `[x, x + 1) × [y, y + 1) × [z, z + 1)` on the usual axes (`+X` east,
+  `+Y` up, `+Z` south). AABB intersection semantics are unchanged; exact ray/boundary handling
+  belongs to the DDA mission.
+- `VoxelGrid` owns one contiguous `Vec<Voxel>` of `width × height × depth` cells, indexed
+  `x + width * (z + depth * y)` (X fastest, then Z, then Y). Its integer `origin` is the world
+  voxel at local `(0, 0, 0)`, so `local = world - origin` and a grid can be centered on the world
+  origin, for example `origin = (-8, -4, -8)` for a 16 × 8 × 16 grid. Construction rejects zero
+  dimensions, volume overflow, grids reaching past the `i32` world range, and storage beyond the
+  allocation limit. Reads outside the grid return `None` and writes return `VoxelOutOfBounds`
+  without changing anything; negative offsets are rejected rather than wrapped to `usize`.
+- No voxel becomes an `Aabb`. Fully enclosed interior voxels remain ordinary logical occupancy:
+  DDA will stop at the first occupied cell along a ray, so hidden voxels need no geometry or
+  culling pass.
+
+A 16 × 16 × 16 grid stores 4 KiB of voxels and a 64 × 32 × 64 grid 128 KiB, plus a 64-byte
+header. The planned architecture is hybrid: a ray will traverse the voxel grid with 3D DDA and
+test the remaining arbitrary AABB scene objects, then keep the nearer hit. That comparison is not
+implemented yet.
+
 ## Known Limitations
 
 These are deliberate scope boundaries of the current diagnostic renderer, not hidden defects:
@@ -409,8 +446,8 @@ These are deliberate scope boundaries of the current diagnostic renderer, not hi
 - Lava regions are not procedurally converted into lights; the showcase hand-places one light.
 - The recursion limit is `MAX_RAY_DEPTH = 3`; it was not raised because cost has not been
   profiled at greater depth.
-- Scene traversal is brute force over every AABB. There is no spatial acceleration and rendering is
-  single-threaded; both belong to Phase 4.
+- Scene traversal is brute force over every AABB. The voxel grid exists but is not traversed, so
+  there is no spatial acceleration yet, and rendering is single-threaded; both remain Phase 4 work.
 - Materials, light colors, and the sun direction are diagnostic values. Final artistic tuning
   belongs to the EggWars scene.
 
@@ -607,7 +644,7 @@ observations, not universal benchmarks, and are the reference for Phase 4 speedu
 
 ## Testing
 
-The current suite contains 343 tests covering vector arithmetic and normalization, ray invariants,
+The current suite contains 373 tests covering vector arithmetic and normalization, ray invariants,
 AABB construction and edge cases, camera basis/ray generation/orbit limits, texture sampling and
 registration, P6 parsing and malformed input, material face selection, cube-face UV orientation,
 scene closest-hit behavior, ambient/Lambert/Blinn-Phong behavior, renderer lighting and texture
@@ -622,8 +659,10 @@ internal reflection routing, canonical glass refraction, material emission valid
 self-radiance that survives zero diffuse and occlusion, point-light validation, falloff, diffuse,
 specular, bounded shadow rays, glass blocking, recursive emissive lava, normal-map decoding, the
 six-face tangent basis against the real UV mapping, the derived cobblestone asset, shading-normal
-lighting with geometric shadows and reflection, a camera-pose render sweep, framebuffer and color conversion, PPM output, and
-presentation-independent camera and RGBA conversion helpers. Every AABB remains an opaque shadow
+lighting with geometric shadows and reflection, a camera-pose render sweep, framebuffer and color conversion, PPM output,
+presentation-independent camera and RGBA conversion helpers, and the voxel grid's construction
+validation, world/local conversion with negative origins, contiguous layout, bounds-checked reads
+and writes, and `BlockType`-to-`MaterialId` mapping. Every AABB remains an opaque shadow
 blocker, including glass.
 
 The Phase 3 audit changed no runtime behavior and added no tests; the count is unchanged at 343.
@@ -643,14 +682,14 @@ runs `cargo fmt --check`, `cargo test`, `cargo check`, `cargo build --release`, 
 
 ## Planned Features
 
-The following are not yet implemented. Phase 4 (performance architecture) and Phase 5 (EggWars
-world) are the next planned phases; neither has started:
+The following are not yet implemented. Phase 4 (performance architecture) is in progress and
+Phase 5 (EggWars world) has not started:
 
 - transparent or colored shadows through glass, absorption, and nested or merged glass media;
 - procedural lava-region extraction into representative point lights;
 - deterministic procedural 16×16 floating islands and configurable seeds;
 - ores and the EggWars battle-aftermath scene;
-- a voxel grid and 3D DDA traversal;
+- 3D DDA traversal of the voxel grid and the hybrid voxel/AABB nearest-hit query;
 - dynamic tile-based CPU multithreading;
 - performance benchmarking and profiling.
 
@@ -672,7 +711,7 @@ intentionally in the final EggWars diorama, which does not exist yet.
 | Normal mapping | Implemented: derived cobblestone normal map lighting with a per-face tangent basis |
 | Sunset/night skybox/environment | Procedural CPU environment implemented; shared miss path for every traced ray |
 | Procedural floating-island terrain (16×16, seeded) | Planned (Phase 5) |
-| Voxel grid, 3D DDA, dynamic tile multithreading | Planned (Phase 4) |
+| Voxel grid, 3D DDA, dynamic tile multithreading | Voxel grid storage implemented (not yet rendered); DDA and threading planned (Phase 4) |
 | Final EggWars aftermath scene | Planned (Phase 5–6) |
 
 ## Video

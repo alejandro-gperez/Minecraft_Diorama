@@ -26,6 +26,7 @@ pub mod output;
 pub mod ray;
 pub mod render;
 pub mod scene;
+pub mod voxel;
 
 const WIDTH: usize = 320;
 const HEIGHT: usize = 180;
