@@ -1192,137 +1192,91 @@ Do not casually reopen these decisions.
 
 ---
 
-# 29. Current Phase
-
-Before starting work, determine the current project phase.
-
-## Phase 1: Core Raytracer
+## Phase 3: Raytracing Effects
 
 **STATUS: COMPLETE**
 
-Phase 1 established and validated:
+Phase 3 established and validated:
 
-- custom 3D vector mathematics;
-- normalized 3D rays;
-- robust slab-based ray-AABB intersection;
-- outward geometric surface normals;
-- orbital 3D camera with zoom;
-- perspective primary-ray generation;
-- CPU-owned framebuffer;
-- closest-hit scene traversal;
-- deterministic background rendering;
-- PPM image export;
-- isolated Raylib presentation/input layer;
-- dirty rendering;
-- interactive camera orbit and zoom;
-- CPU render timing;
-- automated mathematical, geometric, camera, scene, rendering, and presentation-boundary tests.
+- procedural world-space sunset/night environment;
+- deterministic procedural sun and stars;
+- bounded recursive radiance tracing;
+- maximum recursive ray depth;
+- recursive reflections;
+- recursive glass refraction;
+- material index of refraction;
+- entering/exiting dielectric-interface handling;
+- total internal reflection;
+- Schlick Fresnel composition;
+- correct inside/outside secondary-ray origin handling;
+- emissive materials;
+- emissive lava;
+- finite-radius local point lights associated with lava;
+- point-light diffuse and specular illumination;
+- point-light hard shadows;
+- deterministic cobblestone normal-map derivation;
+- six-face tangent-space normal mapping;
+- strict separation between geometric normals and shading normals.
 
-Phase 1 passed automated validation, manual interactive testing, and a dedicated architecture/documentation audit.
+The primary Phase 3 rubric demonstrations are:
 
-Do not reopen or redesign Phase 1 systems without a concrete correctness issue or an explicit requirement from a later phase.
+- procedural skybox/environment;
+- obsidian reflection;
+- glass refraction;
+- lava emission;
+- cobblestone normal mapping.
 
-## Phase 2: Materials, Textures, and Lighting
+Phase 3 passed automated validation, broad camera-pose validation, visual inspection, and a dedicated architecture/documentation audit.
 
-**STATUS: COMPLETE**
+Known limitations are documented in the README and are not blockers for the current project scope.
 
-Phase 2 established and validated:
-
-- CPU-owned texture representation;
-- nearest-neighbor texture sampling;
-- compact `TextureId` and `MaterialId` identities;
-- centralized texture and material ownership;
-- explicit six-face `CubeFace` representation;
-- local AABB UV mapping;
-- translated and non-unit AABB texture support;
-- offline source-PNG to runtime-PPM asset preparation;
-- project-owned P6 PPM loading;
-- original classic Minecraft texture assets;
-- deterministic fixed grass tint derived from the Minecraft grass colormap;
-- per-face texture selection;
-- five canonical rubric materials;
-- ambient illumination;
-- Lambert diffuse lighting;
-- Blinn-Phong specular lighting;
-- one warm directional light;
-- CPU-raytraced hard shadows;
-- early-exit shadow occlusion queries;
-- explicit secondary-ray origin bias;
-- documented material and rendering architecture.
-
-The five canonical materials are:
-
-- Grass;
-- Cobblestone;
-- Obsidian;
-- Glass;
-- Lava.
-
-Each canonical material deliberately defines:
-
-- texture appearance;
-- albedo;
-- specular;
-- transparency;
-- reflectivity.
-
-Phase 2 passed automated validation, runtime validation, visual inspection, and a dedicated architecture/documentation audit.
-
-Stored optical parameters do not imply that their Phase 3 effects are already implemented.
-
-At the end of Phase 2:
-
-- cobblestone still uses geometric normals;
-- obsidian stores reflectivity but does not launch reflection rays;
-- glass stores transparency but remains opaque and non-refractive;
-- lava is textured but non-emissive;
-- no skybox/environment mapping exists.
-
-Do not reopen or redesign Phase 2 systems without a concrete correctness issue or an explicit Phase 3 requirement.
+Do not reopen or redesign Phase 3 systems without a concrete correctness issue or an explicit requirement from a later phase.
 
 ## Current Phase
 
-**CURRENT PHASE: PHASE 3 - RAYTRACING EFFECTS**
+**CURRENT PHASE: PHASE 4 - PERFORMANCE ARCHITECTURE**
 
-Phase 3 activates the advanced raytracing behavior deliberately prepared by the previous phases.
+Phase 4 changes how the scene is represented and traversed efficiently while preserving the visual behavior established in Phases 1–3.
 
-Phase 3 should focus on:
+Phase 4 should focus on:
 
-- skybox/environment sampling;
-- recursive/secondary ray infrastructure;
-- reflection;
-- refraction;
-- index of refraction;
-- Fresnel behavior where appropriate;
-- emissive materials;
-- normal mapping.
+- voxel-oriented world representation;
+- efficient storage for Minecraft-style block occupancy;
+- exposed/interior voxel reasoning where useful;
+- 3D DDA voxel traversal;
+- replacing brute-force per-object ray traversal for voxel geometry;
+- CPU tile-based rendering;
+- dynamic tile scheduling;
+- standard-library CPU multithreading;
+- profiling and release-mode benchmarking;
+- preserving deterministic rendered output where algorithms are mathematically equivalent.
 
-These effects must be visibly and intentionally demonstrated in the final scene.
+Phase 4 must preserve:
 
-Phase 3 must preserve:
-
-- CPU-only rendering;
-- project-owned raytracing calculations;
+- CPU-only raytracing;
+- existing material and texture systems;
+- recursive reflection/refraction/Fresnel;
+- emission and local lighting;
+- normal mapping;
+- procedural environment;
+- orbital camera behavior;
 - Raylib presentation isolation;
-- deterministic material/texture ownership;
-- existing camera behavior;
-- existing lighting and hard-shadow behavior unless an advanced effect explicitly requires extension.
+- deterministic project behavior.
 
-Do not prematurely implement Phase 4 performance architecture.
+Do not prematurely construct the final procedural EggWars arena.
 
-In particular, Phase 3 must NOT introduce:
+Phase 5 will use the optimized Phase 4 architecture to implement:
 
-- voxel-grid traversal;
-- 3D DDA;
-- tile-based multithreading;
-- speculative SIMD optimization;
-- procedural EggWars terrain.
+- configurable procedural seed;
+- at least 16x16 procedural terrain generation;
+- floating islands;
+- ores;
+- lava regions;
+- bridges;
+- battle-aftermath storytelling;
+- final EggWars composition.
 
-Those belong to later phases.
-
-Do not prematurely construct the final EggWars arena during Phase 3.
-
-Use small diagnostic/showcase scenes to validate advanced effects before integrating them into the procedural world.
+Optimization must be measured rather than assumed.
 
 ---
 
