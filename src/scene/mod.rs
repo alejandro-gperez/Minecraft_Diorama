@@ -1,3 +1,3 @@
 pub mod scene;
 
-pub use scene::{Scene, SceneHit, SceneObject};
+pub use scene::{HitSource, Scene, SceneHit, SceneObject, VoxelSceneError};

@@ -1,6 +1,6 @@
 use crate::{math::Vec3, ray::Ray};
 
-use super::{CubeFace, Uv};
+use super::{CubeFace, SurfaceHit, Uv};
 
 // Avoid unstable reciprocal distances for directions effectively parallel to a slab.
 const PARALLEL_DIRECTION_EPSILON: f32 = 1.0e-8;
@@ -9,16 +9,6 @@ const PARALLEL_DIRECTION_EPSILON: f32 = 1.0e-8;
 pub struct Aabb {
     min: Vec3,
     max: Vec3,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct AabbHit {
-    pub t: f32,
-    pub position: Vec3,
-    pub normal: Vec3,
-    pub face: CubeFace,
-    /// Absent only when a dimension required by the selected face is exactly degenerate.
-    pub uv: Option<Uv>,
 }
 
 impl Aabb {
@@ -40,11 +30,11 @@ impl Aabb {
     ///
     /// A ray whose origin is strictly inside the box reports the exit surface, so callers
     /// always receive a forward-facing boundary hit rather than an artificial entry point.
-    pub fn intersect(&self, ray: Ray, t_min: f32, t_max: f32) -> Option<AabbHit> {
+    pub fn intersect(&self, ray: Ray, t_min: f32, t_max: f32) -> Option<SurfaceHit> {
         let (t, face) = self.surface_in_range(ray, t_min, t_max)?;
         let position = ray.at(t);
 
-        Some(AabbHit {
+        Some(SurfaceHit {
             t,
             position,
             normal: face.normal(),
@@ -119,21 +109,23 @@ impl Aabb {
             && point.z < self.max.z
     }
 
+    /// Only the two in-plane coordinates must be well defined: the coordinate along the face
+    /// normal is ignored by `CubeFace::uv`, so a box that is flat along that axis still has UVs.
     fn uv_for_face(&self, position: Vec3, face: CubeFace) -> Option<Uv> {
-        let local_x = || normalized_coordinate(position.x, self.min.x, self.max.x);
-        let local_y = || normalized_coordinate(position.y, self.min.y, self.max.y);
-        let local_z = || normalized_coordinate(position.z, self.min.z, self.max.z);
-
-        let uv = match face {
-            CubeFace::PositiveX => Uv::new(1.0 - local_z()?, 1.0 - local_y()?),
-            CubeFace::NegativeX => Uv::new(local_z()?, 1.0 - local_y()?),
-            CubeFace::PositiveY => Uv::new(local_x()?, local_z()?),
-            CubeFace::NegativeY => Uv::new(local_x()?, 1.0 - local_z()?),
-            CubeFace::PositiveZ => Uv::new(local_x()?, 1.0 - local_y()?),
-            CubeFace::NegativeZ => Uv::new(1.0 - local_x()?, 1.0 - local_y()?),
+        let normal = face.normal();
+        let local = |normal_component: f32, value: f32, min: f32, max: f32| {
+            if normal_component == 0.0 {
+                normalized_coordinate(value, min, max)
+            } else {
+                Some(0.0)
+            }
         };
 
-        Some(uv)
+        Some(face.uv(Vec3::new(
+            local(normal.x, position.x, self.min.x, self.max.x)?,
+            local(normal.y, position.y, self.min.y, self.max.y)?,
+            local(normal.z, position.z, self.min.z, self.max.z)?,
+        )))
     }
 }
 
@@ -214,9 +206,9 @@ fn normalized_coordinate(value: f32, min: f32, max: f32) -> Option<f32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Aabb, AabbHit};
+    use super::Aabb;
     use crate::{
-        geometry::{CubeFace, Uv},
+        geometry::{CubeFace, SurfaceHit, Uv},
         math::Vec3,
         ray::Ray,
     };
@@ -244,7 +236,12 @@ mod tests {
         assert_approx_eq(actual.z, expected.z);
     }
 
-    fn assert_hit(hit: AabbHit, expected_t: f32, expected_position: Vec3, expected_normal: Vec3) {
+    fn assert_hit(
+        hit: SurfaceHit,
+        expected_t: f32,
+        expected_position: Vec3,
+        expected_normal: Vec3,
+    ) {
         assert_approx_eq(hit.t, expected_t);
         assert_vec_approx_eq(hit.position, expected_position);
         assert_eq!(hit.normal, expected_normal);

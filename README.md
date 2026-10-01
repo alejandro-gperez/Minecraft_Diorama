@@ -14,14 +14,16 @@ recursive ray infrastructure, recursive reflections, recursive glass refraction,
 Fresnel composition for glass, emissive lava with a local lava point light, and a derived normal map
 for cobblestone. Every planned Phase 3 rubric effect is implemented and Phase 3 has passed a
 correctness, architecture, and performance-boundary audit. Phase 4 (performance architecture) is
-in progress: the dense voxel grid foundation exists, while 3D DDA traversal, tiled multithreading,
-the larger EggWars world, and the final scene remain planned work.
+in progress: the dense voxel grid and the scene, material, and hit types that future voxel
+traversal will feed exist, while 3D DDA traversal, tiled multithreading, the larger EggWars world,
+and the final scene remain planned work.
 
 ## Current Status
 
 Phase 1 — Core Raytracer — and Phase 2 — Materials, Textures, and Lighting — are complete and
 audited. Phase 3 — Raytracing Effects — is complete. Phase 4 — Performance Architecture — is in
-progress with a logical voxel grid that the renderer does not use yet. Primary-ray misses now sample a project-owned
+progress with a logical voxel grid, complete block-to-material mapping, and a common
+renderer-facing hit type, none of which change what the renderer traverses yet. Primary-ray misses now sample a project-owned
 procedural sunset/night environment in world space. Every radiance ray flows through one
 bounded, depth-aware trace path; reflective materials launch recursive reflection rays and
 transparent materials launch recursive Snell refraction rays whose split with reflection follows
@@ -62,6 +64,10 @@ The current implementation includes:
   hard point-light shadow rays.
 - a dense, contiguous voxel grid of `BlockType` identities with integer world coordinates and a
   configurable, possibly negative origin (not yet used for rendering).
+- auxiliary dirt and coal/iron/gold/diamond ore materials registered once at startup, and an
+  exhaustive `BlockType -> MaterialId` mapping covering every block type.
+- one renderer-facing `SceneHit` built from a shared `SurfaceHit` for AABB objects and, in future,
+  voxel faces (`VoxelHit`), with UVs from a single shared cube-face table.
 
 ## Architecture
 
@@ -73,9 +79,10 @@ Source PNG assets
 Runtime PPM assets -> TextureRegistry -> Material / MaterialId
                                               |
                                               v
-                         Scene -> AABB -> SceneHit + CubeFace + UV
-                                      |
-                                      v
+          Scene -> AABB objects -> SurfaceHit (CubeFace + UV) -> SceneHit
+          (VoxelGrid + BlockMaterials: owned, not traversed yet)        |
+                                                   +--------------------+
+                                                   v
        OrbitalCamera + Lighting + Environment -> CPU Renderer
                                                    |
                                                    v
@@ -404,12 +411,11 @@ terrain will use. **3D DDA is not implemented yet, and the renderer does not que
 current image still comes from the brute-force AABB scene, byte-identical to before. The grid adds
 no performance improvement on its own.
 
-- `BlockType` (`repr(u8)`, one byte) is a block's identity: grass, cobblestone, obsidian, glass,
-  lava, and coal/iron/gold/diamond ore. It is separate from `MaterialId`, which describes optical
-  behavior. `BlockMaterials` resolves each block type to a registered `MaterialId` with an
-  exhaustive `match`; voxels store no material and lookup involves no strings, hashing, or
-  allocation. The canonical blocks map to the canonical materials; ore materials are supplied by
-  the caller and are not registered yet.
+- `BlockType` (`repr(u8)`, one byte) is a block's identity: grass, dirt, cobblestone, obsidian,
+  glass, lava, and coal/iron/gold/diamond ore. There is no separate stone block; cobblestone is
+  the rock material. It is separate from `MaterialId`, which describes optical behavior.
+  `BlockMaterials` resolves each block type to a registered `MaterialId` with an exhaustive
+  `match`; voxels store no material and lookup involves no strings, hashing, or allocation.
 - `Voxel` is `Empty` or `Block(BlockType)`, still one byte because `Empty` uses a spare
   discriminant value.
 - `VoxelPosition` is an integer world voxel coordinate (`i32` per axis). Voxel `(x, y, z)` owns
@@ -428,9 +434,92 @@ no performance improvement on its own.
   culling pass.
 
 A 16 × 16 × 16 grid stores 4 KiB of voxels and a 64 × 32 × 64 grid 128 KiB, plus a 64-byte
-header. The planned architecture is hybrid: a ray will traverse the voxel grid with 3D DDA and
-test the remaining arbitrary AABB scene objects, then keep the nearer hit. That comparison is not
-implemented yet.
+header.
+
+## Voxel Scene Integration (Phase 4)
+
+This step prepares the scene, materials, and hit representation for hybrid traversal without
+changing what is traversed. **3D DDA is still not implemented and the renderer does not traverse
+the voxel grid**; the showcase is still the five AABB blocks and renders byte-identically. No
+performance change is claimed.
+
+### Auxiliary terrain materials
+
+Dirt and the four ores get world materials that are deliberately not rubric materials: they live
+in `AuxiliaryMaterials`, separate from `CanonicalMaterials`, and are not part of the five-material
+table below.
+
+| Material | Texture | Albedo | Specular | Transparency | Reflectivity | IOR | Emission / normal map |
+| --- | --- | --- | ---: | ---: | ---: | ---: | --- |
+| Dirt | `dirt` (shared with grass bottom) | `(1.00, 1.00, 1.00)` | 0.03 | 0.00 | 0.00 | 1.0 | None |
+| Coal / iron / gold / diamond ore | `coal_ore` / `iron_ore` / `gold_ore` / `diamond_ore` | `(1.00, 1.00, 1.00)` | 0.08 | 0.00 | 0.00 | 1.0 | None |
+
+White albedo keeps the original textures readable. Reflectivity is exactly zero because these
+blocks will make up most of the terrain, and any non-zero value spawns a recursive reflection ray
+from every hit. The ores share cobblestone's rock specular and differ only in texture. At startup
+the four ore PPMs are loaded once; dirt reuses the `TextureId` already registered for the grass
+bottom face, so no texture is loaded twice.
+
+### Block-to-material mapping
+
+| Block type | Material |
+| --- | --- |
+| Grass, Cobblestone, Obsidian, Glass, Lava | Canonical material of the same name |
+| Dirt, CoalOre, IronOre, GoldOre, DiamondOre | Auxiliary material of the same name |
+
+`BlockMaterials::new(canonical, auxiliary)` builds the mapping. `Scene::set_block_materials`
+rejects a mapping that names any unregistered material, so a voxel can never resolve to an unknown
+`MaterialId`.
+
+### Scene ownership
+
+`Scene` optionally owns one primary `VoxelGrid` next to its AABB `SceneObject`s, plus the
+`BlockMaterials` that resolve it. Both are `Option`s, so scenes and tests without voxels need no
+grid, and `set_voxel_grid` requires block materials first, so a grid is never stored without a way
+to resolve its blocks. The showcase registers its block materials but no grid. `closest_hit` and
+`is_occluded` still test only AABB objects.
+
+### Common hit representation
+
+Every geometry source reports a `geometry::SurfaceHit` (`t`, world position, outward geometric
+normal, `CubeFace`, UV). This is the former `AabbHit` under a source-neutral name: an AABB hit and
+a voxel-face hit carry exactly the same data, so a second type would only duplicate it.
+
+- `Aabb::intersect` returns a `SurfaceHit`.
+- `voxel::VoxelHit` is a 64-byte `Copy` value holding a `SurfaceHit` plus the voxel coordinate,
+  `BlockType`, and resolved `MaterialId`. `VoxelHit::try_new` builds one from a voxel, face, hit
+  position, and `t`. It derives the normal from the face, computes the UV, and resolves the
+  material through `BlockMaterials`. It intersects nothing: finding the face is the future DDA's
+  job. It rejects non-finite input and positions more than `1.0e-3` from the claimed face of the
+  claimed cell.
+- `SceneHit` holds `geometry: SurfaceHit`, `material_id`, and a lightweight
+  `source: HitSource` (`Object` or `Voxel { position, block }`). Shading reads only `geometry` and
+  `material_id` and never branches on `source`; the source keeps the crossed voxel and block
+  available for debugging, traversal, and future connected-glass logic. `SceneHit` is 64 bytes and
+  `Copy`. There are no trait objects and no allocation.
+
+`CubeFace::uv` is the single UV table for axis-aligned surfaces. `Aabb` computes box-normalized
+local coordinates and passes them to it; `VoxelHit` passes the position relative to the voxel's
+minimum corner. Tests check that a voxel hit at a translated, negative, and asymmetric coordinate
+equals the `SurfaceHit` of the equivalent unit AABB exactly, for all six faces, including oblique
+rays.
+
+### Future hybrid traversal
+
+```text
+Ray ─┬─ VoxelGrid ── 3D DDA (Mission 23) ── VoxelHit ──┐
+     └─ SceneObject AABBs ── Aabb::intersect ──────────┴─ nearer SurfaceHit ─> SceneHit ─> renderer
+```
+
+The DDA will find the first occupied cell and the face it entered, build a `VoxelHit`, and compare
+its `t` with the nearest AABB hit. No voxel is turned into a `SceneObject` or an `Aabb`, and there
+is no per-voxel AABB fallback.
+
+Two concerns stay out of scope. Touching glass voxels will still behave as glass → air → glass:
+`HitSource::Voxel` and `VoxelHit` keep the voxel, block, and face so connected-glass handling
+remains possible later, but nothing uses that yet. Lava voxels map to canonical lava, but no point
+light is derived from them; procedural lava regions will later get one or a few representative
+lights.
 
 ## Known Limitations
 
@@ -446,8 +535,9 @@ These are deliberate scope boundaries of the current diagnostic renderer, not hi
 - Lava regions are not procedurally converted into lights; the showcase hand-places one light.
 - The recursion limit is `MAX_RAY_DEPTH = 3`; it was not raised because cost has not been
   profiled at greater depth.
-- Scene traversal is brute force over every AABB. The voxel grid exists but is not traversed, so
-  there is no spatial acceleration yet, and rendering is single-threaded; both remain Phase 4 work.
+- Scene traversal is brute force over every AABB. The scene can own a voxel grid but does not
+  traverse it, so there is no spatial acceleration yet, and rendering is single-threaded; both
+  remain Phase 4 work.
 - Materials, light colors, and the sun direction are diagnostic values. Final artistic tuning
   belongs to the EggWars scene.
 
@@ -644,7 +734,7 @@ observations, not universal benchmarks, and are the reference for Phase 4 speedu
 
 ## Testing
 
-The current suite contains 373 tests covering vector arithmetic and normalization, ray invariants,
+The current suite contains 399 tests covering vector arithmetic and normalization, ray invariants,
 AABB construction and edge cases, camera basis/ray generation/orbit limits, texture sampling and
 registration, P6 parsing and malformed input, material face selection, cube-face UV orientation,
 scene closest-hit behavior, ambient/Lambert/Blinn-Phong behavior, renderer lighting and texture
@@ -662,7 +752,10 @@ six-face tangent basis against the real UV mapping, the derived cobblestone asse
 lighting with geometric shadows and reflection, a camera-pose render sweep, framebuffer and color conversion, PPM output,
 presentation-independent camera and RGBA conversion helpers, and the voxel grid's construction
 validation, world/local conversion with negative origins, contiguous layout, bounds-checked reads
-and writes, and `BlockType`-to-`MaterialId` mapping. Every AABB remains an opaque shadow
+and writes, `BlockType`-to-`MaterialId` mapping for every block type, auxiliary dirt and ore
+registration and texture reuse, voxel surface hits with exact UV equivalence to unit AABBs at
+negative and translated coordinates, `SceneHit` source metadata, and optional scene ownership of a
+voxel grid that leaves AABB queries unchanged. Every AABB remains an opaque shadow
 blocker, including glass.
 
 The Phase 3 audit changed no runtime behavior and added no tests; the count is unchanged at 343.
@@ -688,7 +781,7 @@ Phase 5 (EggWars world) has not started:
 - transparent or colored shadows through glass, absorption, and nested or merged glass media;
 - procedural lava-region extraction into representative point lights;
 - deterministic procedural 16×16 floating islands and configurable seeds;
-- ores and the EggWars battle-aftermath scene;
+- ore placement in terrain and the EggWars battle-aftermath scene;
 - 3D DDA traversal of the voxel grid and the hybrid voxel/AABB nearest-hit query;
 - dynamic tile-based CPU multithreading;
 - performance benchmarking and profiling.
@@ -711,7 +804,7 @@ intentionally in the final EggWars diorama, which does not exist yet.
 | Normal mapping | Implemented: derived cobblestone normal map lighting with a per-face tangent basis |
 | Sunset/night skybox/environment | Procedural CPU environment implemented; shared miss path for every traced ray |
 | Procedural floating-island terrain (16×16, seeded) | Planned (Phase 5) |
-| Voxel grid, 3D DDA, dynamic tile multithreading | Voxel grid storage implemented (not yet rendered); DDA and threading planned (Phase 4) |
+| Voxel grid, 3D DDA, dynamic tile multithreading | Voxel grid storage and scene/material/hit integration implemented (not yet rendered); DDA and threading planned (Phase 4) |
 | Final EggWars aftermath scene | Planned (Phase 5–6) |
 
 ## Video

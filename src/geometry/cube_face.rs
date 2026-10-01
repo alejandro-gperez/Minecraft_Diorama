@@ -12,6 +12,16 @@ pub enum CubeFace {
 }
 
 impl CubeFace {
+    /// Every face, in declaration order.
+    pub const ALL: [Self; 6] = [
+        Self::NegativeX,
+        Self::PositiveX,
+        Self::NegativeY,
+        Self::PositiveY,
+        Self::NegativeZ,
+        Self::PositiveZ,
+    ];
+
     pub const fn normal(self) -> Vec3 {
         match self {
             Self::NegativeX => Vec3::new(-1.0, 0.0, 0.0),
@@ -25,7 +35,7 @@ impl CubeFace {
 
     /// World direction in which the face's texture coordinate `u` increases.
     ///
-    /// Derived from the UV mapping in `Aabb::intersect`, not chosen independently, so it is the
+    /// Derived from the UV mapping in `CubeFace::uv`, not chosen independently, so it is the
     /// normal map's tangent-space +X axis:
     ///
     /// | face | `u` | tangent |
@@ -66,6 +76,23 @@ impl CubeFace {
             }
             Self::PositiveY => Vec3::new(0.0, 0.0, 1.0),
             Self::NegativeY => Vec3::new(0.0, 0.0, -1.0),
+        }
+    }
+
+    /// Texture coordinates of a point on this face from its box-local coordinates.
+    ///
+    /// `local` is the point's position inside its box normalized to `[0, 1]` per axis, so the
+    /// result is independent of box size and translation. This table is the single UV convention
+    /// for every axis-aligned surface, AABB objects and voxels alike. The component along the
+    /// face normal is constant on the face and ignored.
+    pub fn uv(self, local: Vec3) -> Uv {
+        match self {
+            Self::PositiveX => Uv::new(1.0 - local.z, 1.0 - local.y),
+            Self::NegativeX => Uv::new(local.z, 1.0 - local.y),
+            Self::PositiveY => Uv::new(local.x, local.z),
+            Self::NegativeY => Uv::new(local.x, 1.0 - local.z),
+            Self::PositiveZ => Uv::new(local.x, 1.0 - local.y),
+            Self::NegativeZ => Uv::new(1.0 - local.x, 1.0 - local.y),
         }
     }
 }

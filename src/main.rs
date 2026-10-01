@@ -9,10 +9,11 @@ use camera::OrbitalCamera;
 use environment::Environment;
 use geometry::Aabb;
 use lighting::{AmbientLight, DirectionalLight, Lighting, PointLight};
-use material::{CanonicalTextureIds, PpmLoadError, TextureId, load_ppm};
+use material::{AuxiliaryTextureIds, CanonicalTextureIds, PpmLoadError, TextureId, load_ppm};
 use math::Vec3;
 use render::{Color, Framebuffer};
 use scene::{Scene, SceneObject};
+use voxel::BlockMaterials;
 
 pub mod app;
 pub mod camera;
@@ -102,6 +103,23 @@ fn phase2_test_scene() -> Result<Scene, PpmLoadError> {
         .add_canonical_materials(textures)
         .expect("canonical Phase 2 materials must be valid and fit MaterialId");
 
+    // Auxiliary terrain materials are registered now, before any voxel world exists, so their
+    // textures load once at startup. Dirt reuses the texture grass already uses for its bottom.
+    let auxiliary_textures = AuxiliaryTextureIds {
+        dirt: textures.dirt,
+        coal_ore: register_texture(&mut scene, &texture_directory, "coal_ore.ppm")?,
+        iron_ore: register_texture(&mut scene, &texture_directory, "iron_ore.ppm")?,
+        gold_ore: register_texture(&mut scene, &texture_directory, "gold_ore.ppm")?,
+        diamond_ore: register_texture(&mut scene, &texture_directory, "diamond_ore.ppm")?,
+    };
+    let auxiliary = scene
+        .add_auxiliary_materials(auxiliary_textures)
+        .expect("auxiliary terrain materials must be valid and fit MaterialId");
+    scene
+        .set_block_materials(BlockMaterials::new(materials, auxiliary))
+        .expect("every block type must map to a registered material");
+    // The showcase stays the five AABB blocks: no voxel grid until DDA can traverse one.
+
     scene.add(SceneObject::new(
         Aabb::try_new(Vec3::new(-4.0, -0.5, -3.0), Vec3::new(4.0, 0.0, 3.0)).unwrap(),
         materials.grass,
@@ -144,4 +162,36 @@ fn register_texture(
     Ok(scene
         .add_texture(texture)
         .expect("prepared texture count must fit TextureId"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::phase2_test_scene;
+    use crate::{material::TextureSelection, voxel::BlockType};
+
+    #[test]
+    fn showcase_registers_block_materials_once_without_a_voxel_grid() {
+        let scene = phase2_test_scene().unwrap();
+        let block_materials = scene.block_materials().unwrap();
+
+        // Eight canonical textures plus four ores; five canonical plus five auxiliary materials.
+        assert_eq!(scene.texture_count(), 12);
+        assert_eq!(scene.material_count(), 10);
+        assert_eq!(scene.len(), 5);
+        assert!(scene.voxel_grid().is_none());
+        for block in BlockType::ALL {
+            assert!(scene.material(block_materials.material(block)).is_some());
+        }
+
+        let grass = scene
+            .material(block_materials.material(BlockType::Grass))
+            .unwrap();
+        let dirt = scene
+            .material(block_materials.material(BlockType::Dirt))
+            .unwrap();
+        let TextureSelection::TopSideBottom { bottom, .. } = grass.textures() else {
+            panic!("canonical grass selects top, side, and bottom textures");
+        };
+        assert_eq!(dirt.textures(), TextureSelection::Uniform(bottom));
+    }
 }

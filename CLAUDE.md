@@ -21,23 +21,31 @@ player entity or gameplay system.
 - Phase 3 — Raytracing Effects: complete (missions 14–20).
 - Phase 4 — Performance Architecture: in progress.
 - Mission 21 voxel grid foundation: complete. `src/voxel/` holds `BlockType`, one-byte `Voxel`,
-  integer `VoxelPosition`, a dense `VoxelGrid` with a configurable origin, and the
-  `BlockMaterials` mapping. The renderer does not use it yet; ore materials are not registered.
-- Current suite: 373 passing tests.
+  integer `VoxelPosition`, a dense `VoxelGrid` with a configurable origin, and `BlockMaterials`.
+- Mission 22 voxel scene integration foundation: complete. `BlockType` adds `Dirt` (10 variants,
+  still one byte; no Stone). Auxiliary dirt/ore materials (`AuxiliaryMaterials`, separate from
+  `CanonicalMaterials`) are registered at startup; dirt reuses the grass-bottom texture.
+  `BlockMaterials` maps every block type. `Scene` optionally owns block materials and one
+  `VoxelGrid` (grid requires block materials); the showcase has no grid.
+- Hybrid hit architecture: `AabbHit` became the source-neutral `geometry::SurfaceHit`;
+  `voxel::VoxelHit` wraps a `SurfaceHit` plus voxel/block/material; `SceneHit` is
+  `{ geometry: SurfaceHit, material_id, source: HitSource }`. `CubeFace::uv` is the one shared
+  UV table. Shading must not branch on `source`. The renderer still traverses AABBs only.
+- Current suite: 399 passing tests. The showcase PPM is byte-identical to the Mission 21 render.
 - Development resolution: 320×180, presented at 960×540.
 - Pre-Phase-4 baseline (local, single-threaded, brute-force AABB traversal): default view about
   4.9 ms, close cobblestone about 10.7 ms, close lava about 18 ms, close glass about 30 ms. These
   are local development observations, not universal benchmarks; the README has the full table.
 - Compiler state: no rustc warnings; clippy reports only the known `clippy::module_inception`
   warnings (plus two pre-existing `assertions_on_constants` warnings in test code).
-- Next work: Mission 22, as specified by the user.
+- Next work: Mission 23, 3D DDA voxel traversal, as specified by the user.
 
 The repository is expected to begin each mission from a clean checkpoint. Verify the actual
 repository state instead of assuming this section is current.
 
 ## Mission boundary
 
-Do not implement remaining Phase 4 work (3D DDA, renderer integration of the voxel grid, tiled
+Do not implement remaining Phase 4 work (3D DDA, renderer traversal of the voxel grid, tiled
 multithreading, SIMD) or Phase 5 (procedural terrain, the EggWars scene) from this handoff. The
 user and planning assistant will provide the exact prompt and API for each future mission. Do not
 implement future missions early. Stop at mission boundaries.

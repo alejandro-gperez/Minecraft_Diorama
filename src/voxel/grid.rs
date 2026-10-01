@@ -560,7 +560,7 @@ mod tests {
 
     #[test]
     fn every_block_type_is_stored_and_read_back() {
-        let mut grid = grid(world(-4, 0, 0), 9, 1, 1);
+        let mut grid = grid(world(-4, 0, 0), BlockType::ALL.len(), 1, 1);
 
         for (x, block) in (-4..).zip(BlockType::ALL) {
             grid.set_world(world(x, 0, 0), Voxel::Block(block)).unwrap();
