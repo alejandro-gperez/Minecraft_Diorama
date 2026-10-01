@@ -31,21 +31,32 @@ player entity or gameplay system.
   `voxel::VoxelHit` wraps a `SurfaceHit` plus voxel/block/material; `SceneHit` is
   `{ geometry: SurfaceHit, material_id, source: HitSource }`. `CubeFace::uv` is the one shared
   UV table. Shading must not branch on `source`. The renderer still traverses AABBs only.
-- Current suite: 399 passing tests. The showcase PPM is byte-identical to the Mission 21 render.
+- Mission 23 3D DDA voxel traversal: complete, tested in isolation, not renderer-integrated.
+  `VoxelGrid::intersect(ray, &BlockMaterials, t_min, t_max) -> Option<VoxelHit>` in
+  `src/voxel/traversal.rs`: one grid-bounds slab clip, then Amanatides–Woo stepping over contiguous
+  storage; no per-voxel `Aabb`, no allocation. Segment starts at `max(t_min, grid entry)`; interval
+  inclusive. Conventions: direction-aware half-open cell ownership (at `x = 1.0`, `+X` is in cell 1,
+  `-X` in cell 0); the cell being left is never reported; starting strictly inside a solid reports
+  its exit face; starting exactly on an occupied cell's entry face reports it at `t = 0`; tied axes
+  step together to the diagonal cell; face priority X > Y > Z (Aabb slab order); `|d| <= 1e-8` is
+  parallel. Plane parameters use `(plane - origin) / direction`, so `t` and UV match the unit
+  `Aabb` bit-for-bit (oracle-tested). `Scene::closest_hit`/`is_occluded` do not call it yet.
+- Current suite: 440 passing tests. The showcase PPM is byte-identical to the Mission 21 render.
 - Development resolution: 320×180, presented at 960×540.
 - Pre-Phase-4 baseline (local, single-threaded, brute-force AABB traversal): default view about
   4.9 ms, close cobblestone about 10.7 ms, close lava about 18 ms, close glass about 30 ms. These
   are local development observations, not universal benchmarks; the README has the full table.
 - Compiler state: no rustc warnings; clippy reports only the known `clippy::module_inception`
   warnings (plus two pre-existing `assertions_on_constants` warnings in test code).
-- Next work: Mission 23, 3D DDA voxel traversal, as specified by the user.
+- Next work: Mission 24, hybrid DDA + arbitrary AABB traversal in `Scene` queries, as specified by
+  the user.
 
 The repository is expected to begin each mission from a clean checkpoint. Verify the actual
 repository state instead of assuming this section is current.
 
 ## Mission boundary
 
-Do not implement remaining Phase 4 work (3D DDA, renderer traversal of the voxel grid, tiled
+Do not implement remaining Phase 4 work (renderer/scene traversal of the voxel grid, tiled
 multithreading, SIMD) or Phase 5 (procedural terrain, the EggWars scene) from this handoff. The
 user and planning assistant will provide the exact prompt and API for each future mission. Do not
 implement future missions early. Stop at mission boundaries.
@@ -104,8 +115,8 @@ user explicitly requests it.
 - Future performance architecture is a voxel grid, 3D DDA, and dynamic tile-based CPU
   multithreading.
 - The voxel grid stores block identity only: no per-voxel `Aabb` or `Material`, and interior
-  voxels stay stored. Do not introduce 3D DDA, dynamic tiles, multithreading, SIMD, or procedural
-  terrain before their missions.
+  voxels stay stored. Do not integrate DDA into scene queries or introduce dynamic tiles,
+  multithreading, SIMD, or procedural terrain before their missions.
 
 ## Phase 3 summary
 

@@ -2,8 +2,9 @@ use crate::{math::Vec3, ray::Ray};
 
 use super::{CubeFace, SurfaceHit, Uv};
 
-// Avoid unstable reciprocal distances for directions effectively parallel to a slab.
-const PARALLEL_DIRECTION_EPSILON: f32 = 1.0e-8;
+// Avoid unstable reciprocal distances for directions effectively parallel to a slab. Voxel
+// traversal shares it so both geometry sources classify a direction component the same way.
+pub(crate) const PARALLEL_DIRECTION_EPSILON: f32 = 1.0e-8;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Aabb {

@@ -224,6 +224,12 @@ impl VoxelGrid {
         self.voxels.fill(voxel);
     }
 
+    /// Contiguous storage in the layout described on the type, for traversal that maintains its
+    /// own validated index instead of re-checking every coordinate.
+    pub(super) fn voxels(&self) -> &[Voxel] {
+        &self.voxels
+    }
+
     fn index(&self, local: LocalVoxelPosition) -> Option<usize> {
         self.contains_local(local).then(|| self.linear_index(local))
     }
@@ -231,7 +237,7 @@ impl VoxelGrid {
     /// Storage index of an in-bounds local coordinate; see the type-level layout description.
     ///
     /// Cannot overflow for an in-bounds coordinate: the result is below the validated volume.
-    const fn linear_index(&self, local: LocalVoxelPosition) -> usize {
+    pub(super) const fn linear_index(&self, local: LocalVoxelPosition) -> usize {
         local.x + self.width * (local.z + self.depth * local.y)
     }
 }
