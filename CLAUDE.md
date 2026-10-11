@@ -54,7 +54,23 @@ player entity or gameplay system.
 - Known Mission 24 limitation: a refracted ray leaving glass through a face touching another block
   is biased into that block and sees its far interior face (glass → air → block, like touching
   glass). Needs interface/medium handling; not fixed.
-- Current suite: 483 passing tests. The showcase PPM is byte-identical to the Mission 21 render.
+- Mission 25 deterministic tile renderer: complete, still single-threaded. `src/render/tile.rs` holds
+  `Tile` (half-open `Copy` rectangle in global pixels, no storage) and `TileGrid` (arithmetic,
+  overflow-safe, allocation-free `tiles()`; zero tile size / count overflow are `TileGridError`,
+  surfaced as `RenderError::InvalidTileConfiguration`). Tile indices are row-major
+  (`x = i % columns`, `y = i / columns`, 0 = upper left). Default 16×16 → 240 tiles at 320×180,
+  last row 4 px high; edge tiles are clipped. `Renderer::render` is unchanged for the app and calls
+  `render_with_tile_size`; `render_tile` writes directly into the one `Framebuffer` using global
+  pixel coordinates for primary rays, so output is independent of tile size and order. The
+  previous row-major loop survives only as a test reference (`tile_tests.rs`). Default showcase and
+  voxel diagnostic PPMs are byte-identical to the pre-mission renders; release timings are
+  unchanged within noise (~5.4 ms default, ~5.4 ms diagnostic at 320×180).
+- Mission 26 ownership concern: `Framebuffer` is a contiguous row-major `Vec<Color>`; a rectangular
+  tile is not a contiguous slice, so workers cannot be handed several `&mut` tile rectangles
+  directly in safe Rust. Mission 26 must choose the disjoint-write strategy deliberately (for
+  example per-tile results merged by the owner, or row-band splitting); nothing in Mission 25
+  presumes one.
+- Current suite: 502 passing tests. The showcase PPM is byte-identical to the Mission 21 render.
 - Development resolution: 320×180, presented at 960×540.
 - Pre-Phase-4 baseline (local, single-threaded, brute-force AABB traversal): default view about
   4.9 ms, close cobblestone about 10.7 ms, close lava about 18 ms, close glass about 30 ms. These
@@ -64,14 +80,14 @@ player entity or gameplay system.
   showcase through the release app binary: test-binary layout shifted it by ~10% with no code cause.
 - Compiler state: no rustc warnings; clippy reports only the known `clippy::module_inception`
   warnings (plus two pre-existing `assertions_on_constants` warnings in test code).
-- Next work: Mission 25, the tile renderer, as specified by the user.
+- Next work: Mission 26 (dynamic tile multithreading), as specified by the user.
 
 The repository is expected to begin each mission from a clean checkpoint. Verify the actual
 repository state instead of assuming this section is current.
 
 ## Mission boundary
 
-Do not implement remaining Phase 4 work (tiled multithreading, SIMD) or Phase 5 (procedural
+Do not implement remaining Phase 4 work (multithreading over tiles, SIMD) or Phase 5 (procedural
 terrain, the EggWars scene) from this handoff. The user and planning assistant will provide the
 exact prompt and API for each future mission. Do not implement future missions early. Stop at
 mission boundaries.

@@ -256,14 +256,14 @@ fn register_texture(
 mod tests {
     use std::f32::consts::FRAC_PI_4;
 
-    use super::{phase2_lighting, phase2_test_scene, voxel_diagnostic_scene};
+    use super::{HEIGHT, WIDTH, phase2_lighting, phase2_test_scene, voxel_diagnostic_scene};
     use crate::{
         camera::OrbitalCamera,
         environment::Environment,
         material::TextureSelection,
         math::Vec3,
         ray::Ray,
-        render::{Framebuffer, Renderer},
+        render::{Framebuffer, Renderer, renderer::tile_tests::assert_tiling_matches_reference},
         scene::HitSource,
         voxel::{BlockType, VoxelPosition},
     };
@@ -404,6 +404,41 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    fn development_camera(width: usize, height: usize) -> OrbitalCamera {
+        OrbitalCamera::try_new(
+            Vec3::new(0.0, 0.7, 0.0),
+            0.55 + std::f32::consts::PI,
+            0.15,
+            10.0,
+            50.0_f32.to_radians(),
+            width as f32 / height as f32,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn showcase_tiling_matches_the_sequential_reference() {
+        let scene = phase2_test_scene().unwrap();
+        let lighting = phase2_lighting();
+
+        // Full development resolution once, then small and non-divisible frames for every size.
+        for (width, height) in [(WIDTH, HEIGHT), (70, 41), (33, 19)] {
+            let camera = development_camera(width, height);
+            assert_tiling_matches_reference(&scene, &lighting, &camera, width, height);
+        }
+    }
+
+    #[test]
+    fn voxel_diagnostic_tiling_matches_the_sequential_reference() {
+        let scene = voxel_diagnostic_scene().unwrap();
+        let lighting = phase2_lighting();
+
+        for (width, height) in [(WIDTH, HEIGHT), (70, 41), (33, 19)] {
+            let camera = development_camera(width, height);
+            assert_tiling_matches_reference(&scene, &lighting, &camera, width, height);
         }
     }
 }

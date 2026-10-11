@@ -8,7 +8,11 @@ use crate::{
     scene::{Scene, SceneHit},
 };
 
-use super::{Color, Framebuffer, fresnel::schlick_reflectance};
+use super::{
+    Color, Framebuffer,
+    fresnel::schlick_reflectance,
+    tile::{TILE_HEIGHT, TILE_WIDTH, Tile, TileGrid, TileGridError},
+};
 
 /// Recursion depth of a radiance ray, counted upward from the camera.
 ///
@@ -67,17 +71,44 @@ pub enum RenderError {
     RefractionRayGenerationFailed,
     FresnelReflectanceUnavailable,
     RayDepthExceeded,
+    InvalidTileConfiguration(TileGridError),
 }
 
 pub struct Renderer;
 
 impl Renderer {
+    /// Renders the whole framebuffer with the default tile size.
     pub fn render(
         camera: &OrbitalCamera,
         scene: &Scene,
         lighting: &Lighting,
         environment: &Environment,
         framebuffer: &mut Framebuffer,
+    ) -> Result<(), RenderError> {
+        Self::render_with_tile_size(
+            camera,
+            scene,
+            lighting,
+            environment,
+            framebuffer,
+            TILE_WIDTH,
+            TILE_HEIGHT,
+        )
+    }
+
+    /// Renders tile by tile, sequentially, in row-major tile order.
+    ///
+    /// Tiles only organize the work: each pixel keeps its global framebuffer coordinates, so the
+    /// image is identical for every tile size and order. Pixels are written straight into
+    /// `framebuffer`; there are no per-tile buffers.
+    pub(crate) fn render_with_tile_size(
+        camera: &OrbitalCamera,
+        scene: &Scene,
+        lighting: &Lighting,
+        environment: &Environment,
+        framebuffer: &mut Framebuffer,
+        tile_width: usize,
+        tile_height: usize,
     ) -> Result<(), RenderError> {
         let width = framebuffer.width();
         let height = framebuffer.height();
@@ -87,22 +118,54 @@ impl Renderer {
             return Err(RenderError::AspectRatioMismatch);
         }
 
+        let tiles = TileGrid::try_new(width, height, tile_width, tile_height)
+            .map_err(RenderError::InvalidTileConfiguration)?;
         let tracer = Tracer::new(scene, *lighting, environment);
 
-        for y in 0..height {
-            for x in 0..width {
-                let (u, v) = pixel_center(x, y, width, height);
-                let ray = camera
-                    .ray_for_viewport(u, v)
-                    .ok_or(RenderError::PrimaryRayGenerationFailed)?;
-                let color = tracer.trace_ray(ray, PRIMARY_RAY_DEPTH)?;
-
-                framebuffer.set_pixel(x, y, color);
-            }
+        for tile in tiles.tiles() {
+            render_tile(camera, &tracer, framebuffer, tile)?;
         }
 
         Ok(())
     }
+}
+
+/// Traces and writes every pixel of `tile`.
+///
+/// Rays use the pixel's global framebuffer coordinates, never tile-local ones, so a pixel's color
+/// does not depend on which tile contains it.
+fn render_tile(
+    camera: &OrbitalCamera,
+    tracer: &Tracer,
+    framebuffer: &mut Framebuffer,
+    tile: Tile,
+) -> Result<(), RenderError> {
+    let width = framebuffer.width();
+    let height = framebuffer.height();
+
+    for y in tile.y_start()..tile.y_end() {
+        for x in tile.x_start()..tile.x_end() {
+            let ray = primary_ray(camera, x, y, width, height)?;
+            let color = tracer.trace_ray(ray, PRIMARY_RAY_DEPTH)?;
+
+            framebuffer.set_pixel(x, y, color);
+        }
+    }
+
+    Ok(())
+}
+
+fn primary_ray(
+    camera: &OrbitalCamera,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+) -> Result<Ray, RenderError> {
+    let (u, v) = pixel_center(x, y, width, height);
+    camera
+        .ray_for_viewport(u, v)
+        .ok_or(RenderError::PrimaryRayGenerationFailed)
 }
 
 /// Shared, borrowed inputs for every radiance ray traced during one render.
@@ -4157,5 +4220,7 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+pub(crate) mod tile_tests;
 #[cfg(test)]
 mod voxel_tests;

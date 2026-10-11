@@ -15,8 +15,9 @@ Fresnel composition for glass, emissive lava with a local lava point light, and 
 for cobblestone. Every planned Phase 3 rubric effect is implemented and Phase 3 has passed a
 correctness, architecture, and performance-boundary audit. Phase 4 (performance architecture) is
 in progress: the dense voxel grid, the scene, material, and hit types it feeds, and 3D DDA voxel
-traversal exist, and scene queries now traverse voxels and AABB objects together, while tiled
-multithreading, the larger EggWars world, and the final scene remain planned work.
+traversal exist, scene queries traverse voxels and AABB objects together, and the framebuffer is
+now rendered as deterministic sequential tiles, while multithreading, the larger EggWars world, and
+the final scene remain planned work.
 
 ## Current Status
 
@@ -24,7 +25,8 @@ Phase 1 — Core Raytracer — and Phase 2 — Materials, Textures, and Lighting
 audited. Phase 3 — Raytracing Effects — is complete. Phase 4 — Performance Architecture — is in
 progress with a logical voxel grid, complete block-to-material mapping, a common renderer-facing
 hit type, and 3D DDA voxel traversal that every radiance and shadow ray now uses through hybrid
-voxel + AABB scene queries. Primary-ray misses now sample a project-owned
+voxel + AABB scene queries, and a deterministic single-threaded tile renderer that prepares for
+multithreading. Primary-ray misses now sample a project-owned
 procedural sunset/night environment in world space. Every radiance ray flows through one
 bounded, depth-aware trace path; reflective materials launch recursive reflection rays and
 transparent materials launch recursive Snell refraction rays whose split with reflection follows
@@ -72,6 +74,8 @@ The current implementation includes:
 - 3D DDA voxel traversal with nearest-hit and any-hit (shadow) queries.
 - hybrid scene queries: every radiance and shadow ray tests the voxel grid by DDA and arbitrary
   AABB objects by a linear scan, and receives the nearest hit or any blocker.
+- a deterministic tile renderer: the framebuffer is split into 16×16 tiles that are rendered
+  sequentially and write directly into the one CPU framebuffer (still single-threaded).
 
 ## Architecture
 
@@ -642,6 +646,53 @@ light, voxel cobblestone, obsidian, and glass blocks, and two AABB objects (a th
 and a cobblestone half slab) standing on the voxel ground. No surface is represented twice. The
 default showcase is unchanged and still the Phase 3 regression reference.
 
+## Deterministic Tile Renderer (Phase 4)
+
+Mission 25 reorganizes the sequential pixel loop into tiles. **It does not add multithreading**:
+tiles are rendered one after another on a single thread. It only prepares the work division the
+dynamic multithreaded scheduler will use.
+
+- `Tile` (`src/render/tile.rs`) is a small `Copy` value describing a half-open rectangle
+  (`x_start <= x < x_end`, `y_start <= y < y_end`) in global framebuffer pixels. It holds no
+  pixels and no references.
+- `TileGrid` derives tile boundaries arithmetically from the framebuffer and tile dimensions, with
+  overflow-safe ceiling division and checked tile counts; no tile list is stored, and `tiles()`
+  is an allocation-free iterator. Zero tile dimensions and tile-count overflow are returned as
+  errors (`TileGridError`, surfaced as `RenderError::InvalidTileConfiguration`), never panics.
+- Tiles are indexed **row-major**: `tile_x = index % columns`, `tile_y = index / columns`; tile 0
+  is the upper-left tile and indices advance left to right, then top to bottom. The same indices
+  are meant to be claimed dynamically by workers in Mission 26.
+- The initial tile size is 16×16 (`TILE_WIDTH`, `TILE_HEIGHT`). At 320×180 that is 20 × 12 = 240
+  tiles; 180 is not a multiple of 16, so the last tile row is 4 pixels high. Edge tiles are clipped,
+  so framebuffer dimensions need not be multiples of the tile size, and every pixel belongs to
+  exactly one tile.
+- `Renderer::render` keeps its signature; the application knows nothing about tiles. Each tile
+  traces its pixels and writes straight into the single CPU framebuffer: no per-tile buffers, no
+  staging frame, no copy-and-merge step. Raylib remains presentation only and sees none of this.
+- A pixel's primary ray always uses its **global** framebuffer coordinates and the same pixel-center
+  convention as before, so the image does not depend on tile size or tile order. Tracing, lighting,
+  hybrid traversal, and all secondary rays are untouched.
+
+Verification: a test-only copy of the previous row-major loop is compared byte for byte with the
+tiled renderer on a reflective/refractive/emissive voxel-and-AABB scene, the five-block showcase,
+and the voxel diagnostic scene, at 320×180 and at non-divisible sizes (including 1×1), for tile
+sizes 1×1, 8×8, 16×16, 32×16, 32×32, 5×7, 7×3 and one larger than the frame; reversed and
+strided tile orders also give identical images. The default showcase and voxel diagnostic PPMs
+are byte-identical to the pre-mission renders.
+
+Release timings through the application binary, 320×180, nine launches per run, interleaved
+against a copy of the pre-Mission-25 binary (the initial CPU render time the app prints): default
+showcase 5.3–5.6 ms before and 5.3–5.5 ms after (medians about 5.5 and 5.35 ms); voxel diagnostic
+5.5–5.7 ms before and 5.2–5.5 ms after. The difference is small and well inside code-layout noise,
+so no speedup is claimed: single-thread performance is approximately unchanged, as expected from
+reordering the same work. Close-view timings were not re-measured. These are local development
+observations, not universal benchmarks.
+
+Future work (Mission 26, not implemented): worker threads claiming tile indices dynamically. The
+framebuffer is a contiguous row-major `Vec<Color>`, so a rectangular tile is not a contiguous
+slice and safe Rust cannot hand out several mutable tile rectangles directly; that disjoint-write
+strategy will be designed deliberately in that mission.
+
 ## Known Limitations
 
 These are deliberate scope boundaries of the current diagnostic renderer, not hidden defects:
@@ -662,8 +713,8 @@ These are deliberate scope boundaries of the current diagnostic renderer, not hi
 - The recursion limit is `MAX_RAY_DEPTH = 3`; it was not raised because cost has not been
   profiled at greater depth.
 - AABB objects are still scanned linearly; only voxel geometry is accelerated, by the DDA, so
-  objects should stay few. Rendering is single-threaded; tiled multithreading remains Phase 4
-  work.
+  objects should stay few. Rendering is single-threaded; tiles are processed sequentially and
+  multithreading remains Phase 4 work.
 - The DDA treats edge and corner contact as zero-measure: a ray exactly through the shared edge of
   two diagonally adjacent blocks passes between them, where the closed-box slab test would report a
   contact.
@@ -896,7 +947,7 @@ observations.
 
 ## Testing
 
-The current suite contains 483 tests covering vector arithmetic and normalization, ray invariants,
+The current suite contains 502 tests covering vector arithmetic and normalization, ray invariants,
 AABB construction and edge cases, camera basis/ray generation/orbit limits, texture sampling and
 registration, P6 parsing and malformed input, material face selection, cube-face UV orientation,
 scene closest-hit behavior, ambient/Lambert/Blinn-Phong behavior, renderer lighting and texture
@@ -921,7 +972,10 @@ brute-force AABB oracle, the voxel any-hit query against nearest-hit existence, 
 ordering, the object-wins tie rule and interval propagation, hybrid occlusion, renderer
 equivalence of every block type with its unit AABB, voxel textures, normal mapping, emission,
 reflection, Fresnel refraction, directional and point-light voxel shadows, and the voxel
-diagnostic scene (no double geometry, camera sweep). Every AABB and every voxel remains an opaque
+diagnostic scene (no double geometry, camera sweep), and the tile renderer: tile construction and
+validation, exact single coverage of every pixel for assorted frame and tile sizes, row-major
+indexing, the 240-tile layout at 320×180, global primary-ray coordinates, and byte-identical
+output against the sequential reference across tile sizes and tile orders. Every AABB and every voxel remains an opaque
 shadow blocker, including glass.
 
 The Phase 3 audit changed no runtime behavior and added no tests; the count is unchanged at 343.
@@ -948,7 +1002,8 @@ Phase 5 (EggWars world) has not started:
 - procedural lava-region extraction into representative point lights;
 - deterministic procedural 16×16 floating islands and configurable seeds;
 - ore placement in terrain and the EggWars battle-aftermath scene;
-- dynamic tile-based CPU multithreading;
+- dynamic tile-based CPU multithreading (tiles exist and render sequentially; no worker threads
+  yet);
 - performance benchmarking and profiling.
 
 ## Course Rubric Mapping
@@ -969,7 +1024,7 @@ intentionally in the final EggWars diorama, which does not exist yet.
 | Normal mapping | Implemented: derived cobblestone normal map lighting with a per-face tangent basis |
 | Sunset/night skybox/environment | Procedural CPU environment implemented; shared miss path for every traced ray |
 | Procedural floating-island terrain (16×16, seeded) | Planned (Phase 5) |
-| Voxel grid, 3D DDA, dynamic tile multithreading | Voxel grid, 3D DDA, and hybrid voxel + AABB scene traversal implemented and rendered (voxel diagnostic scene); tile multithreading planned (Phase 4) |
+| Voxel grid, 3D DDA, dynamic tile multithreading | Voxel grid, 3D DDA, and hybrid voxel + AABB scene traversal implemented and rendered (voxel diagnostic scene); sequential tile renderer implemented; tile multithreading planned (Phase 4) |
 | Final EggWars aftermath scene | Planned (Phase 5–6) |
 
 ## Video
