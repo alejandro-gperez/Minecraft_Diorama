@@ -84,8 +84,21 @@ pub(crate) fn render_tiles_in_order(
     }
 }
 
-/// Asserts that every tile size, and the default `Renderer::render`, reproduce the reference
-/// image exactly for one scene and one resolution.
+/// Worker counts covering the sequential path, even and odd thread counts, and more threads than
+/// most tested frames have tiles.
+pub(crate) const EQUIVALENCE_WORKER_COUNTS: [usize; 4] = [1, 2, 4, 7];
+
+/// Asserts that two frames hold identical colors and therefore identical RGB8 bytes.
+pub(crate) fn assert_identical_frames(actual: &Framebuffer, expected: &Framebuffer, case: &str) {
+    assert_eq!(actual, expected, "{case}");
+    let bytes = |frame: &Framebuffer| -> Vec<[u8; 3]> {
+        frame.pixels().iter().map(|color| color.to_rgb8()).collect()
+    };
+    assert_eq!(bytes(actual), bytes(expected), "{case} (RGB8)");
+}
+
+/// Asserts that every tile size with every worker count, and the default `Renderer::render`,
+/// reproduce the reference image exactly for one scene and one resolution.
 pub(crate) fn assert_tiling_matches_reference(
     scene: &Scene,
     lighting: &Lighting,
@@ -99,28 +112,35 @@ pub(crate) fn assert_tiling_matches_reference(
 
     let mut default = Framebuffer::try_new(width, height).unwrap();
     Renderer::render(camera, scene, lighting, &environment, &mut default).unwrap();
-    assert_eq!(default, reference, "default tiles at {width}x{height}");
+    assert_identical_frames(
+        &default,
+        &reference,
+        &format!("default at {width}x{height}"),
+    );
 
     for (tile_width, tile_height) in EQUIVALENCE_TILE_SIZES {
-        let mut tiled = Framebuffer::try_new(width, height).unwrap();
-        Renderer::render_with_tile_size(
-            camera,
-            scene,
-            lighting,
-            &environment,
-            &mut tiled,
-            tile_width,
-            tile_height,
-        )
-        .unwrap();
-        assert_eq!(
-            tiled, reference,
-            "{tile_width}x{tile_height} tiles at {width}x{height}"
-        );
+        for workers in EQUIVALENCE_WORKER_COUNTS {
+            let mut tiled = Framebuffer::try_new(width, height).unwrap();
+            Renderer::render_with_configuration(
+                camera,
+                scene,
+                lighting,
+                &environment,
+                &mut tiled,
+                (tile_width, tile_height),
+                workers,
+            )
+            .unwrap();
+            assert_identical_frames(
+                &tiled,
+                &reference,
+                &format!("{tile_width}x{tile_height} tiles, {workers} workers at {width}x{height}"),
+            );
+        }
     }
 }
 
-fn camera(width: usize, height: usize) -> OrbitalCamera {
+pub(super) fn camera(width: usize, height: usize) -> OrbitalCamera {
     OrbitalCamera::try_new(
         Vec3::new(0.0, 0.7, 0.0),
         0.55 + std::f32::consts::PI,
@@ -132,7 +152,7 @@ fn camera(width: usize, height: usize) -> OrbitalCamera {
     .unwrap()
 }
 
-fn lighting() -> Lighting {
+pub(super) fn lighting() -> Lighting {
     Lighting::new(
         AmbientLight::try_new(Color::new(0.30, 0.34, 0.46), 0.50).unwrap(),
         DirectionalLight::try_new(Vec3::new(0.6, 1.0, 0.8), Color::new(1.0, 0.84, 0.70), 1.0)
@@ -142,7 +162,7 @@ fn lighting() -> Lighting {
 
 /// Reflective obsidian, refractive glass, emissive lava with a point light, and a voxel ground:
 /// every secondary-ray path crosses tile boundaries.
-fn optics_scene() -> Scene {
+pub(super) fn optics_scene() -> Scene {
     let mut scene = Scene::new();
     let mut texture = |r: f32, g: f32, b: f32| {
         scene

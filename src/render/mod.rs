@@ -1,5 +1,6 @@
 pub mod framebuffer;
 mod fresnel;
+pub mod parallel;
 pub mod renderer;
 pub mod tile;
 

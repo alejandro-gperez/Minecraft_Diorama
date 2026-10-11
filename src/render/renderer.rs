@@ -11,6 +11,7 @@ use crate::{
 use super::{
     Color, Framebuffer,
     fresnel::schlick_reflectance,
+    parallel::{default_worker_count, effective_worker_count, render_tiles_parallel},
     tile::{TILE_HEIGHT, TILE_WIDTH, Tile, TileGrid, TileGridError},
 };
 
@@ -72,12 +73,15 @@ pub enum RenderError {
     FresnelReflectanceUnavailable,
     RayDepthExceeded,
     InvalidTileConfiguration(TileGridError),
+    /// Zero worker threads were requested.
+    InvalidWorkerCount,
 }
 
 pub struct Renderer;
 
 impl Renderer {
-    /// Renders the whole framebuffer with the default tile size.
+    /// Renders the whole framebuffer with the default tile size on one worker thread per
+    /// available CPU (see `parallel::default_worker_count`).
     pub fn render(
         camera: &OrbitalCamera,
         scene: &Scene,
@@ -96,11 +100,30 @@ impl Renderer {
         )
     }
 
-    /// Renders tile by tile, sequentially, in row-major tile order.
+    /// Renders with the default tile size on `workers` threads, for testing and benchmarking.
     ///
-    /// Tiles only organize the work: each pixel keeps its global framebuffer coordinates, so the
-    /// image is identical for every tile size and order. Pixels are written straight into
-    /// `framebuffer`; there are no per-tile buffers.
+    /// `1` renders sequentially on the calling thread. Larger requests are bounded by the tile
+    /// count and `parallel::MAX_WORKERS`; zero is `RenderError::InvalidWorkerCount`.
+    pub fn render_with_worker_count(
+        camera: &OrbitalCamera,
+        scene: &Scene,
+        lighting: &Lighting,
+        environment: &Environment,
+        framebuffer: &mut Framebuffer,
+        workers: usize,
+    ) -> Result<(), RenderError> {
+        Self::render_with_configuration(
+            camera,
+            scene,
+            lighting,
+            environment,
+            framebuffer,
+            (TILE_WIDTH, TILE_HEIGHT),
+            workers,
+        )
+    }
+
+    /// Renders with a custom tile size and the automatic worker count.
     pub(crate) fn render_with_tile_size(
         camera: &OrbitalCamera,
         scene: &Scene,
@@ -109,6 +132,33 @@ impl Renderer {
         framebuffer: &mut Framebuffer,
         tile_width: usize,
         tile_height: usize,
+    ) -> Result<(), RenderError> {
+        Self::render_with_configuration(
+            camera,
+            scene,
+            lighting,
+            environment,
+            framebuffer,
+            (tile_width, tile_height),
+            default_worker_count(),
+        )
+    }
+
+    /// Renders tile by tile on `workers` threads claiming tiles dynamically, or sequentially in
+    /// row-major tile order when only one worker is useful.
+    ///
+    /// Tiles only organize the work: each pixel keeps its global framebuffer coordinates and is
+    /// traced independently, so the image is identical for every tile size, worker count, and
+    /// completion order. The sequential path writes straight into `framebuffer`; the parallel
+    /// path traces into worker-owned tile buffers that this thread copies into place.
+    pub(crate) fn render_with_configuration(
+        camera: &OrbitalCamera,
+        scene: &Scene,
+        lighting: &Lighting,
+        environment: &Environment,
+        framebuffer: &mut Framebuffer,
+        (tile_width, tile_height): (usize, usize),
+        workers: usize,
     ) -> Result<(), RenderError> {
         let width = framebuffer.width();
         let height = framebuffer.height();
@@ -120,35 +170,67 @@ impl Renderer {
 
         let tiles = TileGrid::try_new(width, height, tile_width, tile_height)
             .map_err(RenderError::InvalidTileConfiguration)?;
+        let workers = effective_worker_count(workers, tiles.tile_count())?;
+        // Workers share this one tracer by reference; nothing in the scene is cloned.
         let tracer = Tracer::new(scene, *lighting, environment);
 
-        for tile in tiles.tiles() {
-            render_tile(camera, &tracer, framebuffer, tile)?;
+        if workers == 1 {
+            for tile in tiles.tiles() {
+                render_tile(camera, &tracer, framebuffer, tile)?;
+            }
+            return Ok(());
         }
 
-        Ok(())
+        render_tiles_parallel(tiles, workers, framebuffer, |tile, pixels| {
+            render_tile_into(camera, &tracer, (width, height), tile, pixels)
+        })
     }
 }
 
-/// Traces and writes every pixel of `tile`.
-///
-/// Rays use the pixel's global framebuffer coordinates, never tile-local ones, so a pixel's color
-/// does not depend on which tile contains it.
+/// Traces and writes every pixel of `tile` directly into `framebuffer`.
 fn render_tile(
     camera: &OrbitalCamera,
     tracer: &Tracer,
     framebuffer: &mut Framebuffer,
     tile: Tile,
 ) -> Result<(), RenderError> {
-    let width = framebuffer.width();
-    let height = framebuffer.height();
+    let size = (framebuffer.width(), framebuffer.height());
 
+    trace_tile(camera, tracer, size, tile, |x, y, color| {
+        framebuffer.set_pixel(x, y, color);
+    })
+}
+
+/// Traces every pixel of `tile` into `pixels`, a tile-local row-major buffer of exactly
+/// `tile.width() * tile.height()` colors.
+fn render_tile_into(
+    camera: &OrbitalCamera,
+    tracer: &Tracer,
+    framebuffer_size: (usize, usize),
+    tile: Tile,
+    pixels: &mut [Color],
+) -> Result<(), RenderError> {
+    trace_tile(camera, tracer, framebuffer_size, tile, |x, y, color| {
+        pixels[(y - tile.y_start()) * tile.width() + (x - tile.x_start())] = color;
+    })
+}
+
+/// Traces `tile` in row-major order and hands each pixel's global coordinates and color to
+/// `write`.
+///
+/// Rays use the pixel's global framebuffer coordinates, never tile-local ones, so a pixel's color
+/// does not depend on which tile, worker, or buffer computes it.
+fn trace_tile(
+    camera: &OrbitalCamera,
+    tracer: &Tracer,
+    (width, height): (usize, usize),
+    tile: Tile,
+    mut write: impl FnMut(usize, usize, Color),
+) -> Result<(), RenderError> {
     for y in tile.y_start()..tile.y_end() {
         for x in tile.x_start()..tile.x_end() {
             let ray = primary_ray(camera, x, y, width, height)?;
-            let color = tracer.trace_ray(ray, PRIMARY_RAY_DEPTH)?;
-
-            framebuffer.set_pixel(x, y, color);
+            write(x, y, tracer.trace_ray(ray, PRIMARY_RAY_DEPTH)?);
         }
     }
 
@@ -4220,6 +4302,8 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod parallel_tests;
 #[cfg(test)]
 pub(crate) mod tile_tests;
 #[cfg(test)]

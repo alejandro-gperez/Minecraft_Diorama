@@ -1,4 +1,4 @@
-use super::Color;
+use super::{Color, tile::Tile};
 
 /// CPU-owned row-major pixels kept independent from any presentation API.
 #[derive(Clone, Debug, PartialEq)]
@@ -55,6 +55,26 @@ impl Framebuffer {
         self.pixels.fill(color);
     }
 
+    /// Copies a tile's row-major pixels to the tile's global position, one row slice at a time.
+    ///
+    /// Returns `false` and writes nothing when the tile does not fit the framebuffer or `pixels`
+    /// does not hold exactly `width * height` colors.
+    pub fn write_tile(&mut self, tile: Tile, pixels: &[Color]) -> bool {
+        if tile.x_end() > self.width
+            || tile.y_end() > self.height
+            || pixels.len() != tile.width() * tile.height()
+        {
+            return false;
+        }
+
+        let rows = pixels.chunks_exact(tile.width());
+        for (y, row) in (tile.y_start()..tile.y_end()).zip(rows) {
+            let start = y * self.width + tile.x_start();
+            self.pixels[start..start + tile.width()].copy_from_slice(row);
+        }
+        true
+    }
+
     fn index(&self, x: usize, y: usize) -> Option<usize> {
         (x < self.width && y < self.height).then_some(y * self.width + x)
     }
@@ -63,7 +83,7 @@ impl Framebuffer {
 #[cfg(test)]
 mod tests {
     use super::Framebuffer;
-    use crate::render::Color;
+    use crate::render::{Color, tile::TileGrid};
 
     #[test]
     fn constructs_valid_black_framebuffer() {
@@ -113,5 +133,42 @@ mod tests {
         framebuffer.fill(Color::WHITE);
 
         assert_eq!(framebuffer.pixels(), &[Color::WHITE; 4]);
+    }
+
+    #[test]
+    fn writes_tiles_to_their_global_rows() {
+        // 5x3 with 2x2 tiles: the last column and row are partial.
+        let grid = TileGrid::try_new(5, 3, 2, 2).unwrap();
+        let mut framebuffer = Framebuffer::try_new(5, 3).unwrap();
+
+        for tile in grid.tiles() {
+            let pixels: Vec<Color> = (tile.y_start()..tile.y_end())
+                .flat_map(|y| (tile.x_start()..tile.x_end()).map(move |x| (x, y)))
+                .map(|(x, y)| Color::new(x as f32, y as f32, 0.0))
+                .collect();
+            assert!(framebuffer.write_tile(tile, &pixels));
+        }
+
+        for y in 0..3 {
+            for x in 0..5 {
+                assert_eq!(
+                    framebuffer.pixel(x, y),
+                    Some(Color::new(x as f32, y as f32, 0.0))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_tiles_that_do_not_fit_without_writing() {
+        let small = Framebuffer::try_new(4, 4).unwrap();
+        let tile = TileGrid::try_new(8, 8, 8, 8).unwrap().tile(0).unwrap();
+        let mut framebuffer = small.clone();
+
+        assert!(!framebuffer.write_tile(tile, &[Color::WHITE; 64]));
+        let fitting = TileGrid::try_new(4, 4, 2, 2).unwrap().tile(3).unwrap();
+        assert!(!framebuffer.write_tile(fitting, &[Color::WHITE; 3]));
+        assert!(!framebuffer.write_tile(fitting, &[Color::WHITE; 5]));
+        assert_eq!(framebuffer, small);
     }
 }

@@ -15,7 +15,7 @@ use crate::{
     environment::Environment,
     lighting::Lighting,
     output::write_ppm,
-    render::{Framebuffer, Renderer},
+    render::{Framebuffer, Renderer, parallel::default_worker_count},
     scene::Scene,
 };
 
@@ -62,6 +62,10 @@ pub fn run(
     let mut cpu_render_count = 0_u64;
 
     println!("Controls: arrow keys orbit; mouse wheel or W/S zoom; Esc closes the window.");
+    println!(
+        "CPU raytracing on up to {} scoped worker threads (available parallelism).",
+        default_worker_count()
+    );
 
     while !raylib.window_should_close() {
         let frame_seconds = raylib.get_frame_time().clamp(0.0, MAX_INPUT_DELTA_SECONDS);

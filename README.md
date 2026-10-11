@@ -16,8 +16,8 @@ for cobblestone. Every planned Phase 3 rubric effect is implemented and Phase 3 
 correctness, architecture, and performance-boundary audit. Phase 4 (performance architecture) is
 in progress: the dense voxel grid, the scene, material, and hit types it feeds, and 3D DDA voxel
 traversal exist, scene queries traverse voxels and AABB objects together, and the framebuffer is
-now rendered as deterministic sequential tiles, while multithreading, the larger EggWars world, and
-the final scene remain planned work.
+rendered as deterministic tiles that scoped CPU worker threads claim dynamically, while profiling,
+the larger EggWars world, and the final scene remain planned work.
 
 ## Current Status
 
@@ -25,8 +25,8 @@ Phase 1 — Core Raytracer — and Phase 2 — Materials, Textures, and Lighting
 audited. Phase 3 — Raytracing Effects — is complete. Phase 4 — Performance Architecture — is in
 progress with a logical voxel grid, complete block-to-material mapping, a common renderer-facing
 hit type, and 3D DDA voxel traversal that every radiance and shadow ray now uses through hybrid
-voxel + AABB scene queries, and a deterministic single-threaded tile renderer that prepares for
-multithreading. Primary-ray misses now sample a project-owned
+voxel + AABB scene queries, and a deterministic tile renderer whose tiles are claimed dynamically
+by scoped CPU worker threads. Primary-ray misses now sample a project-owned
 procedural sunset/night environment in world space. Every radiance ray flows through one
 bounded, depth-aware trace path; reflective materials launch recursive reflection rays and
 transparent materials launch recursive Snell refraction rays whose split with reflection follows
@@ -74,8 +74,9 @@ The current implementation includes:
 - 3D DDA voxel traversal with nearest-hit and any-hit (shadow) queries.
 - hybrid scene queries: every radiance and shadow ray tests the voxel grid by DDA and arbitrary
   AABB objects by a linear scan, and receives the nearest hit or any blocker.
-- a deterministic tile renderer: the framebuffer is split into 16×16 tiles that are rendered
-  sequentially and write directly into the one CPU framebuffer (still single-threaded).
+- a deterministic tile renderer: the framebuffer is split into 16×16 tiles.
+- dynamic tile-based CPU multithreading: one scoped worker thread per available CPU claims tiles
+  from an atomic counter, with output byte-identical to the sequential renderer.
 
 ## Architecture
 
@@ -94,6 +95,11 @@ Runtime PPM assets -> TextureRegistry -> Material / MaterialId
                                                    v
        OrbitalCamera + Lighting + Environment -> CPU Renderer
                                                    |
+                                                   | 16x16 tiles claimed via AtomicUsize
+                                                   v
+                                     scoped CPU worker threads
+                                                   |
+                                                   | tile buffers over channels
                                                    v
                                            CPU Framebuffer
                                              /       \
@@ -103,7 +109,8 @@ Runtime PPM assets -> TextureRegistry -> Material / MaterialId
 
 Raylib does not perform raytracing or render the 3D scene. It is isolated to the application
 boundary and currently handles window creation, keyboard/mouse input, frame timing, and display
-of the framebuffer produced by the CPU renderer. Core modules do not expose Raylib types.
+of the framebuffer produced by the CPU renderer. Core modules do not expose Raylib types. Worker
+threads run only project-owned CPU raytracing; none of them calls Raylib.
 
 ## Procedural Environment
 
@@ -648,9 +655,8 @@ default showcase is unchanged and still the Phase 3 regression reference.
 
 ## Deterministic Tile Renderer (Phase 4)
 
-Mission 25 reorganizes the sequential pixel loop into tiles. **It does not add multithreading**:
-tiles are rendered one after another on a single thread. It only prepares the work division the
-dynamic multithreaded scheduler will use.
+Mission 25 reorganized the sequential pixel loop into tiles, rendered one after another on a single
+thread, as the work division for the multithreaded scheduler that Mission 26 added (next section).
 
 - `Tile` (`src/render/tile.rs`) is a small `Copy` value describing a half-open rectangle
   (`x_start <= x < x_end`, `y_start <= y < y_end`) in global framebuffer pixels. It holds no
@@ -661,14 +667,14 @@ dynamic multithreaded scheduler will use.
   errors (`TileGridError`, surfaced as `RenderError::InvalidTileConfiguration`), never panics.
 - Tiles are indexed **row-major**: `tile_x = index % columns`, `tile_y = index / columns`; tile 0
   is the upper-left tile and indices advance left to right, then top to bottom. The same indices
-  are meant to be claimed dynamically by workers in Mission 26.
+  are claimed dynamically by worker threads.
 - The initial tile size is 16×16 (`TILE_WIDTH`, `TILE_HEIGHT`). At 320×180 that is 20 × 12 = 240
   tiles; 180 is not a multiple of 16, so the last tile row is 4 pixels high. Edge tiles are clipped,
   so framebuffer dimensions need not be multiples of the tile size, and every pixel belongs to
   exactly one tile.
-- `Renderer::render` keeps its signature; the application knows nothing about tiles. Each tile
-  traces its pixels and writes straight into the single CPU framebuffer: no per-tile buffers, no
-  staging frame, no copy-and-merge step. Raylib remains presentation only and sees none of this.
+- `Renderer::render` keeps its signature; the application knows nothing about tiles. On the
+  sequential path each tile traces its pixels and writes straight into the single CPU framebuffer.
+  Raylib remains presentation only and sees none of this.
 - A pixel's primary ray always uses its **global** framebuffer coordinates and the same pixel-center
   convention as before, so the image does not depend on tile size or tile order. Tracing, lighting,
   hybrid traversal, and all secondary rays are untouched.
@@ -688,10 +694,122 @@ so no speedup is claimed: single-thread performance is approximately unchanged, 
 reordering the same work. Close-view timings were not re-measured. These are local development
 observations, not universal benchmarks.
 
-Future work (Mission 26, not implemented): worker threads claiming tile indices dynamically. The
-framebuffer is a contiguous row-major `Vec<Color>`, so a rectangular tile is not a contiguous
-slice and safe Rust cannot hand out several mutable tile rectangles directly; that disjoint-write
-strategy will be designed deliberately in that mission.
+## Dynamic CPU Multithreading (Phase 4)
+
+Mission 26 renders the 16×16 tiles in parallel on CPU threads from the Rust standard library. It
+adds no dependency, no GPU work, and no `unsafe` code, and it does not change tracing, traversal,
+materials, or lighting: workers call the same `Tracer` the sequential renderer uses.
+
+### Worker lifecycle
+
+`Renderer::render` stays synchronous. Each call opens a `std::thread::scope`, spawns a fixed set of
+workers, and returns only after the scope has joined every one of them. There is no persistent
+thread pool, no background rendering, and no thread per tile. Workers borrow the scene, lighting,
+environment, and camera immutably through the scope; nothing is cloned per worker.
+
+### Dynamic tile scheduling
+
+Workers share one `AtomicUsize` holding the next unclaimed tile index. A worker claims a tile with
+`fetch_add(1, Ordering::Relaxed)`, traces it, and claims again until the index reaches the tile
+count. Every index is handed out exactly once, so tiles are never skipped or traced twice, and fast
+workers simply take more tiles. `Relaxed` is sufficient because the counter only assigns work; it
+never publishes pixel data. Tile geometry comes from `TileGrid` arithmetic; no tile list is built.
+
+### Framebuffer ownership
+
+The framebuffer is a contiguous row-major `Vec<Color>` and a tile is not a contiguous slice of it,
+so workers never write it. The calling thread owns it and is its only writer:
+
+1. Each worker owns two reusable tile-sized `Vec<Color>` buffers (allocated once per worker per
+   render, sized for the largest tile).
+2. It traces a claimed tile into a free buffer, holding no lock, then moves the buffer through a
+   standard-library channel to the owner. The `Vec` moves, not its pixels.
+3. The owner copies the tile row by row into its global position (`Framebuffer::write_tile`) and
+   sends the buffer back through that worker's own channel.
+
+The second buffer lets a worker trace its next tile while the owner copies the previous one.
+Synchronization is one channel message each way per tile: no per-pixel or per-tile mutex, and no
+lock held while raytracing. Measured on the default view, two buffers instead of one cut the
+11-worker render from 1.15 ms to 0.90 ms.
+
+### Worker count and sequential fallback
+
+- Automatic (`Renderer::render`): `std::thread::available_parallelism()`, falling back to one worker
+  when it fails. The application prints this count at startup.
+- Explicit (`Renderer::render_with_worker_count`): any positive count, for testing and
+  benchmarking. Zero is `RenderError::InvalidWorkerCount`.
+- Every request is bounded by the tile count and by `MAX_WORKERS = 64`, so an excessive request
+  never spawns more threads than tiles or than 64.
+- One effective worker (requested, single-CPU systems, or one-tile frames) runs the Mission 25
+  sequential tile loop directly on the calling thread, with no thread and no buffers.
+
+### Errors and panics
+
+A worker whose tile fails reports the `RenderError` and stops, and a shared stop flag keeps the
+other workers from claiming new tiles; tiles already claimed are finished, so nothing blocks and
+the scope joins cleanly. Tiles are claimed in increasing index order, so every tile before the
+failed one is still traced, and the renderer returns the lowest-index failure: the same error the
+sequential renderer reports. A failed render never returns `Ok`. A worker panic is not caught: the
+scope propagates it to the caller after joining the other workers. A successful render asserts that
+every tile was integrated exactly once.
+
+### Exact equivalence
+
+Each pixel is traced independently from its global coordinates; there is no shared random state,
+no cross-pixel accumulation, and no floating-point reduction across workers. Tests compare color
+values and RGB8 bytes exactly against the test-only row-major reference and the single-worker path
+for 1, 2, 3, 4, 5, 7, 8, and 16 workers (and requests up to `usize::MAX`), tile sizes 1×1 through
+4096×4096 including 8×8, 16×16, 32×16, and 32×32, non-divisible frames, the optics test scene, the
+showcase, and the voxel diagnostic scene. Deliberately delayed early tiles, which complete far out of
+index order, give the same image. The application's default showcase and voxel diagnostic PPMs are
+byte-identical to the Mission 25 renders, and a release sweep of 5,760 camera poses (both scenes,
+four targets, 24 yaw steps, six pitches, five radii, at 64×36) gave identical images for 2, 3, and
+automatic workers against one worker.
+
+### Measurements
+
+Apple M3 Pro, 11 CPUs (5 performance and 6 efficiency cores), `available_parallelism() = 11`,
+release build, one process, the same scene, camera, 320×180 resolution, and 16×16 tiles for every
+count. Each configuration ran three interleaved rounds of 3 warm-up and 15 measured renders; the
+table gives the median of the 45 samples in ms and the speedup over one worker. The close-glass view
+targets the glass block at radius 2, so most primary rays spawn reflection and refraction rays.
+
+| Workers | Default showcase | Voxel diagnostic | Close glass |
+| ---: | ---: | ---: | ---: |
+| 1 | 5.08 (1.00×) | 5.13 (1.00×) | 31.75 (1.00×) |
+| 2 | 3.13 (1.62×) | 3.13 (1.64×) | 16.98 (1.87×) |
+| 3 | 1.88 (2.70×) | 1.90 (2.70×) | 11.17 (2.84×) |
+| 4 | 1.67 (3.04×) | 1.67 (3.08×) | 9.26 (3.43×) |
+| 5 | 1.34 (3.78×) | 1.36 (3.78×) | 6.98 (4.55×) |
+| 6 | 1.22 (4.17×) | 1.23 (4.19×) | 6.35 (5.00×) |
+| 8 | 1.08 (4.70×) | 1.08 (4.76×) | 5.57 (5.70×) |
+| 11 | 0.90 (5.65×) | 0.91 (5.64×) | 4.61 (6.89×) |
+| Automatic (11) | 0.89 (5.68×) | 0.91 (5.68×) | 4.60 (6.90×) |
+
+The default showcase at 1280×720 scaled the same way: 79.4 ms with one worker, 48.0 ms with two,
+25.2 ms with four, and 12.9 ms automatic (6.15×). In the application, the first render of the
+default view now reports about 1.9 ms, against about 5.3 ms before.
+
+Interpretation and overhead:
+
+- Scaling is sublinear. Six of the eleven CPUs are efficiency cores, and every render pays for
+  thread creation, channel messages, and tile copies. The heavier close-glass view hides more of
+  that fixed cost (6.9× against 5.7×).
+- Two workers scale worse than the rest (about 1.6×) in every scene and at both resolutions, so it is
+  not fixed overhead. The likely cause, not verified, is the operating system running one of the two
+  threads on an efficiency core.
+- The one-worker path is the unchanged sequential renderer. Interleaved against the Mission 25
+  binary, its medians were 5.06–5.13 ms versus 5.06–5.08 ms (default) and 31.7–31.8 ms versus
+  31.4–31.6 ms (close glass), within code-layout noise.
+- These are local development observations, not universal benchmarks. Parallelism is not
+  guaranteed to help on every machine or for very small frames.
+
+### Memory
+
+`size_of::<Color>()` is 12 bytes (three `f32`). One 16×16 tile buffer holds 256 × 12 = 3,072 bytes;
+with two per worker, 11 workers use 66 KiB and the 64-worker maximum 384 KiB, plus small channel
+allocations, all freed when the render returns. No worker allocates a framebuffer or clones scene
+resources.
 
 ## Known Limitations
 
@@ -713,8 +831,10 @@ These are deliberate scope boundaries of the current diagnostic renderer, not hi
 - The recursion limit is `MAX_RAY_DEPTH = 3`; it was not raised because cost has not been
   profiled at greater depth.
 - AABB objects are still scanned linearly; only voxel geometry is accelerated, by the DDA, so
-  objects should stay few. Rendering is single-threaded; tiles are processed sequentially and
-  multithreading remains Phase 4 work.
+  objects should stay few.
+- Worker threads are created and joined on every render, and parallel speedup on the development
+  machine is sublinear (about 5.7× on 11 CPUs for the default view). Tile size has not yet been
+  tuned for the parallel renderer; 16×16 is still the initial choice.
 - The DDA treats edge and corner contact as zero-measure: a ray exactly through the shared edge of
   two diagonally adjacent blocks passes between them, where the closed-box slab test would report a
   contact.
@@ -740,7 +860,8 @@ cargo run --release
 Add `-- --voxel-diagnostic` to render the small hybrid voxel diagnostic scene instead of the
 default five-block showcase.
 
-The development framebuffer is rendered at 320×180 and presented in a 960×540 window using an
+Rendering uses one CPU worker thread per available CPU; the application prints the count at
+startup. The development framebuffer is rendered at 320×180 and presented in a 960×540 window using an
 exact 3× scale. The application prints the PPM export path and shows CPU render duration,
 internal resolution, presentation FPS, and render count in a small overlay.
 
@@ -947,7 +1068,7 @@ observations.
 
 ## Testing
 
-The current suite contains 502 tests covering vector arithmetic and normalization, ray invariants,
+The current suite contains 522 tests covering vector arithmetic and normalization, ray invariants,
 AABB construction and edge cases, camera basis/ray generation/orbit limits, texture sampling and
 registration, P6 parsing and malformed input, material face selection, cube-face UV orientation,
 scene closest-hit behavior, ambient/Lambert/Blinn-Phong behavior, renderer lighting and texture
@@ -975,8 +1096,13 @@ reflection, Fresnel refraction, directional and point-light voxel shadows, and t
 diagnostic scene (no double geometry, camera sweep), and the tile renderer: tile construction and
 validation, exact single coverage of every pixel for assorted frame and tile sizes, row-major
 indexing, the 240-tile layout at 320×180, global primary-ray coordinates, and byte-identical
-output against the sequential reference across tile sizes and tile orders. Every AABB and every voxel remains an opaque
-shadow blocker, including glass.
+output against the sequential reference across tile sizes and tile orders, and the parallel renderer:
+framebuffer tile writes, worker-count selection, bounding, zero-worker rejection and the `available_parallelism` fallback,
+exactly-once tile claims, tile integration at global coordinates, tracing only on worker threads,
+byte-identical output across worker counts, tile sizes, and uneven completion order, worker error
+propagation with the sequential renderer's error, failures in every tile without deadlock, and
+worker panic propagation. Every AABB and every voxel remains an opaque shadow blocker, including
+glass.
 
 The Phase 3 audit changed no runtime behavior and added no tests; the count is unchanged at 343.
 It also regenerates the runtime assets with `scripts/prepare_assets.sh`, then
@@ -1002,9 +1128,7 @@ Phase 5 (EggWars world) has not started:
 - procedural lava-region extraction into representative point lights;
 - deterministic procedural 16×16 floating islands and configurable seeds;
 - ore placement in terrain and the EggWars battle-aftermath scene;
-- dynamic tile-based CPU multithreading (tiles exist and render sequentially; no worker threads
-  yet);
-- performance benchmarking and profiling.
+- profiling-driven optimization and tile-size benchmarking for the parallel renderer.
 
 ## Course Rubric Mapping
 
@@ -1024,7 +1148,7 @@ intentionally in the final EggWars diorama, which does not exist yet.
 | Normal mapping | Implemented: derived cobblestone normal map lighting with a per-face tangent basis |
 | Sunset/night skybox/environment | Procedural CPU environment implemented; shared miss path for every traced ray |
 | Procedural floating-island terrain (16×16, seeded) | Planned (Phase 5) |
-| Voxel grid, 3D DDA, dynamic tile multithreading | Voxel grid, 3D DDA, and hybrid voxel + AABB scene traversal implemented and rendered (voxel diagnostic scene); sequential tile renderer implemented; tile multithreading planned (Phase 4) |
+| Voxel grid, 3D DDA, dynamic tile multithreading | Voxel grid, 3D DDA, and hybrid voxel + AABB scene traversal implemented and rendered (voxel diagnostic scene); dynamic tile multithreading implemented with scoped standard-library threads and measured (about 5.7× on 11 CPUs for the default view, 6.9× for close glass) |
 | Final EggWars aftermath scene | Planned (Phase 5–6) |
 
 ## Video

@@ -65,12 +65,25 @@ player entity or gameplay system.
   previous row-major loop survives only as a test reference (`tile_tests.rs`). Default showcase and
   voxel diagnostic PPMs are byte-identical to the pre-mission renders; release timings are
   unchanged within noise (~5.4 ms default, ~5.4 ms diagnostic at 320×180).
-- Mission 26 ownership concern: `Framebuffer` is a contiguous row-major `Vec<Color>`; a rectangular
-  tile is not a contiguous slice, so workers cannot be handed several `&mut` tile rectangles
-  directly in safe Rust. Mission 26 must choose the disjoint-write strategy deliberately (for
-  example per-tile results merged by the owner, or row-band splitting); nothing in Mission 25
-  presumes one.
-- Current suite: 502 passing tests. The showcase PPM is byte-identical to the Mission 21 render.
+- Mission 26 dynamic CPU multithreading: complete. `src/render/parallel.rs`: per render,
+  `std::thread::scope` spawns workers that claim tile indices with
+  `AtomicUsize::fetch_add(1, Relaxed)` (assignment only, never publication). The calling thread
+  owns the framebuffer and is its only writer: each worker owns two reusable tile-sized buffers,
+  traces into one lock-free, and moves it over an `mpsc` channel; the owner copies it with
+  `Framebuffer::write_tile` and returns it on that worker's channel. No `unsafe`, no pool.
+  `Renderer::render` = `available_parallelism()` workers (fallback 1);
+  `render_with_worker_count` for tests/benchmarks; zero is `RenderError::InvalidWorkerCount`;
+  bounded by tile count and `MAX_WORKERS = 64`; one effective worker runs the Mission 25 sequential
+  loop on the calling thread. A failure sets a stop flag; the lowest-index failure is returned
+  (equals the sequential error); worker panics propagate through the scope. Output is
+  byte-identical to the sequential renderer for every worker count, tile size, and completion
+  order; both app PPMs are byte-identical to Mission 25.
+- Mission 26 measurements (M3 Pro, 11 CPUs = 5P + 6E, 320×180, release, medians): default
+  5.08 → 0.89 ms automatic (5.7×), voxel diagnostic 5.13 → 0.91 ms, close glass 31.7 → 4.6 ms
+  (6.9×); 4 workers ~3.0–3.4×. Two workers scale anomalously (~1.6×), probably efficiency-core
+  placement (unverified). One buffer per worker was ~25% slower at 11 workers. The 1-worker path
+  matches the Mission 25 binary within noise. 16×16 tiles not yet re-tuned for parallelism.
+- Current suite: 522 passing tests. The showcase PPM is byte-identical to the Mission 21 render.
 - Development resolution: 320×180, presented at 960×540.
 - Pre-Phase-4 baseline (local, single-threaded, brute-force AABB traversal): default view about
   4.9 ms, close cobblestone about 10.7 ms, close lava about 18 ms, close glass about 30 ms. These
@@ -80,17 +93,17 @@ player entity or gameplay system.
   showcase through the release app binary: test-binary layout shifted it by ~10% with no code cause.
 - Compiler state: no rustc warnings; clippy reports only the known `clippy::module_inception`
   warnings (plus two pre-existing `assertions_on_constants` warnings in test code).
-- Next work: Mission 26 (dynamic tile multithreading), as specified by the user.
+- Next work: Mission 27 (profiling and optimization), as specified by the user.
 
 The repository is expected to begin each mission from a clean checkpoint. Verify the actual
 repository state instead of assuming this section is current.
 
 ## Mission boundary
 
-Do not implement remaining Phase 4 work (multithreading over tiles, SIMD) or Phase 5 (procedural
-terrain, the EggWars scene) from this handoff. The user and planning assistant will provide the
-exact prompt and API for each future mission. Do not implement future missions early. Stop at
-mission boundaries.
+Do not implement remaining Phase 4 work (profiling-driven optimization, tile-size tuning, SIMD) or
+Phase 5 (procedural terrain, the EggWars scene) from this handoff. The user and planning assistant
+will provide the exact prompt and API for each future mission. Do not implement future missions
+early. Stop at mission boundaries.
 
 ## Working protocol
 
@@ -147,7 +160,8 @@ user explicitly requests it.
   multithreading.
 - The voxel grid stores block identity only: no per-voxel `Aabb` or `Material`, and interior
   voxels stay stored. Never also add `SceneObject`s duplicating occupied voxels. Do not introduce
-  dynamic tiles, multithreading, SIMD, or procedural terrain before their missions.
+  persistent thread pools, unsafe framebuffer writes, SIMD, or procedural terrain before their
+  missions.
 
 ## Phase 3 summary
 
