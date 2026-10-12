@@ -431,11 +431,12 @@ fn log_arena(arena: &EggWarsArena, generation_ms: f64) {
     for (bridge, base) in construction.bridges.iter().zip(&construction.bases) {
         let intact = base.defense.iter().filter(|slot| slot.intact).count();
         println!(
-            "  {:<6} bridge {:?} ({} missing), defense {:?} ({intact}/5 obsidian)",
+            "  {:<6} bridge {:?} ({} missing), defense {:?} ({intact}/{} obsidian)",
             bridge.island.name(),
             bridge.state,
             bridge.missing_span,
             base.defense_state,
+            base.defense.len(),
         );
     }
 }
@@ -1243,8 +1244,9 @@ mod tests {
                     assert_eq!(obsidian.reflectivity(), 0.35);
                     assert_eq!(obsidian.transparency(), 0.0);
                 } else {
-                    // A broken slot shows the floor it stood on.
-                    assert_eq!(position.y, slot.position.y - 1, "{:?}", base.island);
+                    // A broken slot shows the floor under the egg level: the ring stood directly
+                    // on it, and a broken cap lets the ray fall through the empty egg cell.
+                    assert_eq!(position.y, base.egg.y - 1, "{:?}", base.island);
                     assert_ne!(block, BlockType::Obsidian);
                 }
             }

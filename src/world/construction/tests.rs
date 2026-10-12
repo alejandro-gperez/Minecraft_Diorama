@@ -11,7 +11,7 @@ use crate::{
     world::{
         Arena, ArenaError, ArenaLayout, BridgeState, DefenseState, IslandBounds, IslandId,
         arena::{CENTER_FOOTPRINT, OUTER_FOOTPRINT, SURFACE_LEVEL},
-        construction::{DEFENSE_TEMPLATE, EggBaseDesign},
+        construction::{DEFENSE_SLOTS, DEFENSE_TEMPLATE, EggBaseDesign},
         generate_arena, generate_arena_in, generate_island,
         island::{
             SILHOUETTE_MIN_RADIUS,
@@ -24,6 +24,8 @@ use crate::{
 const SEEDS: [u64; 6] = [0, 1, 42, 1847, 2026, u64::MAX];
 /// Side offsets of the two bridge lanes, straddling each island's center line.
 const LANES: [i32; 2] = [-1, 0];
+/// Index of the cap block directly above the egg in `DEFENSE_TEMPLATE`.
+const CAP: usize = 8;
 
 type Cell = (i32, i32, i32);
 
@@ -422,12 +424,13 @@ fn future_egg_cells_are_empty_and_stand_on_the_base_floor() {
                 at(&arena.grid, (x, y - 1, z)),
                 Some(BlockType::Cobblestone | BlockType::Grass)
             ));
-            // Open to the sky and from behind: visible and reachable for a future egg.
-            for above in y + 1..=CONSTRUCTION_TOP {
+            // Only the defense's cap may stand above the egg, and it is the one block there.
+            let cap = base.defense[CAP];
+            assert_eq!(cell(cap.position), (x, y + 1, z));
+            assert_eq!(occupied(&arena.grid, (x, y + 1, z)), cap.intact);
+            for above in y + 2..=CONSTRUCTION_TOP {
                 assert!(!occupied(&arena.grid, (x, above, z)));
             }
-            let (ax, az) = base.attack_direction;
-            assert!(!occupied(&arena.grid, (x - ax, y, z - az)));
             // On its own island, on that island's center-line lane.
             let region = layout.config(base.island).bounds().unwrap();
             assert!(region.contains(VoxelPosition::new(x, SURFACE_LEVEL, z)));
@@ -667,10 +670,24 @@ fn only_the_north_bridge_connects_two_islands() {
                 }
             }
         }
-        // Nothing floats: every block belongs to one of the islands' landmasses.
+        // Nothing floats but the defense caps: every other block belongs to an island's landmass,
+        // and an intact cap, one block above the empty egg cell, touches the ring only by edges.
         let landmasses: HashSet<usize> = IslandId::ALL.iter().map(|&id| of(id)).collect();
         assert_eq!(landmasses.len(), 4);
-        assert!(labels.values().all(|label| landmasses.contains(label)));
+        let caps: HashSet<Cell> = arena
+            .construction
+            .bases
+            .iter()
+            .filter(|base| base.defense[CAP].intact)
+            .map(|base| cell(base.defense[CAP].position))
+            .collect();
+        for (&position, label) in &labels {
+            assert_eq!(
+                landmasses.contains(label),
+                !caps.contains(&position),
+                "seed {seed}: {position:?}"
+            );
+        }
     }
 }
 
@@ -691,24 +708,73 @@ fn bridge_narratives_survive_every_seed() {
 
 // ---- Egg defenses ----
 
+/// `(side, forward, up)` of `position` relative to its base's egg, in the island's own frame.
+fn local_offset(base: &super::EggBase, position: VoxelPosition) -> (i32, i32, i32) {
+    let (ax, az) = base.attack_direction;
+    let (sx, sz) = (az, -ax);
+    let (ox, oz) = (position.x - base.egg.x, position.z - base.egg.z);
+    (
+        ox * sx + oz * sz,
+        ox * ax + oz * az,
+        position.y - base.egg.y,
+    )
+}
+
+/// Template offsets of the positions that are missing in `island`'s defense.
+fn missing_offsets(base: &super::EggBase) -> Vec<(i32, i32, i32)> {
+    base.defense
+        .iter()
+        .filter(|slot| !slot.intact)
+        .map(|slot| local_offset(base, slot.position))
+        .collect()
+}
+
 #[test]
-fn defenses_hold_five_four_three_and_two_obsidian_blocks() {
+fn the_template_is_the_nine_block_eggwars_enclosure() {
+    assert_eq!(DEFENSE_SLOTS, 9);
+    assert_eq!(DEFENSE_TEMPLATE.len(), 9);
+    let unique: HashSet<_> = DEFENSE_TEMPLATE.into_iter().collect();
+    assert_eq!(unique.len(), 9, "no duplicate positions");
+
+    // Eight positions around the egg at its own level, none in the egg's cell.
+    let ring: Vec<_> = DEFENSE_TEMPLATE.iter().filter(|t| t.2 == 0).collect();
+    assert_eq!(ring.len(), 8);
+    for &&(side, forward, _) in &ring {
+        assert!(side.abs() <= 1 && forward.abs() <= 1);
+        assert_ne!((side, forward), (0, 0));
+    }
+    let ring_cells: HashSet<_> = ring.iter().map(|t| (t.0, t.1)).collect();
+    assert_eq!(ring_cells.len(), 8, "the full 3x3 minus the center");
+
+    // One position directly above the egg; no 3x3x3 solid: nothing below, nothing else above.
+    let above: Vec<_> = DEFENSE_TEMPLATE.iter().filter(|t| t.2 != 0).collect();
+    assert_eq!(above, [&(0, 0, 1)]);
+    assert_eq!(DEFENSE_TEMPLATE[CAP], (0, 0, 1));
+    assert_eq!(
+        DEFENSE_TEMPLATE.iter().filter(|t| t.2 == 1).count(),
+        1,
+        "exactly one upper block"
+    );
+}
+
+#[test]
+fn defenses_hold_nine_seven_five_and_three_obsidian_blocks() {
     for seed in SEEDS {
         let arena = built(seed);
         for (island, state, intact) in [
-            (IslandId::North, DefenseState::Intact, 5),
-            (IslandId::West, DefenseState::Damaged, 4),
-            (IslandId::East, DefenseState::Breached, 3),
-            (IslandId::South, DefenseState::Destroyed, 2),
+            (IslandId::North, DefenseState::Intact, 9),
+            (IslandId::East, DefenseState::Breached, 5),
+            (IslandId::South, DefenseState::Destroyed, 3),
+            (IslandId::West, DefenseState::Damaged, 7),
         ] {
             let base = arena.construction.base(island).unwrap();
             assert_eq!(base.defense_state, state);
             assert_eq!(DefenseState::of(island), Some(state));
+            assert_eq!(base.defense.len(), 9);
             // Real voxels, not labels: obsidian where intact, air where broken.
             let mut held = 0;
             for slot in base.defense {
                 let block = at(&arena.grid, cell(slot.position));
-                assert_eq!(slot.position.y, EGG_Y);
                 if slot.intact {
                     assert_eq!(block, Some(BlockType::Obsidian), "{island:?}");
                     held += 1;
@@ -717,71 +783,213 @@ fn defenses_hold_five_four_three_and_two_obsidian_blocks() {
                 }
             }
             assert_eq!(held, intact, "seed {seed}: {island:?}");
+            assert_eq!(9 - held, 9 - intact);
             assert_eq!(state.intact_slots().iter().filter(|&&i| i).count(), intact);
+
+            // Counted again straight from the grid over the whole 3x3x3 volume around the egg:
+            // the defense is the only obsidian there, and the egg's own cell is empty.
+            let egg = cell(base.egg);
+            let mut volume = 0;
+            for dy in -1..=2 {
+                for dz in -1..=1 {
+                    for dx in -1..=1 {
+                        let p = (egg.0 + dx, egg.1 + dy, egg.2 + dz);
+                        if at(&arena.grid, p) == Some(BlockType::Obsidian) {
+                            volume += 1;
+                        }
+                    }
+                }
+            }
+            assert_eq!(volume, intact, "seed {seed}: {island:?}");
+            assert!(!occupied(&arena.grid, egg));
         }
         assert!(arena.construction.base(IslandId::Center).is_none());
     }
 }
 
 #[test]
+fn defense_positions_are_distinct_in_bounds_and_overwrite_no_terrain() {
+    for seed in SEEDS {
+        let arena = built(seed);
+        let terrain = terrain_grid(seed);
+        let mut all = HashSet::new();
+        for base in arena.construction.bases {
+            for slot in base.defense {
+                assert!(arena.grid.contains_world(slot.position));
+                assert!(all.insert(cell(slot.position)), "duplicate {slot:?}");
+                assert_ne!(slot.position, base.egg);
+                // Missing or intact, the cell was free in the terrain, so nothing was overwritten
+                // and a destroyed block has not carved the ground.
+                assert!(!terrain.is_occupied_world(slot.position), "{slot:?}");
+                // The ring stands on the base floor; the cap stands on the egg's own level.
+                let (side, forward, up) = local_offset(&base, slot.position);
+                assert_eq!(slot.position.y, EGG_Y + up);
+                assert!(BASE_SIDES.contains(&(EGG_CELL.0 + side)));
+                assert!(BASE_FORWARD.contains(&(EGG_CELL.1 + forward)));
+                let floor = (slot.position.x, FLOOR_Y, slot.position.z);
+                if up == 0 {
+                    assert!(
+                        matches!(
+                            at(&arena.grid, floor),
+                            Some(BlockType::Cobblestone | BlockType::Grass)
+                        ),
+                        "seed {seed}: {:?} floor under {slot:?}",
+                        base.island
+                    );
+                }
+            }
+        }
+        assert_eq!(all.len(), 36);
+    }
+}
+
+#[test]
 fn every_island_uses_the_same_template_turned_toward_the_center() {
     let arena = built(1847);
+    let mut shapes = HashSet::new();
     for base in arena.construction.bases {
         let (ax, az) = base.attack_direction;
         let (dx, dz) = base.island.direction();
         assert_eq!((ax, az), (-dx, -dz));
-        let (sx, sz) = (az, -ax);
         for (slot, template) in base.defense.iter().zip(DEFENSE_TEMPLATE) {
-            let (ox, oz) = (slot.position.x - base.egg.x, slot.position.z - base.egg.z);
             assert_eq!(
-                (ox * sx + oz * sz, ox * ax + oz * az),
+                local_offset(&base, slot.position),
                 template,
                 "{:?}",
                 base.island
             );
         }
+        // The world-space rotation really differs per island: the front row faces the center.
+        let front = base.defense[1].position;
+        assert_eq!(
+            (front.x - base.egg.x, front.z - base.egg.z),
+            (ax, az),
+            "{:?}",
+            base.island
+        );
+        shapes.insert((ax, az));
     }
-    // Compact: every position touches the egg's cell by a face or an edge.
-    for (side, forward) in DEFENSE_TEMPLATE {
-        assert!(side.abs() <= 1 && (0..=1).contains(&forward));
-        assert_ne!((side, forward), (0, 0));
+    assert_eq!(shapes.len(), 4, "four distinct orientations");
+}
+
+#[test]
+fn north_defense_is_complete() {
+    for seed in SEEDS {
+        let arena = built(seed);
+        let base = arena.construction.base(IslandId::North).unwrap();
+        assert!(base.defense.iter().all(|slot| slot.intact));
+        assert!(missing_offsets(base).is_empty());
+        // The egg is sealed on all four sides, the corners, and from above.
+        let (x, y, z) = cell(base.egg);
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                assert_eq!(
+                    occupied(&arena.grid, (x + dx, y, z + dz)),
+                    (dx, dz) != (0, 0)
+                );
+            }
+        }
+        assert_eq!(at(&arena.grid, (x, y + 1, z)), Some(BlockType::Obsidian));
     }
 }
 
 #[test]
-fn missing_defense_blocks_open_the_egg_toward_the_attack() {
+fn east_defense_is_breached_at_the_front_and_cap() {
     for seed in SEEDS {
         let arena = built(seed);
-        for base in arena.construction.bases {
-            let (ax, az) = base.attack_direction;
-            let forward = |p: VoxelPosition| (p.x - base.egg.x) * ax + (p.z - base.egg.z) * az;
-            let side = |p: VoxelPosition| (p.x - base.egg.x) * az - (p.z - base.egg.z) * ax;
-            let missing: Vec<_> = base.defense.iter().filter(|s| !s.intact).collect();
-            let remaining: Vec<_> = base.defense.iter().filter(|s| s.intact).collect();
-            for slot in &missing {
-                // In the front row, between the egg and the bridge, never behind a kept block.
-                assert_eq!(forward(slot.position), 1, "{:?}", base.island);
-                assert!(side(slot.position).abs() <= 1);
-                for kept in &remaining {
-                    assert!(forward(slot.position) >= forward(kept.position));
-                }
-            }
-            // Whenever anything is missing, the cell straight in front of the egg is open.
-            if !missing.is_empty() {
-                let front = (base.egg.x + ax, EGG_Y, base.egg.z + az);
-                assert!(!occupied(&arena.grid, front), "{:?}", base.island);
+        let base = arena.construction.base(IslandId::East).unwrap();
+        let mut missing = missing_offsets(base);
+        missing.sort_unstable();
+        // The whole front row facing the bridge and the cap: a U of flanks and back remains.
+        assert_eq!(missing, [(-1, 1, 0), (0, 0, 1), (0, 1, 0), (1, 1, 0)]);
+        let (x, y, z) = cell(base.egg);
+        let (ax, az) = base.attack_direction;
+        assert!(
+            !occupied(&arena.grid, (x + ax, y, z + az)),
+            "exposed in front"
+        );
+        assert!(!occupied(&arena.grid, (x, y + 1, z)), "exposed from above");
+        for slot in &base.defense {
+            if slot.intact {
+                assert!(local_offset(base, slot.position).1 <= 0);
             }
         }
-        // Breached East loses exactly the two front blocks in line with the bridge lanes.
-        let east = arena.construction.base(IslandId::East).unwrap();
-        let (ax, az) = east.attack_direction;
-        let lost: HashSet<i32> = east
+    }
+}
+
+#[test]
+fn south_defense_is_a_recognizable_corner_fragment() {
+    for seed in SEEDS {
+        let arena = built(seed);
+        let base = arena.construction.base(IslandId::South).unwrap();
+        let mut standing: Vec<_> = base
             .defense
             .iter()
-            .filter(|s| !s.intact)
-            .map(|s| (s.position.x - east.egg.x) * az - (s.position.z - east.egg.z) * ax)
+            .filter(|slot| slot.intact)
+            .map(|slot| local_offset(base, slot.position))
             .collect();
-        assert_eq!(lost, HashSet::from(LANES));
+        standing.sort_unstable();
+        // An L around the back-left corner: the left flank, the back-left corner, and the back
+        // middle, face-connected, with the egg open in front, to the right, and above.
+        assert_eq!(standing, [(-1, -1, 0), (-1, 0, 0), (0, -1, 0)]);
+        assert_eq!(missing_offsets(base).len(), 6);
+        let (x, y, z) = cell(base.egg);
+        let (ax, az) = base.attack_direction;
+        assert!(!occupied(&arena.grid, (x + ax, y, z + az)));
+        assert!(!occupied(&arena.grid, (x, y + 1, z)));
+        // The three blocks are one face-connected piece in the world as well.
+        let labels = components(&arena.grid);
+        let slots: HashSet<_> = base
+            .defense
+            .iter()
+            .filter(|slot| slot.intact)
+            .map(|slot| labels[&cell(slot.position)])
+            .collect();
+        assert_eq!(
+            slots.len(),
+            1,
+            "seed {seed}: one fragment, not scattered blocks"
+        );
+    }
+}
+
+#[test]
+fn west_defense_is_mostly_intact_with_a_front_breach() {
+    for seed in SEEDS {
+        let arena = built(seed);
+        let base = arena.construction.base(IslandId::West).unwrap();
+        let mut missing = missing_offsets(base);
+        missing.sort_unstable();
+        assert_eq!(missing, [(-1, 1, 0), (0, 1, 0)]);
+        let (x, y, z) = cell(base.egg);
+        let (ax, az) = base.attack_direction;
+        // The breach faces the attack and exposes the egg's front; the cap still stands.
+        assert!(!occupied(&arena.grid, (x + ax, y, z + az)));
+        assert!(occupied(&arena.grid, (x, y + 1, z)));
+    }
+}
+
+#[test]
+fn damage_grows_from_north_through_west_and_east_to_south() {
+    let info = built(1847).construction;
+    let held = |id: IslandId| {
+        info.base(id)
+            .unwrap()
+            .defense
+            .iter()
+            .filter(|slot| slot.intact)
+            .count()
+    };
+    assert!(held(IslandId::North) > held(IslandId::West));
+    assert!(held(IslandId::West) > held(IslandId::East));
+    assert!(held(IslandId::East) > held(IslandId::South));
+    // Everything missing was lost from the front or the cap, never from behind the egg.
+    for base in info.bases {
+        for (side, forward, up) in missing_offsets(&base) {
+            assert!(
+                forward == 1 || (side, forward, up) == (0, 0, 1) || base.island == IslandId::South
+            );
+        }
     }
 }
 
@@ -803,9 +1011,9 @@ fn obsidian_is_exposed_on_top_and_never_buried() {
             assert!(p.y > SURFACE_LEVEL, "set into the ground at {p:?}");
             assert!(!occupied(&terrain, (p.x, p.y + 1, p.z)));
         }
-        // 5 + 4 + 3 + 2 defense blocks, a 2×2 central inlay, and one pillar cap.
-        assert_eq!(obsidian, 14 + 4 + 1);
-        assert_eq!(arena.construction.count(BlockType::Obsidian), 19);
+        // 9 + 7 + 5 + 3 defense blocks, a 2×2 central inlay, and one pillar cap.
+        assert_eq!(obsidian, 24 + 4 + 1);
+        assert_eq!(arena.construction.count(BlockType::Obsidian), 29);
     }
 }
 
@@ -958,7 +1166,7 @@ fn reference_constructed_arena_fingerprint_is_stable() {
     assert_eq!(fingerprint(&built(1847).grid), REFERENCE_FINGERPRINT);
 }
 
-const REFERENCE_FINGERPRINT: u64 = 0xF48D_2398_0721_8774;
+const REFERENCE_FINGERPRINT: u64 = 0x9B34_718C_2742_6F74;
 
 #[test]
 fn different_seeds_keep_the_construction_layout() {

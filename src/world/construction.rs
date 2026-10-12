@@ -31,7 +31,8 @@ mod tests;
 
 pub use bridges::{BridgeInfo, BridgeLane, BridgeState};
 pub use structures::{
-    CentralStructure, DEFENSE_TEMPLATE, DefenseSlot, DefenseState, EggBase, EggBaseDesign,
+    CentralStructure, DEFENSE_SLOTS, DEFENSE_TEMPLATE, DefenseSlot, DefenseState, EggBase,
+    EggBaseDesign,
 };
 
 /// The four outer islands, in `IslandId::ALL` order: one bridge and one base each.
@@ -47,12 +48,12 @@ pub const OUTER_ISLANDS: [IslandId; 4] = [
 pub const DECK_Y: i32 = SURFACE_LEVEL;
 /// The one layer of cobblestone floor that structures lay on the flat grass.
 pub const FLOOR_Y: i32 = SURFACE_LEVEL + 1;
-/// Level of every future egg and its defense, standing on the base floor.
+/// Level of every future egg and the eight defense blocks around it, standing on the base floor.
 pub const EGG_Y: i32 = FLOOR_Y + 1;
 
 /// Highest cell any construction occupies: the central structure's tallest pillar, four blocks
 /// above its floor and capped with obsidian. Everything else is lower: outer gate pillars reach
-/// `SURFACE_LEVEL + 3`, defenses and eggs `EGG_Y`, bridges `DECK_Y`. The global grid's top
+/// `SURFACE_LEVEL + 3`, defenses (their caps one above `EGG_Y`) and eggs `EGG_Y`, bridges `DECK_Y`. The global grid's top
 /// layer is exactly this level.
 pub const CONSTRUCTION_TOP: i32 = structures::CENTRAL_TOP;
 

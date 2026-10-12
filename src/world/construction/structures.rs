@@ -1,5 +1,5 @@
 //! Island structures: on each outer island, a small base around its future egg, guarded by the
-//! five-position obsidian defense in that island's damage state; on the central island, a compact
+//! nine-position obsidian defense in that island's damage state; on the central island, a compact
 //! ruin around an open obsidian-inlaid floor where loot will be contested.
 //!
 //! Every element stands on the anchor of its own column, so structures follow the actual grass
@@ -15,10 +15,29 @@ use crate::{
     world::{ArenaLayout, IslandBounds, IslandId, arena::SURFACE_LEVEL},
 };
 
-/// The five defense positions as `(side, forward)` offsets from the egg, front row first. The
-/// front row of three faces the center, where attackers arrive over the bridge; the two side
-/// blocks flank the egg; the back stays open, so the egg remains visible and reachable.
-pub const DEFENSE_TEMPLATE: [(i32, i32); 5] = [(-1, 1), (0, 1), (1, 1), (-1, 0), (1, 0)];
+/// The nine defense positions as `(side, forward, up)` offsets from the egg, the Minecraft
+/// EggWars enclosure: the eight cells around the egg at its level, front row first (the row facing
+/// the center, where attackers arrive over the bridge), then the two flanks, then the back row,
+/// and finally the one block directly above the egg. The egg's own cell stays empty.
+///
+/// ```text
+/// O O O   forward +1 (toward the bridge)
+/// O E O   forward  0   (E: the future egg, capped by a ninth block)
+/// O O O   forward -1
+/// ```
+pub const DEFENSE_TEMPLATE: [(i32, i32, i32); DEFENSE_SLOTS] = [
+    (-1, 1, 0),
+    (0, 1, 0),
+    (1, 1, 0),
+    (-1, 0, 0),
+    (1, 0, 0),
+    (-1, -1, 0),
+    (0, -1, 0),
+    (1, -1, 0),
+    (0, 0, 1),
+];
+/// Number of positions in `DEFENSE_TEMPLATE`.
+pub const DEFENSE_SLOTS: usize = 9;
 
 /// The egg's `(side, forward)` cell in its island's frame: on the bridge's lane `0`, two cells
 /// behind the island's center, inside the always-flat middle of every 16×16 island.
@@ -56,16 +75,17 @@ pub(super) const WINDOWS: [VoxelPosition; 2] = [
 /// Top of the tallest pillar, the highest construction block.
 pub(super) const CENTRAL_TOP: i32 = FLOOR_Y + 4;
 
-/// Damage state of an outer island's egg defense.
+/// Damage state of an outer island's egg defense. The counts are artistic decisions, never random.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DefenseState {
-    /// North: all five blocks remain; the base was never breached.
+    /// North: all nine blocks remain; the base was never breached.
     Intact,
-    /// West: four remain; the front block was broken but the base held.
+    /// West: seven remain; the front-left and front blocks were broken but the cap held.
     Damaged,
-    /// East: three remain; the two front blocks in line with the bridge were broken through.
+    /// East: five remain; the whole front row and the cap were broken through, leaving a U of
+    /// flanks and back wall open toward the bridge.
     Breached,
-    /// South: two remain; the whole front row is gone and the base was defeated.
+    /// South: three remain; only a back-corner fragment of the enclosure is left standing.
     Destroyed,
 }
 
@@ -81,19 +101,21 @@ impl DefenseState {
         }
     }
 
-    /// Which `DEFENSE_TEMPLATE` positions still hold obsidian. Blocks are lost front first, from
-    /// the bridge's lanes outward, so every breach opens the egg toward the attack.
-    pub const fn intact_slots(self) -> [bool; 5] {
+    /// Which `DEFENSE_TEMPLATE` positions still hold obsidian. Blocks are lost from the front, the
+    /// side the attackers came from, so every breach opens the egg toward the attack.
+    pub const fn intact_slots(self) -> [bool; DEFENSE_SLOTS] {
+        const Y: bool = true;
+        const N: bool = false;
         match self {
-            Self::Intact => [true; 5],
-            Self::Damaged => [true, false, true, true, true],
-            Self::Breached => [false, false, true, true, true],
-            Self::Destroyed => [false, false, false, true, true],
+            Self::Intact => [Y; DEFENSE_SLOTS],
+            Self::Damaged => [N, N, Y, Y, Y, Y, Y, Y, Y],
+            Self::Breached => [N, N, N, Y, Y, Y, Y, Y, N],
+            Self::Destroyed => [N, N, N, Y, N, Y, Y, N, N],
         }
     }
 }
 
-/// One of the five defense positions and whether its obsidian survived.
+/// One of the nine defense positions and whether its obsidian survived.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DefenseSlot {
     pub position: VoxelPosition,
@@ -110,7 +132,7 @@ pub struct EggBase {
     /// Unit step `(dx, dz)` toward the center: where attackers come from and the defense faces.
     pub attack_direction: (i32, i32),
     /// `DEFENSE_TEMPLATE` placed around the egg, in template order.
-    pub defense: [DefenseSlot; 5],
+    pub defense: [DefenseSlot; DEFENSE_SLOTS],
 }
 
 /// The per-island variations of the shared base design.
@@ -176,21 +198,21 @@ pub(super) fn plan_base(
         );
     }
 
-    let at = |(side, forward): (i32, i32)| {
+    let at = |(side, forward): (i32, i32), up: i32| {
         let (x, z) = frame.cell(side, forward);
-        VoxelPosition::new(x, EGG_Y, z)
+        VoxelPosition::new(x, EGG_Y + up, z)
     };
     let intact = design.defense.intact_slots();
     let mut defense = [DefenseSlot {
-        position: at(EGG_CELL),
+        position: at(EGG_CELL, 0),
         intact: false,
-    }; 5];
-    for (slot, ((ds, df), intact)) in defense
+    }; DEFENSE_SLOTS];
+    for (slot, ((ds, df, du), intact)) in defense
         .iter_mut()
         .zip(DEFENSE_TEMPLATE.into_iter().zip(intact))
     {
         *slot = DefenseSlot {
-            position: at((EGG_CELL.0 + ds, EGG_CELL.1 + df)),
+            position: at((EGG_CELL.0 + ds, EGG_CELL.1 + df), du),
             intact,
         };
         if intact {
@@ -201,7 +223,7 @@ pub(super) fn plan_base(
     Ok(EggBase {
         island,
         defense_state: design.defense,
-        egg: at(EGG_CELL),
+        egg: at(EGG_CELL, 0),
         attack_direction: frame.forward,
         defense,
     })
