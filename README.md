@@ -30,10 +30,11 @@ final lighting and composition do not exist yet.
 | 2 — Materials, Textures, and Lighting | Complete and audited |
 | 3 — Raytracing Effects | Complete and audited |
 | 4 — Performance Architecture | Complete and audited (see Phase 4 Audit) |
-| 5 — EggWars World | In progress: Missions 28 (procedural floating island), 29 (five-island arena), 30 (bridges, structures, and egg defenses), 30.5 (nine-block egg defenses and a 640×360 internal resolution), and 31 (battle-aftermath decorations) complete |
+| 5 — EggWars World | In progress: Missions 28 (procedural floating island), 29 (five-island arena), 30 (bridges, structures, and egg defenses), 30.5 (nine-block egg defenses and a 640×360 internal resolution), 31 (battle-aftermath decorations), and 31.25 (spatial grouping of decorative AABBs) complete |
 
 The rendering pipeline is: every radiance and shadow ray queries one hybrid scene (3D DDA over a
-voxel grid plus a linear scan of arbitrary AABB objects), tiles of the framebuffer are claimed
+voxel grid plus a scan of arbitrary AABB objects that skips any spatial group whose bounds the ray
+misses), tiles of the framebuffer are claimed
 dynamically by scoped CPU worker threads, and primary-ray misses sample a project-owned procedural
 sunset/night environment in world space. Every radiance ray flows through one bounded, depth-aware
 trace path; reflective materials launch recursive reflection rays and transparent materials launch
@@ -85,7 +86,9 @@ The current implementation includes:
   (`VoxelHit`), with UVs from a single shared cube-face table.
 - 3D DDA voxel traversal with nearest-hit and any-hit (shadow) queries.
 - hybrid scene queries: every radiance and shadow ray tests the voxel grid by DDA and arbitrary
-  AABB objects by a linear scan, and receives the nearest hit or any blocker.
+  AABB objects by a scan in insertion order, and receives the nearest hit or any blocker.
+- flat spatial groups of AABB objects (Mission 31.25): the 54 decorative boxes form 8 groups, each
+  behind one exact bounding box, so rays that miss a group skip its objects with identical results.
 - a deterministic tile renderer: the framebuffer is split into 16×16 tiles.
 - dynamic tile-based CPU multithreading: one scoped worker thread per available CPU claims tiles
   from an atomic counter, with output byte-identical to the sequential renderer.
@@ -116,7 +119,7 @@ Source PNG assets                      Seed + IslandConfig
 Runtime PPM assets -> TextureRegistry -> Material / MaterialId    VoxelGrid (one, global)
                                               |                        |
                                               v                        v
-          Scene -> AABB objects (linear scan) -----+
+          Scene -> AABB objects (grouped scan) ----+
                    VoxelGrid + BlockMaterials (DDA) -+-> nearest SurfaceHit -> SceneHit
                                                                                   |
                                                    +------------------------------+
@@ -942,7 +945,8 @@ The read-only performance investigation (its raw data is not stored in the repos
   or reciprocal multiplication was rejected because the gain was too small and reciprocal
   multiplication changed pixel output.
 - No general BVH is currently justified; the remaining linear AABB scan may become expensive if
-  the final scene holds many decorative objects.
+  the final scene holds many decorative objects. (Mission 31 confirmed this; Mission 31.25 added
+  one flat level of spatial object groups, still no BVH.)
 - The two-worker scaling anomaly (about 1.6× against about 3× at four workers) is not explained.
   Evidence went against the efficiency-core placement hypothesis, and the mechanism was not
   established. It is not a Phase 4 blocker and was not investigated further.
@@ -1463,7 +1467,7 @@ build_eggwars_arena(seed)                  terrain + construction (Missions 28�
   -> eggwars_diorama_scene(grid, &decorations)
        register 7 decorative materials over one solid white texture, once
        add one SceneObject per part of every visible prop (54 of 59; the sealed North egg is
-       skipped since Mission 31.25)
+       skipped since Mission 31.25), in 8 spatial object groups (Mission 31.25)
   -> existing CPU renderer
 ```
 
@@ -1639,6 +1643,107 @@ recesses and upright lids. Arrows read as shaft, head, and fletching, with hard 
 and floor. Fragments sit on the decks at the breaks and in the South crater. Nothing floats or is
 buried, and on every seed the props follow the terrain.
 
+## Spatial Grouping of Decorative AABBs (Phase 5, Mission 31.25)
+
+Mission 31's props made every ray slab-test every decorative box, so an EggWars render cost about
+3× the undecorated arena although most rays pass nowhere near a prop. Mission 31.25 adds the
+smallest acceleration that fixes this: one flat level of spatial object groups inside `Scene`. It
+also drops the sealed North egg from the scene (see Eggs above), so the diorama has 54 objects
+instead of 59. There is no BVH, KD-tree, octree, hash grid, hierarchy, or per-cell object list, and
+the renderer is unchanged: it still calls only `Scene::closest_hit` and `Scene::is_occluded`.
+
+### Representation
+
+`Scene` keeps owning one `Vec<SceneObject>` in insertion order (`objects()` is unchanged) and adds
+a list of runs that partition it: each run is a `Range` of consecutive objects with optional
+bounds.
+
+```text
+Scene::add(object)                  -> appended to an ungrouped run (no bounds, always tested)
+Scene::add_object_group(objects)    -> appended consecutively as one run with bounds =
+                                       exact union of the objects' boxes (Aabb::union)
+objects: [ g0: South base | g1 | g2 | g3 | g4 | g5 | g6: ruin interior | g7: lawn ]
+```
+
+A group's bounds are computed once, from the objects' actual boxes, when the group is added: never
+per frame, ray, tile, or camera move, and never by hand. Because each group is a contiguous range,
+no object is copied, no index list is stored, and every object belongs to exactly one run. Later
+`add` calls start or extend an ungrouped run and never touch a group's bounds, so objects added
+after grouping are always traced and cast shadows (there is no stale metadata to invalidate). An
+empty group adds nothing. The extra memory is one 48-byte run (a range and optional bounds) per
+group: 8 for the diorama, 384 bytes. Textures and materials are not touched.
+
+### Groups in the diorama
+
+`eggwars_diorama_scene` cuts the visible props, in placement order, into consecutive runs that
+share a `DecorationSite` and fit within `MAX_DECORATION_GROUP_EXTENT = 6.5` blocks on every axis.
+Placement already visits one base, bridge, or the center at a time, so this follows the physical
+layout without reordering anything. Every seed (checked over 0–255) yields the same 8 groups:
+
+| Group | Props | Boxes | Largest extent (blocks) |
+| --- | ---: | ---: | ---: |
+| South base (shell fragments, arrow, two remnants) | 6 | 8 | 2.5–2.75 |
+| East base (shell fragments, arrow, remnant) | 5 | 7 | 2.4–2.6 |
+| West base (egg, arrow, remnant) | 3 | 9 | 2.7 |
+| South bridge break, island side | 1 | 1 | 0.5 |
+| South bridge break, center side | 1 | 1 | 0.5 |
+| East bridge break (arrow and remnant) | 2 | 4 | 4.3–5.5 |
+| Ruin interior (two chests, two wall arrows) | 4 | 20 | 5.1 |
+| Lawn south-east of the ruin (arrow, remnant) | 2 | 4 | 1.2–1.8 |
+
+The limit sits about a block from every measured size: the two ends of the South bridge's 6-block
+break are at least 7.4 apart, and the whole center spans at least 8.6. One group per site (6
+groups) left the ruin close-up about 40% slower, because the center's bounds then covered the whole
+ruin floor; one group per prop (24 groups) was slower than both in wide views, because every ray
+pays one bounds test per group. A limit of 8 saved about 2–3% more but put the South bridge in one
+or two groups depending on the seed.
+
+### Queries
+
+```text
+for run in runs (insertion order):
+    if run has bounds and !bounds.overlaps_ray_interval(ray, t_min, current t_max): skip run
+    test the run's objects exactly as before
+then the voxel DDA, as before
+```
+
+`Aabb::overlaps_ray_interval` reuses the slab clipping of `Aabb::intersect` (now factored into one
+`slab_interval` helper, same arithmetic) and asks whether the ray's `[entry, exit]` through the box
+overlaps the query interval. It is not a surface test: a ray that starts inside the bounds, or a
+segment lying wholly inside them, overlaps them. It is exact for culling: every plane crossing is
+`(plane - origin) / direction`, which is monotonic in `plane` under IEEE rounding, so for a box
+inside the bounds the bounds' `[entry, exit]` contains the box's, and the surface the box would
+report (its entry or exit) lies in both intervals. A contained object that `intersect` or
+`intersects` accepts can therefore never be culled, including at exact boundary contact, for
+parallel directions (both use the same `1e-8` parallel rule), and for origins inside the bounds.
+No epsilon expansion is needed, and none was added; a test checks this over 20,000 contained box,
+ray, and interval combinations.
+
+- **Closest hit.** The query interval for a group is `[t_min, nearest object t so far]`, inclusive,
+  exactly the interval the linear scan would have used for its objects. Skipped groups hold no
+  object that the linear scan would have accepted, and tested objects are visited in the same
+  insertion order with the same strict `<`, so the result is identical: the same object, `t`,
+  position, normal, face, UV, `MaterialId`, and `HitSource`. Two objects at an equal `t` keep the
+  earlier-inserted winner, also across groups and with overlapping group bounds. The nearest object
+  `t` still bounds the DDA, and an object still wins an exact tie against a voxel.
+- **Shadows.** `is_occluded` skips a group whose bounds miss the caller's interval (infinite for
+  the sun, finite for point lights) and otherwise tests its objects, returning at the first
+  blocker. Bounds are never blockers and never produce a `SceneHit`, material, or pixel.
+- **Hot path.** No allocation, sorting, or lookup per ray: a loop over a few runs and a slice of
+  objects each.
+
+### Verification
+
+Before any code changed, the Mission 31 build rendered 75 reference PPMs at 640×360: the default
+showcase, the voxel diagnostic, the procedural island (seed 1847), and seeds 1847, 42, 2026, and 0
+of the EggWars diorama from 18 poses each (initial, ruin close-up, West egg close-up, low angle,
+top-down, an orbit at radius 48, ten close views around the North defense, and the East and South
+bases). After the North egg removal, and again after grouping, all 75 files are byte-identical to
+the references (SHA-256). The app's own PPMs for the four modes are byte-identical to Mission 31's.
+Tests additionally compare the grouped scene with the same objects added one at a time (the
+linear scan) at 640×360 for all four seeds and from five poses, and compare `closest_hit` and
+`is_occluded` with a test-only copy of the linear scan over thousands of rays.
+
 ## Known Limitations
 
 These are deliberate scope boundaries of the current diagnostic renderer, not hidden defects:
@@ -1658,9 +1763,10 @@ These are deliberate scope boundaries of the current diagnostic renderer, not hi
 - Lava regions are not procedurally converted into lights; the showcase hand-places one light.
 - The recursion limit is `MAX_RAY_DEPTH = 3`; it was not raised because cost has not been
   profiled at greater depth.
-- AABB objects are still scanned linearly; only voxel geometry is accelerated, by the DDA, so
-  objects should stay few. Grouped AABB acceleration (a BVH or per-island grouping) is deferred
-  until a real object count warrants it.
+- AABB objects are accelerated only by one flat level of spatial groups (Mission 31.25): every ray
+  still tests every group's bounds, and every object of a group it reaches. That suits a few
+  clusters of small props; many more objects or groups would need something else (a hierarchy
+  was deliberately not built). Objects added one at a time with `Scene::add` are scanned linearly.
 - Worker threads are created and joined on every render, and parallel speedup on the development
   machine is sublinear (about 5.8× on 11 CPUs for the default view). The Mission 27A investigation
   found 16×16 tiles appropriate and scoped-thread creation too cheap to justify a persistent pool.
@@ -1672,10 +1778,14 @@ These are deliberate scope boundaries of the current diagnostic renderer, not hi
 - The final EggWars scene is not finished: the arena has terrain, bridges, bases, defenses, the
   central ruin, and the battle-aftermath props, but no lava, and no final lighting, composition, or
   material tuning for it.
-- The 59 decorative AABBs are scanned linearly by every ray, shadow rays included, which makes an
-  EggWars render about 3× slower than Mission 30.5 (see Performance). No acceleration was added in
-  Mission 31 by design; grouping props (for example per-site bounds or per-cell lists in the DDA) is
-  the obvious next step if the cost matters.
+- The decorations still cost something: with 54 boxes in 8 groups an EggWars render is about
+  1.25× (initial view) to 1.6× (props filling the frame) the cost of the undecorated arena, down
+  from about 3× with Mission 31's 59 linearly scanned boxes (see Performance). The remaining cost
+  is the 8 bounds tests every ray pays, plus the objects of every group a ray reaches; the ruin
+  interior (20 boxes) and the West base (9) dominate their close-ups.
+- Group bounds are only tested, never subdivided: a group's bounds include empty space (most of
+  the ruin interior between the chests and the wall arrows), and rays through it test all its
+  objects.
 - Props are axis-aligned: arrows fly along ±X, ±Z, or straight down only, and the open chest lid
   stands upright rather than tilted. The North egg is fully hidden by its intact defense and is
   not instantiated as geometry (Mission 31.25); a camera zoomed inside its defense would not see
@@ -2061,6 +2171,37 @@ traversal was added. The decision to keep the 59 boxes and document the cost was
 grouped acceleration for objects is the first candidate for a future, separately approved change.
 These are local development observations, not universal benchmarks.
 
+### Decoration grouping (Mission 31.25)
+
+Apple M3 Pro, 11 CPUs, release, 640×360, seed 1847. Four test binaries built from the same
+throwaway harness (never committed) ran interleaved, five rounds each; every value is the median of
+the five round medians (each of 11 measured renders after 3 warm-ups), in ms for 1 / 4 / automatic
+workers. "Stage" is the same arena with no objects (the Mission 30.5 scene, measured in the same
+session); "North egg removed" is the first Mission 31.25 commit alone (54 boxes, linear scan).
+
+| View | Stage (no props) | Mission 31 (59, linear) | North egg removed (54, linear) | Mission 31.25 (54, 8 groups) | Speedup vs Mission 31 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Initial (radius 68) | 48.7 / 13.0 / 6.5 | 142.9 / 37.4 / 20.4 | 134.9 / 35.4 / 19.2 | 61.2 / 16.2 / 8.2 | 2.33× / 2.31× / 2.49× |
+| Ruin close-up (radius 9) | 87.2 / 23.0 / 11.8 | 320.9 / 84.0 / 45.8 | 301.5 / 78.9 / 43.0 | 128.4 / 33.8 / 17.6 | 2.50× / 2.49× / 2.60× |
+| West egg close-up (radius 2.4) | 88.3 / 23.2 / 12.0 | 343.9 / 90.0 / 49.1 | 320.7 / 83.9 / 45.9 | 138.3 / 36.2 / 19.6 | 2.49× / 2.49× / 2.51× |
+
+Round-to-round spread was below 1 ms in every cell except two single-worker Mission 31 cells
+(2 ms), far below the differences reported. The props' added cost over the bare stage
+falls from 94 / 24 / 13.9 ms to 12.5 / 3.2 / 1.7 ms in the initial view (87–88% of it recovered),
+from 234 / 61 / 34 ms to 41 / 11 / 5.8 ms in the ruin close-up (82–83%), and from 256 / 67 / 37 ms
+to 50 / 13 / 7.6 ms in the West egg close-up (80–81%). Removing the sealed North egg alone saves
+5–7%, about what 5 of 59 linearly scanned boxes cost.
+
+What remains is easy to account for. In the initial view almost no ray reaches a group, so the
+remaining 12.5 ms single-threaded is the 8 bounds tests every primary and shadow ray now pays
+instead of 59 box tests, consistent with Mission 31's measured cost of about 1.6 ms per box per
+frame. In the close-ups most rays do reach the group in front of the camera and then test all its
+boxes (20 in the ruin interior, 9 at the West base). Variants measured in the same harness: one
+group per site (6 groups) 57.8 / 173 / 128 ms single-threaded for the three views, one group per
+prop (24 groups) 82 / 168 / 166 ms, and, in a separate experiment binary, the extent-limited rule
+with a limit of 8 (7 groups on seed 1847) 58 / 120 / 131 ms against 60 / 124 / 136 ms with 6.5.
+The chosen limit trades those 2–3% for the same grouping on every seed. These are local observations, not universal benchmarks.
+
 ## Testing
 
 The Phase 4 suite contained 529 tests covering vector arithmetic and normalization, ray invariants,
@@ -2208,6 +2349,28 @@ two cells; the scene holds no object in North's egg cell but still holds West's 
 eggs' fragments; and close renders around the North defense are pixel-identical with and without
 the egg's five boxes.
 
+The spatial grouping then adds 21 tests, for 731 passing; no earlier test was weakened. `Aabb`:
+the exact `union`; `overlaps_ray_interval` accepting segments inside the box that `intersects`
+rejects, inclusive boundary contact, grazing, edge, and corner rays, invalid intervals and origins,
+and never missing a contained box that is hit (20,000 combinations of pixel-snapped boxes, aimed
+rays with zero direction components, and finite or infinite intervals); and unchanged exact
+`intersect` results after the slab refactor. `Scene`: runs that partition the objects in insertion
+order (ungrouped, three groups, an empty group adding nothing, later objects ungrouped); bounds
+equal to the exact union of their members and rebuilt identically; objects and materials unchanged;
+`closest_hit` and `is_occluded` equal to a test-only linear reference on about 6,000 rays from
+outside and inside group bounds, along face planes and edges, with zero direction components and
+finite and infinite intervals, over a scene with voxels, touching and coplanar boxes, overlapping
+group bounds, a duplicate box in two groups, and a box coincident with a voxel; finite shadow
+segments with blockers inside and beyond a group; bounds that never hit or block; equal-`t` winners
+kept by insertion order within and across groups; the object-wins tie against a voxel from all six
+sides; and objects added after groups staying visible and casting shadows. App: the diorama's 8
+groups (sizes 8, 7, 9, 1, 1, 4, 20, 4, each within one site and 6.5 blocks, covering every object
+once, identical on rebuild) on four seeds and the same grouping on seeds 0–63; renders identical to
+the linear scan from five poses (initial, ruin, West egg, low angle, top-down) and at 640×360 for
+seeds 1847, 42, 2026, and 0; reflected, refracted, and shadow rays reaching grouped boxes in a
+small glass-and-mirror scene with renders identical to the linear scan; and no grouping code in the
+renderer.
+
 The Phase 4 audit changed no runtime behavior and added no tests; the suite was unchanged at 529
 passing tests.
 
@@ -2233,14 +2396,13 @@ runs `cargo fmt --check`, `cargo test`, `cargo check`, `cargo build --release`, 
 
 The following are not yet implemented. Phase 5 (EggWars world) is in progress; Mission 28 added
 the procedural floating-island generator, Mission 29 the five-island arena, Mission 30 its
-bridges, structures, and egg defenses, and Mission 31 its battle-aftermath props:
+bridges, structures, and egg defenses, Mission 31 its battle-aftermath props, and Mission 31.25
+spatial grouping for those props:
 
 - transparent or colored shadows through glass, absorption, and nested or merged glass media;
 - procedural lava-region extraction into representative point lights;
 - lava and the final EggWars composition and lighting;
 - visual storytelling, the final presentation and video, and final performance and visual polish;
-- grouped acceleration for decorative AABB objects: the measured cost of the 59 Mission 31 objects
-  (about 3× per render) makes this the first candidate, pending approval.
 
 ## Course Rubric Mapping
 

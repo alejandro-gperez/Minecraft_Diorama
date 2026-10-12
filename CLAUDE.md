@@ -21,8 +21,33 @@ player entity or gameplay system.
 - Phase 3 — Raytracing Effects: complete (missions 14–20).
 - Phase 4 — Performance Architecture: complete and audited (missions 21–27B).
 - Phase 5 — Procedural EggWars Diorama: in progress (`AGENTS.md` names it current). Missions 28,
-  29, 30, 30.5, and 31 complete; Mission 32 (artistic composition and lighting) is next and needs
-  its own prompt.
+  29, 30, 30.5, 31, and 31.25 complete; Mission 31.5 (dual camera system) is next and needs its
+  own prompt.
+- Mission 31.25 (two commits): (A) sealed North egg, (B) spatial grouping of decorative AABBs.
+  (A) `Decoration::sealed` (set only for the egg behind North's `Intact` defense via
+  `Decorations::seal_last`); `validate` returns `NotSealed` unless a sealed prop lies in one cell
+  whose six face neighbors are opaque blocks (not glass); `Decorations::visible()` /
+  `visible_part_count()` skip sealed props; `eggwars_diorama_scene` instantiates only visible
+  props: 54 objects (24 props), `Decorations` still holds 25 props / 59 parts, North still 9/9
+  obsidian and `egg_survives(Intact)`. (B) `Scene` keeps `objects` in insertion order plus
+  private `object_runs: Vec<ObjectRun { objects: Range<usize>, bounds: Option<Aabb> }>`
+  partitioning them; `add` extends/starts an ungrouped run (always tested), `add_object_group`
+  appends objects consecutively with bounds = exact `Aabb::union` (empty adds nothing; later `add`
+  never touches a group); `object_groups()` exposes (bounds, range). `closest_hit` skips a run
+  when `!bounds.overlaps_ray_interval(ray, t_min, closest_t)`, `is_occluded` with the caller's
+  interval; objects visited in insertion order with the old strict `<`, so results (ties
+  included) equal the linear scan. `Aabb::overlaps_ray_interval` = slab `[entry, exit]` overlaps
+  `[t_min, t_max]` (shares the refactored `slab_interval` with `intersect`); exact, no epsilon,
+  by IEEE monotonicity of `(plane - origin) / direction`. Diorama grouping (`decoration_groups`
+  in `main.rs`): consecutive visible props of one site within `MAX_DECORATION_GROUP_EXTENT = 6.5`
+  blocks → 8 groups on every seed (0–255): South/East/West bases 8/7/9 boxes, South bridge ends
+  1/1, East bridge 4, ruin interior 20, lawn 4. All 75 reference PPMs (4 modes, seeds 1847/42/
+  2026/0 × 18 poses incl. 10 North close-ups) byte-identical to Mission 31. Measured (M3 Pro,
+  640×360, seed 1847, 1 / 4 / auto, ms): initial 142.9 / 37.4 / 20.4 → 61.2 / 16.2 / 8.2; ruin
+  close-up 320.9 / 84.0 / 45.8 → 128.4 / 33.8 / 17.6; West egg 343.9 / 90.0 / 49.1 → 138.3 /
+  36.2 / 19.6 (stage without props 48.7 / 13.0 / 6.5, 87.2 / 23.0 / 11.8, 88.3 / 23.2 / 12.0):
+  80–88% of the prop overhead recovered; the rest is 8 bounds tests per ray plus the members of
+  groups a ray reaches. Per-site (6) and per-prop (24) grouping measured worse.
 - Mission 31 battle-aftermath decorations: `src/world/decorations.rs` (+ `models.rs`,
   `validation.rs`, `tests.rs`). `place_decorations(&EggWarsArena) -> Result<Decorations,
   DecorationError>` reads `ConstructionInfo` and the grid (never writes it), builds 25 props as 59
@@ -41,10 +66,10 @@ player entity or gameplay system.
   reuse canonical cobblestone/obsidian). App scene: `eggwars_diorama_scene(grid, &decorations)`
   (17 materials, 13 textures, 59 objects); `eggwars_scene` stays the undecorated stage used by voxel
   tests. `Scene::objects()` accessor added. Other modes' PPMs byte-identical to Mission 30.5;
-  fingerprints unchanged. Measured cost (M3 Pro, 640×360, seed 1847, 1 / 4 / auto workers): initial
+  fingerprints unchanged. (Mission 31.25 dropped the sealed North egg's 5 objects and grouped the
+  rest; see above.) Measured cost (M3 Pro, 640×360, seed 1847, 1 / 4 / auto workers): initial
   47.4 / 12.9 / 6.4 → 142.4 / 37.4 / 20.4 ms; ruin close-up 11.7 → 47.6 ms and West egg close-up
-  12.0 → 49.3 ms auto, so about 3× from the linear object scan. The user chose to keep the 59 AABBs
-  without acceleration; object grouping is the first candidate if a later mission approves it.
+  12.0 → 49.3 ms auto, so about 3× from the linear object scan (addressed by Mission 31.25).
 - Mission 30.5 (two commits): (A) nine-block egg defenses, (B) 640×360 internal resolution.
   (A) `DEFENSE_TEMPLATE: [(side, forward, up); 9]` (`DEFENSE_SLOTS = 9`): the eight cells around
   the egg at `EGG_Y` (front row, flanks, back row) plus one cap at `(0, 0, 1)` (slot index 8);
@@ -232,15 +257,16 @@ player entity or gameplay system.
   (~1.6×) is unexplained; evidence went against the efficiency-core hypothesis. Not a blocker.
 - Important known limitations: opaque glass/lava shadows; no medium tracking (touching glass is
   glass → air → glass; glass on a block exposes that block's interior face); `1e-4` biases assume
-  unit scale; edge/corner contact follows the DDA's half-open conventions; AABB objects are scanned
-  linearly, and the 59 Mission 31 prop AABBs make EggWars renders about 3× slower (grouping needs
-  approval); the arena has terrain, bridges, bases, defenses, the central ruin, and props, but no
-  lava; props are axis-aligned (no tilted lids or angled arrows) and the North egg is fully hidden;
-  no camera collision (zoom can enter an island).
+  unit scale; edge/corner contact follows the DDA's half-open conventions; AABB objects have one
+  flat level of spatial groups (no hierarchy), and the 54 props still make EggWars renders about
+  1.25–1.6× the undecorated arena; the arena has terrain, bridges, bases, defenses, the central
+  ruin, and props, but no lava; props are axis-aligned (no tilted lids or angled arrows) and the
+  North egg is sealed and not instantiated (a camera inside its defense would not see it); no
+  camera collision (zoom can enter an island).
 - Rubric: all raytracing effects, DDA, and parallel rendering exist in code and diagnostic scenes
   only; they count only when visibly and intentionally used in the final diorama (Phase 5–6).
-- Current suite: 705 passing tests (Mission 31 added 40; Mission 30.5 added 14 net; Mission 30
-  added 38). PPMs are no longer byte-identical to the Mission 21 render because the resolution changed; at a fixed resolution output is deterministic.
+- Current suite: 731 passing tests (Mission 31.25 added 26: 5 sealed egg, 21 grouping; Mission 31
+  added 40; Mission 30.5 added 14 net; Mission 30 added 38). PPMs are no longer byte-identical to the Mission 21 render because the resolution changed; at a fixed resolution output is deterministic.
 - Development resolution: 640×360, presented at 1280×720 (exact 2×, nearest-neighbor); it was 320×180 / 960×540 through Mission 30.
 - Pre-Phase-4 baseline (local, single-threaded, brute-force AABB traversal): default view about
   4.9 ms, close cobblestone about 10.7 ms, close lava about 18 ms, close glass about 30 ms. These
@@ -250,17 +276,18 @@ player entity or gameplay system.
   showcase through the release app binary: test-binary layout shifted it by ~10% with no code cause.
 - Compiler state: no rustc warnings; clippy reports only the known `clippy::module_inception`
   warnings (plus two pre-existing `assertions_on_constants` warnings in test code).
-- Next work: Mission 32 (artistic composition and lighting), from the user's exact prompt. Not
-  authorized by this checkpoint.
+- Next work: Mission 31.5 (dual camera system), from the user's exact prompt. Not authorized by
+  this checkpoint.
 
 The repository is expected to begin each mission from a clean checkpoint. Verify the actual
 repository state instead of assuming this section is current.
 
 ## Mission boundary
 
-Phase 4 is complete and audited; Phase 5 is in progress with Missions 28, 29, 30, 30.5, and 31
-complete. Do not start further Phase 4 optimization (SIMD, persistent pools, BVH, reciprocal DDA),
-object acceleration, Mission 32, lava, lighting, or composition changes from this handoff. The user and planning assistant
+Phase 4 is complete and audited; Phase 5 is in progress with Missions 28, 29, 30, 30.5, 31, and
+31.25 complete. Do not start further Phase 4 optimization (SIMD, persistent pools, BVH, reciprocal
+DDA), object acceleration beyond the flat groups, Mission 31.5, Mission 32, lava, lighting, camera,
+or composition changes from this handoff. The user and planning assistant
 will provide the exact prompt and API for each future mission. Do not implement future missions
 early. Stop at mission boundaries.
 

@@ -19,8 +19,8 @@ use render::{Color, Framebuffer};
 use scene::{Scene, SceneObject};
 use voxel::{BlockMaterials, BlockType, Voxel, VoxelGrid, VoxelPosition};
 use world::{
-    ArenaLayout, DecorationKind, DecorationMaterials, Decorations, EggWarsArena, IslandConfig,
-    IslandId, IslandStats, build_eggwars_arena, generate_island, place_decorations,
+    ArenaLayout, Decoration, DecorationKind, DecorationMaterials, Decorations, EggWarsArena,
+    IslandConfig, IslandId, IslandStats, build_eggwars_arena, generate_island, place_decorations,
 };
 
 pub mod app;
@@ -483,6 +483,9 @@ fn eggwars_scene(grid: VoxelGrid) -> Result<Scene, PpmLoadError> {
 /// every visible prop, in placement order. The sealed North egg stays in `decorations` as story
 /// metadata but is not instantiated: its intact defense closes every face of its cell.
 ///
+/// The parts become a few spatial object groups (`decoration_groups`), so a ray that misses a
+/// group's bounds skips its parts. Object order and the objects themselves are unchanged.
+///
 /// The decorative materials are registered here, once, over one shared solid white texture; prop
 /// fragments of cobblestone and obsidian reuse the canonical materials. Props add no lights.
 fn eggwars_diorama_scene(
@@ -500,15 +503,58 @@ fn eggwars_diorama_scene(
         .add_decorative_materials(white)
         .expect("decorative materials must be valid and fit MaterialId");
     let materials = DecorationMaterials::new(blocks, decorative);
-    for decoration in decorations.visible() {
-        for part in decorations.parts_of(decoration) {
-            scene.add(SceneObject::new(
-                part.bounds,
-                materials.material(part.material),
-            ));
-        }
+    for group in decoration_groups(decorations) {
+        scene.add_object_group(
+            group
+                .iter()
+                .flat_map(|decoration| decorations.parts_of(decoration))
+                .map(|part| SceneObject::new(part.bounds, materials.material(part.material))),
+        );
     }
     Ok(scene)
+}
+
+/// Largest extent, in blocks along any axis, of one decoration group's bounds.
+///
+/// On every seed (checked over 0–255) this gives the same 8 groups: each base whole (at most
+/// 2.75 blocks across), the East bridge break whole (at most 5.5), the two ends of the South
+/// bridge's long break apart (at least 7.4 across together), and the center split into the ruin
+/// interior (chests and wall arrows, 5.1) and the lawn south-east of it (the whole center is at
+/// least 8.6). The limit sits about a block from every one of those sizes. One group per site
+/// leaves the ruin close-up about 40% slower, and one group per prop adds more bounds tests to
+/// every ray than it saves.
+const MAX_DECORATION_GROUP_EXTENT: f32 = 6.5;
+
+/// The visible props in placement order, cut into consecutive runs that share a site and fit in
+/// `MAX_DECORATION_GROUP_EXTENT`: each run becomes one spatial object group. Deterministic, from
+/// the props' exact boxes; consecutive runs keep the scene's object order the placement order.
+fn decoration_groups(decorations: &Decorations) -> Vec<Vec<&Decoration>> {
+    let hull = |decoration: &Decoration| {
+        decorations
+            .parts_of(decoration)
+            .iter()
+            .map(|part| part.bounds)
+            .reduce(Aabb::union)
+    };
+    let mut groups: Vec<(Aabb, Vec<&Decoration>)> = Vec::new();
+    for decoration in decorations.visible() {
+        let Some(bounds) = hull(decoration) else {
+            continue;
+        };
+        if let Some((group_bounds, members)) = groups.last_mut()
+            && members[0].site == decoration.site
+        {
+            let merged = group_bounds.union(bounds);
+            let extent = merged.max() - merged.min();
+            if extent.x.max(extent.y).max(extent.z) <= MAX_DECORATION_GROUP_EXTENT {
+                *group_bounds = merged;
+                members.push(decoration);
+                continue;
+            }
+        }
+        groups.push((bounds, vec![decoration]));
+    }
+    groups.into_iter().map(|(_, members)| members).collect()
 }
 
 /// Orbits the central island's center line at a third of its thickness below the grass, so the
@@ -553,15 +599,16 @@ mod tests {
     use std::{f32::consts::FRAC_PI_4, process};
 
     use super::{
-        HEIGHT, ISLAND_CONFIG, WIDTH, eggwars_arena, eggwars_camera, eggwars_decorations,
-        eggwars_diorama_scene, eggwars_scene, eggwars_world, phase2_lighting, phase2_test_scene,
-        procedural_island_camera, procedural_island_grid, procedural_island_scene,
-        voxel_diagnostic_scene,
+        HEIGHT, ISLAND_CONFIG, MAX_DECORATION_GROUP_EXTENT, WIDTH, decoration_groups,
+        eggwars_arena, eggwars_camera, eggwars_decorations, eggwars_diorama_scene, eggwars_scene,
+        eggwars_world, phase2_lighting, phase2_test_scene, procedural_island_camera,
+        procedural_island_grid, procedural_island_scene, voxel_diagnostic_scene,
     };
     use crate::{
         app::app::{WINDOW_SCALE, window_size},
         camera::OrbitalCamera,
         environment::Environment,
+        geometry::Aabb,
         material::{DecorativeMaterials, MaterialId, Texture, TextureSelection},
         math::Vec3,
         output::write_ppm,
@@ -1943,6 +1990,13 @@ mod tests {
                 assert!(!source.contains(word), "renderer source mentions {word}");
             }
         }
+        // Grouping lives in the scene: the renderer still only calls `closest_hit` and
+        // `is_occluded`.
+        for source in render_sources {
+            for word in ["object_group", "overlaps_ray_interval", "ObjectRun"] {
+                assert!(!source.contains(word), "renderer source mentions {word}");
+            }
+        }
         // The scene's queries treat props as ordinary objects; only material registration names
         // them.
         let scene = include_str!("scene/scene.rs");
@@ -1954,6 +2008,268 @@ mod tests {
                 "scene queries mention {word}"
             );
         }
+    }
+
+    // ---- Mission 31.25 spatial grouping of decorative AABBs ----
+
+    /// The grouped diorama's objects added one at a time instead: the pre-grouping linear scan.
+    fn linear_diorama(scene: &Scene) -> Scene {
+        let mut linear = eggwars_scene(scene.voxel_grid().unwrap().clone()).unwrap();
+        let white = linear.add_texture(Texture::solid(Color::WHITE)).unwrap();
+        linear.add_decorative_materials(white).unwrap();
+        for object in scene.objects() {
+            linear.add(*object);
+        }
+        assert_eq!(linear.objects(), scene.objects());
+        assert_eq!(linear.object_groups().count(), 0);
+        linear
+    }
+
+    #[test]
+    fn diorama_groups_its_props_into_eight_compact_clusters() {
+        for seed in [1847, 42, 2026, 0] {
+            let (_, decorations, scene) = diorama(seed);
+            let groups: Vec<_> = scene.object_groups().collect();
+            // Bases South, East, West; the South bridge break's two ends; the East bridge break;
+            // the ruin interior; the lawn.
+            let sizes: Vec<_> = groups.iter().map(|(_, range)| range.len()).collect();
+            assert_eq!(sizes, [8, 7, 9, 1, 1, 4, 20, 4], "{seed}");
+            // The groups cover every object exactly once, in order: none is left ungrouped.
+            let mut next = 0;
+            for (_, range) in &groups {
+                assert_eq!(range.start, next);
+                next = range.end;
+            }
+            assert_eq!(next, scene.len());
+            assert_eq!(scene.len(), 54);
+            // Each object's site, in scene order.
+            let sites: Vec<_> = decorations
+                .visible()
+                .flat_map(|decoration| {
+                    std::iter::repeat_n(decoration.site, decorations.parts_of(decoration).len())
+                })
+                .collect();
+            for (bounds, range) in groups {
+                let members = &scene.objects()[range.clone()];
+                let union = members
+                    .iter()
+                    .map(|o| o.bounds)
+                    .reduce(Aabb::union)
+                    .unwrap();
+                assert_eq!(bounds, union, "exact bounds from the objects");
+                let extent = bounds.max() - bounds.min();
+                assert!(
+                    extent.x.max(extent.y).max(extent.z) <= MAX_DECORATION_GROUP_EXTENT,
+                    "{bounds:?}"
+                );
+                assert!(
+                    sites[range.clone()]
+                        .iter()
+                        .all(|site| *site == sites[range.start])
+                );
+            }
+            assert!(scene.object_groups().eq(diorama(seed).2.object_groups()));
+        }
+    }
+
+    #[test]
+    fn decoration_grouping_is_the_same_on_every_seed() {
+        for seed in 0..64 {
+            let world = eggwars_world(seed);
+            let decorations = eggwars_decorations(&world);
+            let groups = decoration_groups(&decorations);
+            let props: Vec<_> = groups.iter().map(Vec::len).collect();
+            assert_eq!(props, [6, 5, 3, 1, 1, 2, 4, 2], "{seed}");
+            // Every visible prop exactly once, in placement order; never the sealed egg.
+            let flat: Vec<_> = groups.into_iter().flatten().copied().collect();
+            assert_eq!(flat, decorations.visible().copied().collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn grouped_diorama_renders_exactly_like_the_linear_scan_from_every_pose() {
+        let (world, _, scene) = diorama(ARENA_SEED);
+        let linear = linear_diorama(&scene);
+        let lighting = phase2_lighting();
+        let environment = Environment::sunset();
+        let (width, height) = (160, 90);
+        let aspect = width as f32 / height as f32;
+        let camera = |target: Vec3, yaw: f32, pitch: f32, radius: f32| {
+            OrbitalCamera::try_new(target, yaw, pitch, radius, 50.0_f32.to_radians(), aspect)
+                .unwrap()
+        };
+        let initial = eggwars_camera(aspect);
+        let open = world.construction.central.open_area;
+        let ruin = Vec3::new(
+            (open.min.x + open.max.x + 1) as f32 * 0.5,
+            open.min.y as f32 + 0.5,
+            (open.min.z + open.max.z + 1) as f32 * 0.5,
+        );
+        let west = world.construction.base(IslandId::West).unwrap().egg;
+        let west_egg = west.min_corner() + Vec3::new(0.5, 0.4, 0.5);
+        let poses = [
+            ("initial", initial),
+            ("ruin close-up", camera(ruin, 0.7, 0.5, 9.0)),
+            ("west egg close-up", camera(west_egg, 1.57, 0.08, 2.4)),
+            ("low angle", camera(initial.target(), 2.3, -0.2, 52.0)),
+            ("top-down", camera(initial.target(), 0.4, 1.55, 70.0)),
+        ];
+        for (name, camera) in poses {
+            let render = |scene: &Scene| {
+                let mut framebuffer = Framebuffer::try_new(width, height).unwrap();
+                Renderer::render(&camera, scene, &lighting, &environment, &mut framebuffer)
+                    .unwrap();
+                framebuffer
+            };
+            assert_eq!(render(&scene), render(&linear), "{name}");
+        }
+    }
+
+    #[test]
+    fn grouped_diorama_matches_the_linear_scan_at_640x360_on_every_seed() {
+        let lighting = phase2_lighting();
+        let environment = Environment::sunset();
+        let camera = eggwars_camera(WIDTH as f32 / HEIGHT as f32);
+        for seed in [1847, 42, 2026, 0] {
+            let scene = diorama(seed).2;
+            let linear = linear_diorama(&scene);
+            let render = |scene: &Scene| {
+                let mut framebuffer = Framebuffer::try_new(WIDTH, HEIGHT).unwrap();
+                Renderer::render(&camera, scene, &lighting, &environment, &mut framebuffer)
+                    .unwrap();
+                framebuffer
+            };
+            assert_eq!(render(&scene), render(&linear), "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn reflected_refracted_and_shadow_rays_reach_grouped_objects() {
+        // A reflective floor, a horizontal glass pane above a group of three boxes, and the
+        // camera above the pane: the boxes are seen directly, through the glass, and mirrored in
+        // the floor, and they shadow the floor.
+        let build = |with_group: bool, grouped: bool| {
+            let mut scene = Scene::new();
+            let white = scene.add_texture(Texture::solid(Color::WHITE)).unwrap();
+            let material = |color: Color, transparency: f32, reflectivity: f32| {
+                crate::material::Material::try_new(
+                    TextureSelection::Uniform(white),
+                    color,
+                    0.2,
+                    transparency,
+                    reflectivity,
+                )
+                .unwrap()
+            };
+            let floor = scene
+                .add_material(material(Color::new(0.4, 0.4, 0.45), 0.0, 0.5))
+                .unwrap();
+            let glass = scene
+                .add_material(
+                    material(Color::new(0.9, 0.97, 1.0), 0.85, 0.15)
+                        .with_ior(1.5)
+                        .unwrap(),
+                )
+                .unwrap();
+            let colors = [
+                Color::new(0.9, 0.1, 0.1),
+                Color::new(0.1, 0.8, 0.1),
+                Color::new(0.1, 0.2, 0.9),
+            ];
+            let ids = colors.map(|color| scene.add_material(material(color, 0.0, 0.0)).unwrap());
+            let boxed = |min: (f32, f32, f32), max: (f32, f32, f32), id| {
+                SceneObject::new(
+                    Aabb::try_new(
+                        Vec3::new(min.0, min.1, min.2),
+                        Vec3::new(max.0, max.1, max.2),
+                    )
+                    .unwrap(),
+                    id,
+                )
+            };
+            scene.add(boxed((-6.0, -1.0, -6.0), (6.0, 0.0, 6.0), floor));
+            let group = [
+                boxed((-0.5, 0.0, -0.5), (0.5, 1.0, 0.5), ids[0]),
+                boxed((1.0, 0.0, -0.25), (1.25, 0.5, 0.25), ids[1]),
+                boxed((-1.5, 0.0, 0.5), (-1.0, 0.25, 1.5), ids[2]),
+            ];
+            if with_group && grouped {
+                scene.add_object_group(group);
+            } else if with_group {
+                group.into_iter().for_each(|object| scene.add(object));
+            }
+            scene.add(boxed((-1.2, 1.5, -1.2), (1.2, 1.6, 1.2), glass));
+            (scene, ids, glass, floor)
+        };
+        let (grouped, ids, glass, floor) = build(true, true);
+        let (linear, ..) = build(true, false);
+        let (empty, ..) = build(false, false);
+        assert_eq!(grouped.object_groups().count(), 1);
+
+        let camera = OrbitalCamera::try_new(
+            Vec3::new(0.0, 0.4, 0.0),
+            0.9,
+            0.75,
+            5.5,
+            50.0_f32.to_radians(),
+            16.0 / 9.0,
+        )
+        .unwrap();
+        let (width, height) = (96, 54);
+        let lighting = phase2_lighting();
+        let environment = Environment::sunset();
+        let render = |scene: &Scene| {
+            let mut framebuffer = Framebuffer::try_new(width, height).unwrap();
+            Renderer::render(&camera, scene, &lighting, &environment, &mut framebuffer).unwrap();
+            framebuffer
+        };
+        let (with_group, without) = (render(&grouped), render(&empty));
+        assert_eq!(with_group, render(&linear), "grouping changes no pixel");
+
+        let (mut refracted, mut reflected) = (0, 0);
+        for y in 0..height {
+            for x in 0..width {
+                let u = (x as f32 + 0.5) / width as f32;
+                let v = (y as f32 + 0.5) / height as f32;
+                let ray = camera.ray_for_viewport(u, v).unwrap();
+                let Some(hit) = grouped.closest_hit(ray, 0.0, f32::INFINITY) else {
+                    continue;
+                };
+                let changed = with_group.pixel(x, y) != without.pixel(x, y);
+                let lifted = hit.geometry.position + hit.geometry.normal * 1e-4;
+                if hit.material_id == glass && changed {
+                    refracted += 1;
+                } else if hit.material_id == floor && changed {
+                    let mirror =
+                        Ray::try_new(lifted, ray.direction().reflect(hit.geometry.normal)).unwrap();
+                    if grouped
+                        .closest_hit(mirror, 0.0, f32::INFINITY)
+                        .is_some_and(|bounce| ids.contains(&bounce.material_id))
+                    {
+                        reflected += 1;
+                    }
+                }
+            }
+        }
+        assert!(refracted > 20, "{refracted}");
+        assert!(reflected > 20, "{reflected}");
+
+        // Sun shadows of the grouped boxes on the floor (the glass pane shadows part of the floor
+        // too, so floor points are sampled directly rather than through the camera).
+        let sun = Vec3::new(0.6, 1.0, 0.8).try_normalized().unwrap();
+        let mut shadowed = 0;
+        for i in 0..60 {
+            for k in 0..60 {
+                let point = Vec3::new(-3.0 + i as f32 * 0.1, 1.0e-4, -3.0 + k as f32 * 0.1);
+                let to_sun = Ray::try_new(point, sun).unwrap();
+                let blocked = grouped.is_occluded(to_sun, 0.0, f32::INFINITY);
+                assert_eq!(blocked, linear.is_occluded(to_sun, 0.0, f32::INFINITY));
+                if blocked && !empty.is_occluded(to_sun, 0.0, f32::INFINITY) {
+                    shadowed += 1;
+                }
+            }
+        }
+        assert!(shadowed > 20, "{shadowed}");
     }
 
     #[test]

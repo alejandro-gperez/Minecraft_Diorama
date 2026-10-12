@@ -27,6 +27,22 @@ impl Aabb {
         self.max
     }
 
+    /// The smallest box containing both boxes. Exact: each bound is one of the inputs' bounds.
+    pub fn union(self, other: Self) -> Self {
+        Self {
+            min: Vec3::new(
+                self.min.x.min(other.min.x),
+                self.min.y.min(other.min.y),
+                self.min.z.min(other.min.z),
+            ),
+            max: Vec3::new(
+                self.max.x.max(other.max.x),
+                self.max.y.max(other.max.y),
+                self.max.z.max(other.max.z),
+            ),
+        }
+    }
+
     /// Finds the nearest valid surface in the requested interval using slab clipping.
     ///
     /// A ray whose origin is strictly inside the box reports the exit surface, so callers
@@ -51,11 +67,51 @@ impl Aabb {
         self.surface_in_range(ray, t_min, t_max).is_some()
     }
 
+    /// Reports whether the ray's path through the box, `[entry, exit]`, overlaps
+    /// `[t_min, t_max]`: a culling test for a box used as the bounds of other boxes.
+    ///
+    /// Unlike `intersects`, no surface has to lie in the interval: a segment that starts and
+    /// ends inside the box overlaps it. It is conservative for every box `inner` contained in
+    /// this one: if `inner.intersect` or `inner.intersects` succeeds on an interval, so does this
+    /// test, exactly, with no tolerance. Both run the same slab arithmetic, and
+    /// `(plane - origin) / direction` is monotonic in `plane` under IEEE rounding, so the outer
+    /// box's `[entry, exit]` always contains the inner box's, and the inner surface reported
+    /// (its entry or its exit) lies in both intervals.
+    pub fn overlaps_ray_interval(&self, ray: Ray, t_min: f32, t_max: f32) -> bool {
+        if t_min.is_nan() || t_max.is_nan() || t_min > t_max || !ray.origin().is_finite() {
+            return false;
+        }
+
+        self.slab_interval(ray)
+            .is_some_and(|interval| interval.entry_t <= t_max && interval.exit_t >= t_min)
+    }
+
     fn surface_in_range(&self, ray: Ray, t_min: f32, t_max: f32) -> Option<(f32, CubeFace)> {
         if t_min.is_nan() || t_max.is_nan() || t_min > t_max || !ray.origin().is_finite() {
             return None;
         }
 
+        let interval = self.slab_interval(ray)?;
+        let origin = ray.origin();
+
+        if self.strictly_contains(origin) {
+            return surface_in_range(interval.exit_t, interval.exit_face, t_min, t_max);
+        }
+
+        if let Some(surface) = surface_in_range(interval.entry_t, interval.entry_face, t_min, t_max)
+        {
+            return Some(surface);
+        }
+
+        if interval.entry_t < t_min {
+            return surface_in_range(interval.exit_t, interval.exit_face, t_min, t_max);
+        }
+
+        None
+    }
+
+    /// The ray's parameter interval inside all three slabs, or `None` if it misses the box.
+    fn slab_interval(&self, ray: Ray) -> Option<SlabInterval> {
         let mut interval = SlabInterval::new();
         let origin = ray.origin();
         let direction = ray.direction();
@@ -85,20 +141,7 @@ impl Aabb {
             return None;
         }
 
-        if self.strictly_contains(origin) {
-            return surface_in_range(interval.exit_t, interval.exit_face, t_min, t_max);
-        }
-
-        if let Some(surface) = surface_in_range(interval.entry_t, interval.entry_face, t_min, t_max)
-        {
-            return Some(surface);
-        }
-
-        if interval.entry_t < t_min {
-            return surface_in_range(interval.exit_t, interval.exit_face, t_min, t_max);
-        }
-
-        None
+        Some(interval)
     }
 
     fn strictly_contains(&self, point: Vec3) -> bool {
@@ -622,5 +665,151 @@ mod tests {
             unit_box().intersect(invalid_origin_ray, 0.0, f32::INFINITY),
             None
         );
+    }
+
+    // ---- interval overlap (group bounds culling) ----
+
+    #[test]
+    fn union_is_the_exact_smallest_enclosing_box() {
+        let a = Aabb::try_new(Vec3::new(-1.0, 0.25, 2.0), Vec3::new(0.5, 1.0, 3.0)).unwrap();
+        let b = Aabb::try_new(Vec3::new(0.0, -2.0, 2.5), Vec3::new(4.0, 0.5, 2.75)).unwrap();
+
+        let union = a.union(b);
+
+        assert_eq!(union.min(), Vec3::new(-1.0, -2.0, 2.0));
+        assert_eq!(union.max(), Vec3::new(4.0, 1.0, 3.0));
+        assert_eq!(union, b.union(a));
+        assert_eq!(a.union(a), a);
+    }
+
+    #[test]
+    fn interval_overlap_accepts_segments_inside_the_box_that_intersects_rejects() {
+        let bounds = Aabb::try_new(Vec3::ZERO, Vec3::new(4.0, 4.0, 4.0)).unwrap();
+        let inside = ray(Vec3::new(1.0, 2.0, 2.0), Vec3::new(1.0, 0.0, 0.0));
+
+        // The exit is at t = 3: no surface in [0, 1], but the segment lies in the box.
+        assert!(!bounds.intersects(inside, 0.0, 1.0));
+        assert!(bounds.overlaps_ray_interval(inside, 0.0, 1.0));
+        assert!(bounds.overlaps_ray_interval(inside, 0.5, 0.75));
+        assert!(bounds.overlaps_ray_interval(inside, 0.0, f32::INFINITY));
+        // Behind the origin and past the exit.
+        assert!(!bounds.overlaps_ray_interval(inside, 3.01, f32::INFINITY));
+        let behind = ray(Vec3::new(6.0, 2.0, 2.0), Vec3::new(1.0, 0.0, 0.0));
+        assert!(!bounds.overlaps_ray_interval(behind, 0.0, f32::INFINITY));
+    }
+
+    #[test]
+    fn interval_overlap_includes_exact_boundary_contact() {
+        let bounds = unit_box();
+        let toward = ray(Vec3::new(0.5, 0.5, 3.0), Vec3::new(0.0, 0.0, -1.0));
+
+        // Entry at t = 2, exit at t = 3; both interval ends are inclusive.
+        assert!(bounds.overlaps_ray_interval(toward, 0.0, 2.0));
+        assert!(!bounds.overlaps_ray_interval(toward, 0.0, 1.999));
+        assert!(bounds.overlaps_ray_interval(toward, 3.0, f32::INFINITY));
+        assert!(!bounds.overlaps_ray_interval(toward, 3.001, f32::INFINITY));
+        // Grazing along a face: parallel to X and Y, on the y = 1 plane.
+        let grazing = ray(Vec3::new(-2.0, 1.0, 0.5), Vec3::new(1.0, 0.0, 0.0));
+        assert!(bounds.overlaps_ray_interval(grazing, 0.0, f32::INFINITY));
+        assert!(bounds.intersects(grazing, 0.0, f32::INFINITY));
+        let above = ray(Vec3::new(-2.0, 1.0001, 0.5), Vec3::new(1.0, 0.0, 0.0));
+        assert!(!bounds.overlaps_ray_interval(above, 0.0, f32::INFINITY));
+        // Through an edge and a corner.
+        let edge = ray(Vec3::new(-1.0, 2.0, 0.5), Vec3::new(1.0, -1.0, 0.0));
+        assert!(bounds.overlaps_ray_interval(edge, 0.0, f32::INFINITY));
+        let corner = ray(Vec3::new(2.0, 2.0, 2.0), Vec3::new(-1.0, -1.0, -1.0));
+        assert!(bounds.overlaps_ray_interval(corner, 0.0, f32::INFINITY));
+    }
+
+    #[test]
+    fn interval_overlap_rejects_invalid_intervals_and_origins() {
+        let bounds = unit_box();
+        let toward = ray(Vec3::new(0.5, 0.5, 3.0), Vec3::new(0.0, 0.0, -1.0));
+
+        assert!(!bounds.overlaps_ray_interval(toward, f32::NAN, 5.0));
+        assert!(!bounds.overlaps_ray_interval(toward, 0.0, f32::NAN));
+        assert!(!bounds.overlaps_ray_interval(toward, 2.5, 2.4));
+        let nan_origin = ray(Vec3::new(f32::NAN, 0.5, 3.0), Vec3::new(0.0, 0.0, -1.0));
+        assert!(!bounds.overlaps_ray_interval(nan_origin, 0.0, f32::INFINITY));
+    }
+
+    #[test]
+    fn interval_overlap_never_misses_a_contained_box_that_is_hit() {
+        // Deterministic stateless sampling: no RNG stream.
+        let sample = |index: u64, salt: u64| {
+            let mut z = index
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .wrapping_add(salt.wrapping_mul(0xBF58_476D_1CE4_E5B9));
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            ((z ^ (z >> 31)) >> 40) as f32 / (1u64 << 24) as f32
+        };
+        // Pixel-snapped coordinates, like the decorations, so contacts and grazing are frequent.
+        let snap = |value: f32| (value * 32.0).round() / 32.0;
+        let mut overlapping = 0;
+        for index in 0..20_000_u64 {
+            let at = |salt: u64, scale: f32| snap((sample(index, salt) - 0.5) * scale);
+            let a = Vec3::new(at(0, 6.0), at(1, 6.0), at(2, 6.0));
+            let b = Vec3::new(at(3, 6.0), at(4, 6.0), at(5, 6.0));
+            let inner = Aabb::try_new(
+                Vec3::new(a.x.min(b.x), a.y.min(b.y), a.z.min(b.z)),
+                Vec3::new(a.x.max(b.x), a.y.max(b.y), a.z.max(b.z)),
+            )
+            .unwrap();
+            let other = Vec3::new(at(6, 8.0), at(7, 8.0), at(8, 8.0));
+            let outer = inner.union(Aabb::try_new(other, other).unwrap());
+            let origin = Vec3::new(at(9, 12.0), at(10, 12.0), at(11, 12.0));
+            // Aimed near the inner box, with some direction components exactly zero.
+            let aim = (inner.min() + inner.max()) * 0.5
+                + Vec3::new(at(12, 3.0), at(13, 3.0), at(14, 3.0))
+                - origin;
+            let component = |value: f32, salt: u64| {
+                if sample(index, salt) < 0.15 {
+                    0.0
+                } else {
+                    value
+                }
+            };
+            let direction = Vec3::new(
+                component(aim.x, 20),
+                component(aim.y, 21),
+                component(aim.z, 22),
+            );
+            let Some(probe) = Ray::try_new(origin, direction) else {
+                continue;
+            };
+            let t_min = if sample(index, 15) < 0.5 {
+                0.0
+            } else {
+                sample(index, 16) * 6.0
+            };
+            let t_max = if sample(index, 17) < 0.3 {
+                f32::INFINITY
+            } else {
+                t_min + sample(index, 18) * 6.0
+            };
+
+            if inner.intersects(probe, t_min, t_max) {
+                overlapping += 1;
+                assert!(
+                    outer.overlaps_ray_interval(probe, t_min, t_max),
+                    "{inner:?} {outer:?} {probe:?} [{t_min}, {t_max}]"
+                );
+            }
+        }
+        assert!(overlapping > 1_000, "{overlapping}");
+    }
+
+    #[test]
+    fn refactored_slab_clipping_keeps_intersection_results() {
+        // `intersect` now shares `slab_interval` with the overlap test; spot-check exact values.
+        let bounds = Aabb::try_new(Vec3::new(-1.0, 0.0, 2.0), Vec3::new(1.0, 0.5, 2.25)).unwrap();
+        let probe = ray(Vec3::new(0.3, 3.0, 2.1), Vec3::new(-0.1, -1.0, 0.02));
+        let hit = bounds.intersect(probe, 0.0, f32::INFINITY).unwrap();
+        let direction = probe.direction();
+        let expected_t = (0.5 - 3.0) / direction.y;
+        assert_eq!(hit.t, expected_t);
+        assert_eq!(hit.face, CubeFace::PositiveY);
+        assert_eq!(hit.position, probe.at(expected_t));
     }
 }
