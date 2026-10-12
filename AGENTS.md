@@ -1232,51 +1232,112 @@ Known limitations are documented in the README and are not blockers for the curr
 
 Do not reopen or redesign Phase 3 systems without a concrete correctness issue or an explicit requirement from a later phase.
 
-## Current Phase
+# 29. Current Phase
 
-**CURRENT PHASE: PHASE 4 - PERFORMANCE ARCHITECTURE**
+## Phase 1 — Core Raytracer
 
-Phase 4 changes how the scene is represented and traversed efficiently while preserving the visual behavior established in Phases 1–3.
+**STATUS: COMPLETE AND AUDITED**
 
-Phase 4 should focus on:
+## Phase 2 — Materials, Textures and Lighting
 
-- voxel-oriented world representation;
-- efficient storage for Minecraft-style block occupancy;
-- exposed/interior voxel reasoning where useful;
-- 3D DDA voxel traversal;
-- replacing brute-force per-object ray traversal for voxel geometry;
-- CPU tile-based rendering;
-- dynamic tile scheduling;
-- standard-library CPU multithreading;
-- profiling and release-mode benchmarking;
-- preserving deterministic rendered output where algorithms are mathematically equivalent.
+**STATUS: COMPLETE AND AUDITED**
 
-Phase 4 must preserve:
+## Phase 3 — Advanced Raytracing Effects
 
-- CPU-only raytracing;
-- existing material and texture systems;
-- recursive reflection/refraction/Fresnel;
-- emission and local lighting;
-- normal mapping;
-- procedural environment;
-- orbital camera behavior;
-- Raylib presentation isolation;
-- deterministic project behavior.
+**STATUS: COMPLETE AND AUDITED**
 
-Do not prematurely construct the final procedural EggWars arena.
+## Phase 4 — Performance Architecture
 
-Phase 5 will use the optimized Phase 4 architecture to implement:
+**STATUS: COMPLETE AND AUDITED**
 
-- configurable procedural seed;
-- at least 16x16 procedural terrain generation;
-- floating islands;
-- ores;
-- lava regions;
-- bridges;
-- battle-aftermath storytelling;
-- final EggWars composition.
+Phase 4 established:
 
-Optimization must be measured rather than assumed.
+- Dense contiguous VoxelGrid with compact block storage.
+- Integer world coordinates and configurable grid origins.
+- Complete BlockType-to-MaterialId mapping.
+- Auxiliary dirt and ore materials.
+- Allocation-free 3D DDA traversal.
+- Hybrid voxel and arbitrary AABB scene intersections.
+- Deterministic nearest-hit and any-hit queries.
+- Correct recursive ray integration with voxel geometry.
+- Deterministic 16x16 tile rendering.
+- Dynamic CPU multithreading using std::thread::scope.
+- AtomicUsize-based tile scheduling.
+- Safe Mutex-protected framebuffer integration.
+- Reusable worker-local tile buffers.
+- Sequential fallback and configurable worker counts.
+- Deterministic output across worker counts and tile sizes.
+
+Phase 4 passed its dedicated technical audit.
+
+The implementation is CPU-only, uses no unsafe Rust,
+and introduces no additional rendering dependencies.
+
+Do not redesign Phase 4 systems without a demonstrated
+correctness issue or a measured performance requirement.
+
+## CURRENT PHASE: PHASE 5 — PROCEDURAL EGGWARS DIORAMA
+
+Phase 5 transforms the existing diagnostic renderer into
+a Minecraft 1.8-inspired EggWars diorama.
+
+The intended scene is a floating arena showing the aftermath
+of a battle.
+
+Primary objectives:
+
+- Configurable procedural seed.
+- Procedural floating-island terrain.
+- At least one 16x16 voxel terrain generation area.
+- Radial-mask-based island silhouettes.
+- Grass, dirt and cobblestone terrain layers.
+- Procedurally distributed coal, iron, gold and diamond ores.
+- Five-island composition: four outer islands and one
+  larger central island.
+- Bridges connecting islands.
+- Intentionally broken bridge sections.
+- Lava features and representative local lights.
+- Obsidian and glass structures.
+- Open chests and battle-aftermath decorations.
+- Arrows and environmental storytelling details.
+- Sunset/night atmosphere.
+- Intentional visual demonstration of the five canonical
+  materials and advanced raytracing effects.
+
+The diorama is a static world viewed through an orbital camera.
+
+There is no controllable player character.
+
+Do not implement player movement, combat, inventory systems,
+game rules or EggWars gameplay.
+
+Use VoxelGrid for block-aligned terrain and structures.
+
+Reserve arbitrary AABB objects for special geometry.
+
+Preserve the existing raytracing and performance architecture.
+
+Procedural generation must be deterministic for a fixed seed.
+
+Performance must be measured using the actual final scene
+before introducing additional acceleration structures.
+
+Implement Phase 5 incrementally.
+
+Do not construct the entire arena in a single mission.
+
+## Phase 6 — Final Polish and Delivery
+
+**STATUS: NOT STARTED**
+
+Phase 6 will cover:
+
+- Final artistic composition.
+- Visual and performance polish.
+- Rubric verification.
+- Final README documentation.
+- Demonstration video.
+- GitHub delivery.
 
 ---
 
