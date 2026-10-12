@@ -99,7 +99,7 @@ Runtime PPM assets -> TextureRegistry -> Material / MaterialId
                                                    v
                                      scoped CPU worker threads
                                                    |
-                                                   | tile buffers over channels
+                                                   | short Mutex-protected tile copy
                                                    v
                                            CPU Framebuffer
                                              /       \
@@ -696,9 +696,10 @@ observations, not universal benchmarks.
 
 ## Dynamic CPU Multithreading (Phase 4)
 
-Mission 26 renders the 16×16 tiles in parallel on CPU threads from the Rust standard library. It
-adds no dependency, no GPU work, and no `unsafe` code, and it does not change tracing, traversal,
-materials, or lighting: workers call the same `Tracer` the sequential renderer uses.
+Mission 26 renders the 16×16 tiles in parallel on CPU threads from the Rust standard library, and
+Mission 27B simplified how finished tiles reach the framebuffer. It adds no dependency, no GPU
+work, and no `unsafe` code, and it does not change tracing, traversal, materials, or lighting:
+workers call the same `Tracer` the sequential renderer uses.
 
 ### Worker lifecycle
 
@@ -715,22 +716,24 @@ count. Every index is handed out exactly once, so tiles are never skipped or tra
 workers simply take more tiles. `Relaxed` is sufficient because the counter only assigns work; it
 never publishes pixel data. Tile geometry comes from `TileGrid` arithmetic; no tile list is built.
 
-### Framebuffer ownership
+### Framebuffer integration
 
-The framebuffer is a contiguous row-major `Vec<Color>` and a tile is not a contiguous slice of it,
-so workers never write it. The calling thread owns it and is its only writer:
+There is exactly one framebuffer, a contiguous row-major `Vec<Color>`. A tile is not a contiguous
+slice of it, so a worker first traces into a private buffer and then copies the finished tile in:
 
-1. Each worker owns two reusable tile-sized `Vec<Color>` buffers (allocated once per worker per
-   render, sized for the largest tile).
-2. It traces a claimed tile into a free buffer, holding no lock, then moves the buffer through a
-   standard-library channel to the owner. The `Vec` moves, not its pixels.
-3. The owner copies the tile row by row into its global position (`Framebuffer::write_tile`) and
-   sends the buffer back through that worker's own channel.
+1. Each worker owns **one** reusable tile-sized `Vec<Color>` (allocated once per worker per render,
+   sized for the largest tile, and reused for every tile it claims, edge tiles included).
+2. It traces a claimed tile into that buffer, holding no lock.
+3. It locks the framebuffer, which sits behind a standard-library `Mutex` borrowed through the
+   scope (no `Arc`), calls `Framebuffer::write_tile` to copy the tile row by row into its global
+   position, and releases the lock before claiming the next tile.
 
-The second buffer lets a worker trace its next tile while the owner copies the previous one.
-Synchronization is one channel message each way per tile: no per-pixel or per-tile mutex, and no
-lock held while raytracing. Measured on the default view, two buffers instead of one cut the
-11-worker render from 1.15 ms to 0.90 ms.
+The lock covers only that copy; primary-ray generation, intersection, shading, recursive rays, and
+texture sampling all run outside it. Tiles never overlap and nothing is blended, so the order in
+which workers acquire the lock cannot change the image. The calling thread only waits for the
+workers to finish. Mission 26 instead moved buffers to the calling thread over `mpsc` channels,
+with two buffers per worker; replacing that with the lock removed the channels, the buffer-return
+protocol, and the second buffer, and was also faster with few workers (see Measurements).
 
 ### Worker count and sequential fallback
 
@@ -745,13 +748,17 @@ lock held while raytracing. Measured on the default view, two buffers instead of
 
 ### Errors and panics
 
-A worker whose tile fails reports the `RenderError` and stops, and a shared stop flag keeps the
-other workers from claiming new tiles; tiles already claimed are finished, so nothing blocks and
-the scope joins cleanly. Tiles are claimed in increasing index order, so every tile before the
-failed one is still traced, and the renderer returns the lowest-index failure: the same error the
-sequential renderer reports. A failed render never returns `Ok`. A worker panic is not caught: the
-scope propagates it to the caller after joining the other workers. A successful render asserts that
-every tile was integrated exactly once.
+A worker whose tile fails stops and returns that tile's index and `RenderError`, and a shared stop
+flag keeps the other workers from claiming new tiles; tiles already claimed are finished, so nothing
+blocks and the scope joins cleanly. Tiles are claimed in increasing index order, so every tile
+before the failed one is still traced, and after the join the renderer returns the lowest-index
+failure: the same error the sequential renderer reports. A failed render never returns `Ok`.
+
+A worker panic is not swallowed: the join re-raises its payload on the calling thread, so a panic
+never becomes `Ok`. A worker that panics while the framebuffer lock is held poisons it; the other
+workers then panic on the poisoned lock instead of continuing, and the poisoned frame is never
+replaced or recovered. A tile that does not fit the framebuffer, which breaks the grid's partition
+contract, panics outside the lock.
 
 ### Exact equivalence
 
@@ -769,47 +776,61 @@ automatic workers against one worker.
 ### Measurements
 
 Apple M3 Pro, 11 CPUs (5 performance and 6 efficiency cores), `available_parallelism() = 11`,
-release build, one process, the same scene, camera, 320×180 resolution, and 16×16 tiles for every
-count. Each configuration ran three interleaved rounds of 3 warm-up and 15 measured renders; the
-table gives the median of the 45 samples in ms and the speedup over one worker. The close-glass view
-targets the glass block at radius 2, so most primary rays spawn reflection and refraction rays.
+release build, 320×180, 16×16 tiles. Mission 27B was compared with the Mission 26 channel
+implementation as two binaries that differ only in `parallel.rs`, run alternately (six rounds in
+each order, 3 warm-up and 15 measured renders per configuration and round); the table gives the
+median of those 12 rounds in ms. Automatic is 11 workers. The close-glass view targets the glass
+block at radius 2, so most primary rays spawn reflection and refraction rays. The voxel proxy is a
+throwaway scene of five voxel islands (48×20×48 grid) with obsidian, glass, and lava, orbited from
+a distance; it stands in for the planned EggWars world and is not part of the repository.
 
-| Workers | Default showcase | Voxel diagnostic | Close glass |
-| ---: | ---: | ---: | ---: |
-| 1 | 5.08 (1.00×) | 5.13 (1.00×) | 31.75 (1.00×) |
-| 2 | 3.13 (1.62×) | 3.13 (1.64×) | 16.98 (1.87×) |
-| 3 | 1.88 (2.70×) | 1.90 (2.70×) | 11.17 (2.84×) |
-| 4 | 1.67 (3.04×) | 1.67 (3.08×) | 9.26 (3.43×) |
-| 5 | 1.34 (3.78×) | 1.36 (3.78×) | 6.98 (4.55×) |
-| 6 | 1.22 (4.17×) | 1.23 (4.19×) | 6.35 (5.00×) |
-| 8 | 1.08 (4.70×) | 1.08 (4.76×) | 5.57 (5.70×) |
-| 11 | 0.90 (5.65×) | 0.91 (5.64×) | 4.61 (6.89×) |
-| Automatic (11) | 0.89 (5.68×) | 0.91 (5.68×) | 4.60 (6.90×) |
+| Scene | Workers | Mission 26 | Mission 27B | Change |
+| --- | ---: | ---: | ---: | ---: |
+| Default showcase | 1 | 4.99 | 5.12 | +2.4% |
+| | 2 | 3.11 | 2.67 | −14.0% |
+| | 4 | 1.64 | 1.40 | −14.4% |
+| | 8 | 1.08 | 1.00 | −7.6% |
+| | automatic | 0.92 | 0.90 | −2.2% |
+| Voxel diagnostic | 1 | 5.06 | 5.18 | +2.5% |
+| | 2 | 3.15 | 2.68 | −14.8% |
+| | 4 | 1.65 | 1.41 | −14.5% |
+| | 8 | 1.07 | 0.99 | −7.9% |
+| | automatic | 0.92 | 0.90 | −1.8% |
+| Close glass | 1 | 30.22 | 31.89 | +5.5% |
+| | 2 | 16.72 | 16.33 | −2.4% |
+| | 4 | 8.81 | 8.39 | −4.8% |
+| | 8 | 5.36 | 5.51 | +2.7% |
+| | automatic | 4.56 | 4.71 | +3.2% |
+| Voxel proxy | 1 | 10.69 | 10.80 | +1.0% |
+| | 2 | 6.43 | 5.61 | −12.8% |
+| | 4 | 3.40 | 2.92 | −14.0% |
+| | 8 | 1.95 | 1.85 | −5.0% |
+| | automatic | 1.59 | 1.60 | +0.5% |
 
-The default showcase at 1280×720 scaled the same way: 79.4 ms with one worker, 48.0 ms with two,
-25.2 ms with four, and 12.9 ms automatic (6.15×). In the application, the first render of the
-default view now reports about 1.9 ms, against about 5.3 ms before.
+Interpretation:
 
-Interpretation and overhead:
-
+- The lock removes most of the cost with few workers: 13–15% less time at two and four workers on
+  every scene except close glass, where tracing dominates. At the automatic count the difference
+  is within noise on every scene, so no speedup is claimed there.
+- The one-worker path is the unchanged sequential renderer in both binaries, yet it differs by up to
+  5.5% (close glass), so differences of that size are code-layout noise, not synchronization. The
+  close-glass rows at 8 and automatic workers fit that explanation: each binary's speedup over its
+  own one-worker time is the same (6.6× against 6.8× at 11 workers), so the lock adds no
+  measurable cost there.
 - Scaling is sublinear. Six of the eleven CPUs are efficiency cores, and every render pays for
-  thread creation, channel messages, and tile copies. The heavier close-glass view hides more of
-  that fixed cost (6.9× against 5.7×).
-- Two workers scale worse than the rest (about 1.6×) in every scene and at both resolutions, so it is
-  not fixed overhead. The likely cause, not verified, is the operating system running one of the two
-  threads on an efficiency core.
-- The one-worker path is the unchanged sequential renderer. Interleaved against the Mission 25
-  binary, its medians were 5.06–5.13 ms versus 5.06–5.08 ms (default) and 31.7–31.8 ms versus
-  31.4–31.6 ms (close glass), within code-layout noise.
+  thread creation and tile copies. Two workers scale worse than the rest in every scene; the likely
+  cause, not verified, is the operating system running one of the two threads on an efficiency
+  core.
 - These are local development observations, not universal benchmarks. Parallelism is not
   guaranteed to help on every machine or for very small frames.
 
 ### Memory
 
-`size_of::<Color>()` is 12 bytes (three `f32`). One 16×16 tile buffer holds 256 × 12 = 3,072 bytes;
-with two per worker, 11 workers use 66 KiB and the 64-worker maximum 384 KiB, plus small channel
-allocations, all freed when the render returns. No worker allocates a framebuffer or clones scene
-resources.
+`size_of::<Color>()` is 12 bytes (three `f32`). One 16×16 tile buffer holds 256 × 12 = 3,072 bytes,
+and each worker owns one: 11 workers use 33 KiB (33,792 bytes) and the 64-worker maximum 192 KiB
+(196,608 bytes), half of the two-buffer Mission 26 design (66 and 384 KiB) and with no channel
+allocations. Thread stacks are not included. All of it is freed when the render returns. No worker
+allocates a framebuffer or clones scene resources.
 
 ## Known Limitations
 
@@ -1068,7 +1089,7 @@ observations.
 
 ## Testing
 
-The current suite contains 522 tests covering vector arithmetic and normalization, ray invariants,
+The current suite contains 529 tests covering vector arithmetic and normalization, ray invariants,
 AABB construction and edge cases, camera basis/ray generation/orbit limits, texture sampling and
 registration, P6 parsing and malformed input, material face selection, cube-face UV orientation,
 scene closest-hit behavior, ambient/Lambert/Blinn-Phong behavior, renderer lighting and texture
@@ -1101,7 +1122,8 @@ framebuffer tile writes, worker-count selection, bounding, zero-worker rejection
 exactly-once tile claims, tile integration at global coordinates, tracing only on worker threads,
 byte-identical output across worker counts, tile sizes, and uneven completion order, worker error
 propagation with the sequential renderer's error, failures in every tile without deadlock, and
-worker panic propagation. Every AABB and every voxel remains an opaque shadow blocker, including
+worker panic propagation with its message, exactly-once pixel coverage, one reused buffer per
+worker, and a render that still works after a failed one. Every AABB and every voxel remains an opaque shadow blocker, including
 glass.
 
 The Phase 3 audit changed no runtime behavior and added no tests; the count is unchanged at 343.

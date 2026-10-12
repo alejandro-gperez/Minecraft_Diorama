@@ -7,24 +7,26 @@
 //! - Work assignment: workers claim row-major tile indices from one shared `AtomicUsize` with
 //!   `fetch_add`, so every index is handed out exactly once. The counter only assigns work; it
 //!   never publishes pixels, so `Ordering::Relaxed` suffices.
-//! - Pixel ownership: the calling thread owns the framebuffer and is its only writer. Each worker
-//!   owns `BUFFERS_PER_WORKER` reusable tile-sized buffers, traces a claimed tile into one of them
-//!   without holding any lock, and sends the buffer through a channel to the owner. The owner
-//!   copies the tile into its global position and sends the buffer back through that worker's
-//!   own channel. Channel transfer moves the `Vec`, never its pixels, and synchronizes once per
-//!   tile.
-//! - Failure: a worker that fails reports the error and stops; the shared stop flag keeps the
-//!   others from claiming further tiles. Because indices are claimed in increasing order, every
-//!   tile before the failed one is still finished, so the owner reports the lowest-index failure:
-//!   the same error a sequential render would return. A panicking worker panics the whole render
-//!   through `std::thread::scope`.
+//! - Pixel ownership: the one framebuffer sits behind a `Mutex`. Each worker owns a single
+//!   tile-sized buffer, allocated once and reused for every tile it claims. It traces a tile into
+//!   that buffer without holding any lock, then locks the framebuffer only long enough for
+//!   `Framebuffer::write_tile` to copy the finished tile into its global position. Tiles never
+//!   overlap and nothing is blended, so the order in which workers take the lock cannot change the
+//!   image.
+//! - Failure: a worker whose tile fails stops and returns that tile's index and error; the shared
+//!   stop flag keeps the others from claiming further tiles. Claims are handed out in increasing
+//!   order and a claimed tile is always finished, so every tile before a failed one is still
+//!   traced. After the join, the lowest-index failure is returned: the same error a sequential
+//!   render would return. A panicking worker is re-raised on the calling thread after the join,
+//!   so a panic never turns into `Ok`.
 
 use std::{
     io,
     num::NonZeroUsize,
+    panic,
     sync::{
+        Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        mpsc::{self, Receiver, Sender},
     },
     thread,
 };
@@ -39,10 +41,6 @@ use super::{
 /// The development frame has 240 tiles; more threads than this only add creation cost, and an
 /// unbounded request must never spawn thousands of threads.
 pub const MAX_WORKERS: usize = 64;
-
-/// Tile buffers owned by each worker. Two let a worker trace its next tile while the owner is
-/// still copying the previous one; with one, every tile would wait for the owner to wake up.
-const BUFFERS_PER_WORKER: usize = 2;
 
 /// Worker threads for an automatic render: the system's available parallelism, or `1` when it
 /// cannot be determined.
@@ -68,21 +66,8 @@ pub(crate) fn effective_worker_count(
     Ok(requested.min(tile_count).min(MAX_WORKERS))
 }
 
-/// A traced tile travelling from its worker to the framebuffer owner.
-struct CompletedTile {
-    worker: usize,
-    tile: Tile,
-    /// The worker's buffer; the tile's pixels are its first `width * height` entries, row-major.
-    pixels: Vec<Color>,
-}
-
-enum WorkerMessage {
-    Completed(CompletedTile),
-    Failed {
-        tile_index: usize,
-        error: RenderError,
-    },
-}
+/// A tile whose tracing failed, identified by its row-major index.
+type TileFailure = (usize, RenderError);
 
 /// Shared, read-only state every worker of one render borrows.
 struct WorkQueue<'a, F> {
@@ -117,116 +102,69 @@ where
         stop: &stop,
         trace_tile: &trace_tile,
     };
+    let framebuffer = Mutex::new(framebuffer);
 
-    thread::scope(|scope| {
-        let (completed_sender, completed) = mpsc::channel();
-        let mut buffer_returns = Vec::with_capacity(workers);
-        for worker in 0..workers {
-            let (buffer_return, free_buffers) = mpsc::channel();
-            for _ in 0..BUFFERS_PER_WORKER {
-                buffer_return
-                    .send(vec![Color::BLACK; buffer_len])
-                    .expect("the worker's buffer receiver is still owned here");
-            }
-            buffer_returns.push(buffer_return);
+    let failures: Vec<Option<TileFailure>> = thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| scope.spawn(|| run_worker(&queue, &framebuffer, buffer_len)))
+            .collect();
 
-            let completed_sender = completed_sender.clone();
-            let queue = &queue;
-            scope.spawn(move || run_worker(worker, queue, &free_buffers, &completed_sender));
-        }
-        // Only workers hold senders now, so the loop below ends once every worker has exited.
-        drop(completed_sender);
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|payload| panic::resume_unwind(payload))
+            })
+            .collect()
+    });
 
-        integrate_tiles(grid, framebuffer, &completed, &buffer_returns)
-    })
+    // Each worker stops at its first failure, so the minimum over workers is the lowest index.
+    match failures
+        .into_iter()
+        .flatten()
+        .min_by_key(|&(index, _)| index)
+    {
+        Some((_, error)) => Err(error),
+        None => Ok(()),
+    }
 }
 
-/// One worker: claim a tile, trace it into a free buffer, hand it to the owner, repeat.
+/// One worker: claim a tile, trace it into the worker's own buffer, copy it into the framebuffer,
+/// repeat. Returns the failure that made it stop, if any.
 fn run_worker<F>(
-    worker: usize,
     queue: &WorkQueue<'_, F>,
-    free_buffers: &Receiver<Vec<Color>>,
-    completed: &Sender<WorkerMessage>,
-) where
+    framebuffer: &Mutex<&mut Framebuffer>,
+    buffer_len: usize,
+) -> Option<TileFailure>
+where
     F: Fn(Tile, &mut [Color]) -> Result<(), RenderError>,
 {
+    let mut pixels = vec![Color::BLACK; buffer_len];
+
     while !queue.stop.load(Ordering::Relaxed) {
         let tile_index = queue.next_tile.fetch_add(1, Ordering::Relaxed);
-        let Some(tile) = queue.grid.tile(tile_index) else {
-            return;
-        };
-        // Blocks only while both buffers wait at the owner. An error means the owner is gone,
-        // which happens only while it unwinds.
-        let Ok(mut pixels) = free_buffers.recv() else {
-            return;
-        };
-
+        let tile = queue.grid.tile(tile_index)?;
         let area = tile.width() * tile.height();
-        let message = match (queue.trace_tile)(tile, &mut pixels[..area]) {
-            Ok(()) => WorkerMessage::Completed(CompletedTile {
-                worker,
-                tile,
-                pixels,
-            }),
-            Err(error) => {
-                queue.stop.store(true, Ordering::Relaxed);
-                WorkerMessage::Failed { tile_index, error }
-            }
-        };
-        let failed = matches!(message, WorkerMessage::Failed { .. });
-        if completed.send(message).is_err() || failed {
-            return;
+
+        if let Err(error) = (queue.trace_tile)(tile, &mut pixels[..area]) {
+            queue.stop.store(true, Ordering::Relaxed);
+            return Some((tile_index, error));
         }
-    }
-}
 
-/// The owner's side: copy every completed tile into place and recycle its buffer.
-///
-/// Returns the lowest-index failure if any tile failed.
-fn integrate_tiles(
-    grid: TileGrid,
-    framebuffer: &mut Framebuffer,
-    completed: &Receiver<WorkerMessage>,
-    buffer_returns: &[Sender<Vec<Color>>],
-) -> Result<(), RenderError> {
-    let mut integrated = 0;
-    let mut first_failure: Option<(usize, RenderError)> = None;
-
-    for message in completed {
-        match message {
-            WorkerMessage::Completed(CompletedTile {
-                worker,
-                tile,
-                pixels,
-            }) => {
-                let area = tile.width() * tile.height();
-                assert!(
-                    framebuffer.write_tile(tile, &pixels[..area]),
-                    "a scheduled tile must lie inside the framebuffer it partitions",
-                );
-                integrated += 1;
-                // A worker that has already stopped no longer needs its buffer.
-                let _ = buffer_returns[worker].send(pixels);
-            }
-            WorkerMessage::Failed { tile_index, error } => {
-                if first_failure.is_none_or(|(first, _)| tile_index < first) {
-                    first_failure = Some((tile_index, error));
-                }
-            }
-        }
+        // The lock covers only the copy. A poisoned lock means another worker panicked, and that
+        // panic is re-raised by the join; this worker has nothing useful left to do.
+        let written = framebuffer
+            .lock()
+            .expect("the framebuffer lock is poisoned by a panicking worker")
+            .write_tile(tile, &pixels[..area]);
+        assert!(
+            written,
+            "a scheduled tile must lie inside the framebuffer it partitions",
+        );
     }
 
-    if let Some((_, error)) = first_failure {
-        return Err(error);
-    }
-    // Without a reported failure, a missing tile means a worker panicked; `thread::scope`
-    // propagates that panic, and this keeps an incomplete frame from ever returning `Ok`.
-    assert_eq!(
-        integrated,
-        grid.tile_count(),
-        "every tile must be integrated exactly once",
-    );
-    Ok(())
+    None
 }
 
 #[cfg(test)]
@@ -234,11 +172,12 @@ mod tests {
     use std::{
         io,
         num::NonZeroUsize,
+        panic::{self, AssertUnwindSafe},
         sync::{
             Mutex,
             atomic::{AtomicUsize, Ordering},
         },
-        thread,
+        thread::{self, ThreadId},
     };
 
     use super::{
@@ -479,6 +418,99 @@ mod tests {
     }
 
     #[test]
+    fn every_pixel_is_traced_and_written_exactly_once() {
+        for (width, height, tile_width, tile_height) in GRIDS {
+            for workers in WORKER_COUNTS {
+                let (grid, mut framebuffer) = setup(width, height, tile_width, tile_height);
+                let workers = effective_worker_count(workers, grid.tile_count()).unwrap();
+                let traced_pixels = AtomicUsize::new(0);
+
+                // A second write over a coordinate color would be invisible, so count the work:
+                // the claimed tiles must add up to exactly the frame, with no tile claimed twice.
+                render_tiles_parallel(grid, workers, &mut framebuffer, |tile, pixels| {
+                    traced_pixels.fetch_add(pixels.len(), Ordering::Relaxed);
+                    fill_with_coordinates(tile, pixels);
+                    Ok(())
+                })
+                .unwrap();
+
+                assert_eq!(
+                    traced_pixels.load(Ordering::Relaxed),
+                    width * height,
+                    "{width}x{height}, {tile_width}x{tile_height}, {workers} workers"
+                );
+                assert_holds_coordinates(&framebuffer);
+            }
+        }
+    }
+
+    #[test]
+    fn each_worker_reuses_one_buffer_for_all_its_tiles() {
+        // 17x19 with 16x16 tiles has full and clipped tiles, so the buffer outlasts size changes.
+        let (grid, mut framebuffer) = setup(17, 19, 16, 16);
+        let buffers: Mutex<Vec<(ThreadId, usize)>> = Mutex::new(Vec::new());
+
+        render_tiles_parallel(grid, 1, &mut framebuffer, |tile, pixels| {
+            buffers
+                .lock()
+                .unwrap()
+                .push((thread::current().id(), pixels.as_ptr() as usize));
+            fill_with_coordinates(tile, pixels);
+            Ok(())
+        })
+        .unwrap();
+
+        let buffers = buffers.into_inner().unwrap();
+        assert_eq!(buffers.len(), grid.tile_count());
+        assert!(buffers.iter().all(|&entry| entry == buffers[0]));
+        assert_holds_coordinates(&framebuffer);
+    }
+
+    #[test]
+    fn workers_keep_distinct_buffers() {
+        let (grid, mut framebuffer) = setup(64, 36, 8, 8);
+        let buffers: Mutex<Vec<(ThreadId, usize)>> = Mutex::new(Vec::new());
+
+        render_tiles_parallel(grid, 4, &mut framebuffer, |tile, pixels| {
+            let entry = (thread::current().id(), pixels.as_ptr() as usize);
+            let mut buffers = buffers.lock().unwrap();
+            if !buffers.contains(&entry) {
+                buffers.push(entry);
+            }
+            drop(buffers);
+            fill_with_coordinates(tile, pixels);
+            Ok(())
+        })
+        .unwrap();
+
+        // One buffer per thread, and no two threads share one.
+        let buffers = buffers.into_inner().unwrap();
+        for (index, &(thread, pointer)) in buffers.iter().enumerate() {
+            for &(other_thread, other_pointer) in &buffers[index + 1..] {
+                assert_ne!(thread, other_thread, "a worker used two buffers");
+                assert_ne!(pointer, other_pointer, "two workers shared a buffer");
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_render_leaves_the_framebuffer_usable() {
+        let (grid, mut framebuffer) = setup(64, 36, 8, 8);
+        let result = render_tiles_parallel(grid, 4, &mut framebuffer, |_, _| {
+            Err(RenderError::TextureNotFound)
+        });
+        assert_eq!(result, Err(RenderError::TextureNotFound));
+
+        // The lock lives only inside one render, so the next render starts from a clean state.
+        render_tiles_parallel(grid, 4, &mut framebuffer, |tile, pixels| {
+            fill_with_coordinates(tile, pixels);
+            Ok(())
+        })
+        .unwrap();
+        assert_holds_coordinates(&framebuffer);
+    }
+
+    #[test]
     #[should_panic]
     fn a_worker_panic_propagates_to_the_caller() {
         let (grid, mut framebuffer) = setup(64, 36, 8, 8);
@@ -489,5 +521,61 @@ mod tests {
             fill_with_coordinates(tile, pixels);
             Ok(())
         });
+    }
+
+    #[test]
+    fn a_worker_panic_never_yields_a_result_and_keeps_its_message() {
+        for workers in [2, 4, 16] {
+            let (grid, mut framebuffer) = setup(64, 36, 8, 8);
+            let panicking = grid.tile(3).unwrap();
+
+            let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+                render_tiles_parallel(grid, workers, &mut framebuffer, |tile, pixels| {
+                    assert_ne!(tile, panicking, "injected worker panic");
+                    fill_with_coordinates(tile, pixels);
+                    Ok(())
+                })
+            }));
+
+            let payload = outcome.expect_err("a worker panic must not return a result");
+            let message = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&str>().copied())
+                .unwrap();
+            assert!(message.contains("injected worker panic"), "{message}");
+        }
+    }
+
+    #[test]
+    fn a_panic_in_every_tile_terminates_without_deadlock() {
+        for workers in WORKER_COUNTS {
+            let (grid, mut framebuffer) = setup(37, 21, 4, 4);
+
+            let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+                render_tiles_parallel(grid, workers, &mut framebuffer, |_, _| {
+                    panic!("injected worker panic")
+                })
+            }));
+
+            assert!(outcome.is_err(), "{workers} workers");
+        }
+    }
+
+    #[test]
+    fn a_tile_outside_the_framebuffer_panics_instead_of_returning_ok() {
+        // The grid describes a larger frame than the framebuffer, which breaks the partition
+        // contract; the rejected write must surface rather than leave a silently incomplete frame.
+        let grid = TileGrid::try_new(64, 36, 8, 8).unwrap();
+        let mut framebuffer = Framebuffer::try_new(32, 18).unwrap();
+
+        let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+            render_tiles_parallel(grid, 4, &mut framebuffer, |tile, pixels| {
+                fill_with_coordinates(tile, pixels);
+                Ok(())
+            })
+        }));
+
+        assert!(outcome.is_err());
     }
 }

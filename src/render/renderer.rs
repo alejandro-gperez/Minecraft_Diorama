@@ -150,7 +150,8 @@ impl Renderer {
     /// Tiles only organize the work: each pixel keeps its global framebuffer coordinates and is
     /// traced independently, so the image is identical for every tile size, worker count, and
     /// completion order. The sequential path writes straight into `framebuffer`; the parallel
-    /// path traces into worker-owned tile buffers that this thread copies into place.
+    /// path traces into one worker-owned tile buffer per worker, which each worker copies into
+    /// the framebuffer under a short lock.
     pub(crate) fn render_with_configuration(
         camera: &OrbitalCamera,
         scene: &Scene,

@@ -67,23 +67,37 @@ player entity or gameplay system.
   unchanged within noise (~5.4 ms default, ~5.4 ms diagnostic at 320×180).
 - Mission 26 dynamic CPU multithreading: complete. `src/render/parallel.rs`: per render,
   `std::thread::scope` spawns workers that claim tile indices with
-  `AtomicUsize::fetch_add(1, Relaxed)` (assignment only, never publication). The calling thread
-  owns the framebuffer and is its only writer: each worker owns two reusable tile-sized buffers,
-  traces into one lock-free, and moves it over an `mpsc` channel; the owner copies it with
-  `Framebuffer::write_tile` and returns it on that worker's channel. No `unsafe`, no pool.
+  `AtomicUsize::fetch_add(1, Relaxed)` (assignment only, never publication). Mission 26 sent
+  finished tile buffers to the calling thread over `mpsc` channels; Mission 27B replaced that (see
+  below). No `unsafe`, no pool.
   `Renderer::render` = `available_parallelism()` workers (fallback 1);
   `render_with_worker_count` for tests/benchmarks; zero is `RenderError::InvalidWorkerCount`;
   bounded by tile count and `MAX_WORKERS = 64`; one effective worker runs the Mission 25 sequential
   loop on the calling thread. A failure sets a stop flag; the lowest-index failure is returned
-  (equals the sequential error); worker panics propagate through the scope. Output is
+  (equals the sequential error); worker panics propagate to the caller. Output is
   byte-identical to the sequential renderer for every worker count, tile size, and completion
   order; both app PPMs are byte-identical to Mission 25.
 - Mission 26 measurements (M3 Pro, 11 CPUs = 5P + 6E, 320×180, release, medians): default
   5.08 → 0.89 ms automatic (5.7×), voxel diagnostic 5.13 → 0.91 ms, close glass 31.7 → 4.6 ms
   (6.9×); 4 workers ~3.0–3.4×. Two workers scale anomalously (~1.6×), probably efficiency-core
-  placement (unverified). One buffer per worker was ~25% slower at 11 workers. The 1-worker path
-  matches the Mission 25 binary within noise. 16×16 tiles not yet re-tuned for parallelism.
-- Current suite: 522 passing tests. The showcase PPM is byte-identical to the Mission 21 render.
+  placement (unverified). The 1-worker path matches the Mission 25 binary within noise. 16×16
+  tiles not yet re-tuned for parallelism.
+- Mission 27B simplified parallel tile integration: complete. `render_tiles_parallel` keeps the
+  scoped threads and `AtomicUsize` claiming, but the one framebuffer now sits behind a
+  `std::sync::Mutex` (borrowed through the scope, no `Arc`). Each worker owns exactly one
+  tile-sized buffer (3 KiB; 33 KiB at 11 workers, 192 KiB at `MAX_WORKERS`), traces without any
+  lock, and holds the lock only for `Framebuffer::write_tile`. No channels, no buffer return, no
+  `BUFFERS_PER_WORKER`. Workers return `Option<(tile_index, RenderError)>`; after the join the
+  minimum tile index wins (same error as sequential). Panics are re-raised with `resume_unwind`
+  after the join; a poisoned lock panics, never recovers. The sequential 1-worker path and the
+  worker-count rules are untouched; both app PPMs are byte-identical to Mission 26.
+- Mission 27B measurements (same M3 Pro, 320×180, release, medians of 12 interleaved rounds
+  against a Mission 26 binary): 2 and 4 workers 13–15% faster on default, voxel diagnostic, and a
+  voxel-island proxy (e.g. default 3.11 → 2.67 ms and 1.64 → 1.40 ms), 8 workers 5–8% faster,
+  close glass 2–5% faster at 2–4 workers; at the automatic 11 workers the change is within noise
+  (default 0.92 → 0.90 ms, close glass 4.56 → 4.71 ms, which matches a +5.5% code-layout shift of
+  the unchanged 1-worker path). No speedup is claimed at the automatic count.
+- Current suite: 529 passing tests. The showcase PPM is byte-identical to the Mission 21 render.
 - Development resolution: 320×180, presented at 960×540.
 - Pre-Phase-4 baseline (local, single-threaded, brute-force AABB traversal): default view about
   4.9 ms, close cobblestone about 10.7 ms, close lava about 18 ms, close glass about 30 ms. These
@@ -93,7 +107,7 @@ player entity or gameplay system.
   showcase through the release app binary: test-binary layout shifted it by ~10% with no code cause.
 - Compiler state: no rustc warnings; clippy reports only the known `clippy::module_inception`
   warnings (plus two pre-existing `assertions_on_constants` warnings in test code).
-- Next work: Mission 27 (profiling and optimization), as specified by the user.
+- Next work: the Phase 4 audit, as specified by the user.
 
 The repository is expected to begin each mission from a clean checkpoint. Verify the actual
 repository state instead of assuming this section is current.
