@@ -57,6 +57,11 @@ const INLAY: RangeInclusive<i32> = -1..=0;
 /// The small lava pool set into the floor's open south-east interior (`x` and `z` in this range),
 /// flush with the floor, clear of both chests, the wall arrows, and the pillars.
 pub const LAVA_POOL: RangeInclusive<i32> = 1..=2;
+/// The lava spill's column: it leaves the central island's south rim along this `x`, well east of
+/// the ruin and the south bridge, on the face that looks toward the default camera.
+const SPILL_X: i32 = 5;
+/// Cells in the spill's falling column, the lip at the rim's top level included.
+const SPILL_LENGTH: i32 = 4;
 /// Corner pillars: `(x, z, blocks above the floor, obsidian cap)`, crumbling toward the
 /// south-east so the open interior faces the default camera.
 const PILLARS: [(i32, i32, i32, bool); 4] = [
@@ -242,6 +247,50 @@ pub struct CentralStructure {
     /// The open interior one level above the floor, inside the walls and pillars: empty, for
     /// future loot.
     pub open_area: IslandBounds,
+    /// The lava spill over the island's south rim.
+    pub lava_spill: LavaSpill,
+}
+
+/// A short lava spill: one source block on the rim's grass and a one-block-wide column hanging
+/// outside the rim from the source's level downward, each cell against the cliff it runs down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LavaSpill {
+    /// The lava block resting on the rim's topmost terrain block.
+    pub source: VoxelPosition,
+    /// The falling column in the empty cells outside the rim, lip first (`max.y` is the source's
+    /// level). Only cells beside terrain are used, so it can be shorter than `SPILL_LENGTH`.
+    pub fall: IslandBounds,
+}
+
+/// Plans the spill: finds the outermost land column along `SPILL_X` walking south from the island's
+/// center line, rests the source on its top block, and hangs the fall in the empty cells beyond
+/// it. Cells that are not empty or have no terrain beside them end the column.
+fn plan_lava_spill(terrain: &Terrain<'_>, plan: &mut Plan) -> Result<LavaSpill, ConstructionError> {
+    let mut edge = terrain.anchor(SPILL_X, 0)?;
+    while let Some(next) = terrain.anchor_if_land(SPILL_X, edge.z + 1) {
+        edge = next;
+    }
+    let grid = terrain.0;
+    let outside = edge.z + 1;
+    plan.put(edge, BlockType::Lava);
+    let mut bottom = edge.y;
+    for y in (edge.y - (SPILL_LENGTH - 1)..=edge.y).rev() {
+        let cell = VoxelPosition::new(edge.x, y, outside);
+        let against_cliff =
+            y == edge.y || grid.is_occupied_world(VoxelPosition::new(edge.x, y, edge.z));
+        if !against_cliff || grid.is_occupied_world(cell) {
+            break;
+        }
+        plan.put(cell, BlockType::Lava);
+        bottom = y;
+    }
+    Ok(LavaSpill {
+        source: edge,
+        fall: IslandBounds {
+            min: VoxelPosition::new(edge.x, bottom, outside),
+            max: VoxelPosition::new(edge.x, edge.y, outside),
+        },
+    })
 }
 
 /// Plans the central ruin on the central island, whose center line is the world origin.
@@ -298,6 +347,7 @@ pub(super) fn plan_central(
         }
     }
 
+    let lava_spill = plan_lava_spill(terrain, plan)?;
     let square = |min: i32, max: i32, y: i32| IslandBounds {
         min: VoxelPosition::new(min, y, min),
         max: VoxelPosition::new(max, y, max),
@@ -306,5 +356,6 @@ pub(super) fn plan_central(
         floor: square(CENTRAL_MIN, CENTRAL_MAX, FLOOR_Y),
         inlay: square(*INLAY.start(), *INLAY.end(), FLOOR_Y),
         open_area: square(CENTRAL_MIN + 1, CENTRAL_MAX - 1, FLOOR_Y + 1),
+        lava_spill,
     })
 }

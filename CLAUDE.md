@@ -16,6 +16,14 @@ player entity or gameplay system.
 
 ## Verified checkpoint
 
+- LAVA SPILL (final polish, one commit after the lava pool): `plan_lava_spill` in
+  `construction/structures.rs` walks south along `SPILL_X = 5` to the central island's outermost
+  land column, puts a lava source on its top block and a one-wide column (`SPILL_LENGTH = 4`) in the
+  empty cells outside the rim, each beside terrain; `CentralStructure.lava_spill: LavaSpill
+  { source, fall }`. Ordinary voxels, existing grid bounds, no new light or material. Seed 1847:
+  source (5, 1, 10), fall y −2..1 at z 11; constructed fingerprint now `0xD150_C0A7_73AA_E81A`; 732 tests; initial
+  view ≈ 10 ms. Tests check seeds 0–255.
+
 - FINAL DELIVERY PASS (supersedes the "next work" notes below): one commit adds a 2×2 lava pool to
   the central ruin (`LAVA_POOL = 1..=2` in `construction/structures.rs`: lava at `FLOOR_Y` on the
   south-east interior floor, cobblestone filling any sunken column below; clear of chests, arrows,

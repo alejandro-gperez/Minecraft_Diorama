@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::{
-    CONSTRUCTION_TOP, ConstructionError, DECK_Y, EGG_Y, EggWarsArena, FLOOR_Y, Frame,
-    OUTER_ISLANDS, Plan, build_eggwars_arena, construct, construction_bounds, plan_construction,
+    CONSTRUCTION_TOP, CentralStructure, ConstructionError, DECK_Y, EGG_Y, EggWarsArena, FLOOR_Y,
+    Frame, OUTER_ISLANDS, Plan, build_eggwars_arena, construct, construction_bounds,
+    plan_construction,
     structures::{BASE_FORWARD, BASE_SIDES, EGG_CELL, GATE_FORWARD, GATE_SIDES, WINDOWS},
     surface_anchor,
 };
@@ -636,6 +637,15 @@ fn bridge_decks_run_level_with_the_grass_and_are_never_buried() {
             if p.y > DECK_Y {
                 continue;
             }
+            // The lava spill hangs below deck level beside the rim; the rest is bridge.
+            let spill = arena.construction.central.lava_spill;
+            if block == BlockType::Lava {
+                assert!(
+                    p == spill.source || spill.fall.contains(p),
+                    "seed {seed}: {p:?}"
+                );
+                continue;
+            }
             // Everything at or below deck level is bridge: cobblestone on a bridge lane.
             assert_eq!(block, BlockType::Cobblestone);
             // Bridges reach onto sunken rim grass, but never in to the central ruin's floor.
@@ -1170,14 +1180,19 @@ fn reference_constructed_arena_fingerprint_is_stable() {
     assert_eq!(fingerprint(&built(1847).grid), REFERENCE_FINGERPRINT);
 }
 
-const REFERENCE_FINGERPRINT: u64 = 0x1E49_D73E_6655_CEBC;
+const REFERENCE_FINGERPRINT: u64 = 0xD150_C0A7_73AA_E81A;
 
 #[test]
 fn different_seeds_keep_the_construction_layout() {
     let reference = built(1847).construction;
     for seed in SEEDS {
         let info = built(seed).construction;
-        assert_eq!(info.central, reference.central, "seed {seed}");
+        // The spill follows each seed's rim; the ruin around it is fixed.
+        let central = CentralStructure {
+            lava_spill: reference.central.lava_spill,
+            ..info.central
+        };
+        assert_eq!(central, reference.central, "seed {seed}");
         for (base, expected) in info.bases.iter().zip(reference.bases) {
             assert_eq!(*base, expected, "seed {seed}: designed bases never move");
         }
@@ -1236,5 +1251,51 @@ fn construction_does_not_depend_on_generation_planning_or_write_order() {
             Plan { blocks }.write(&mut grid);
             assert_eq!(grid, reference.grid, "seed {seed}");
         }
+    }
+}
+
+#[test]
+fn lava_spill_hangs_from_the_central_rim_against_the_cliff() {
+    for seed in 0..256 {
+        let arena = built(seed);
+        let spill = arena.construction.central.lava_spill;
+        let (source, fall) = (spill.source, spill.fall);
+        // Inside the grid, well clear of the ruin (x, z in -4..=3) and the south bridge's lanes.
+        assert!(arena.grid.contains_world(source), "seed {seed}");
+        assert!(arena.grid.contains_world(fall.min), "seed {seed}");
+        assert!(source.z > 4 && !LANES.contains(&source.x), "seed {seed}");
+        // Source on terrain; the column one block outside the rim, lip level with the source.
+        assert_eq!(
+            at(&arena.grid, (source.x, source.y, source.z)),
+            Some(BlockType::Lava)
+        );
+        let below = at(&arena.grid, (source.x, source.y - 1, source.z));
+        assert!(below.is_some_and(|b| b != BlockType::Lava), "seed {seed}");
+        assert_eq!((fall.min.x, fall.max.x), (source.x, source.x));
+        assert_eq!((fall.min.z, fall.max.z), (source.z + 1, source.z + 1));
+        assert_eq!(fall.max.y, source.y);
+        // Short: three to five blocks of lava with the source.
+        let height = fall.max.y - fall.min.y + 1;
+        assert!((3..=4).contains(&height), "seed {seed}: {height}");
+        for y in fall.min.y..=fall.max.y {
+            assert_eq!(
+                at(&arena.grid, (source.x, y, fall.min.z)),
+                Some(BlockType::Lava)
+            );
+            // Each cell runs down terrain (the lip against the source), and nothing sits beyond.
+            let inward = at(&arena.grid, (source.x, y, source.z));
+            assert!(inward.is_some(), "seed {seed}: y {y}");
+            assert!(
+                !arena
+                    .grid
+                    .is_occupied_world(VoxelPosition::new(source.x, y, fall.min.z + 1))
+            );
+        }
+        // The pool and the spill are all the lava there is.
+        assert_eq!(
+            arena.construction.count(BlockType::Lava),
+            4 + 1 + height as usize,
+            "seed {seed}"
+        );
     }
 }

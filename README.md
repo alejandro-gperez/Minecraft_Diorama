@@ -51,7 +51,11 @@ in the central ruin; cobblestone normal mapping; reflective obsidian; glass wind
 refraction and Schlick Fresnel; the procedural sunset-to-night sky; and, in the final pass, a small
 2×2 **emissive lava pool** set into the ruin's floor, lit by one representative warm point light
 (never one light per lava voxel) that visibly warms the surrounding cobblestone. Zoom into the
-ruin (`W` or mouse wheel) to see it clearly.
+ruin (`W` or mouse wheel) to see it clearly. A short **lava spill** also hangs over the central
+island's south rim (a source block on the rim's grass and a one-block-wide, four-block column
+against the cliff, ordinary lava voxels in the one global grid, no extra light), visible from the
+default camera. Its position follows each seed's rim; it is placed only in empty cells beside
+terrain.
 
 **Camera controls.** Arrow keys orbit (horizontal) and change elevation; `W` / `S` or the mouse
 wheel zoom in and out; `Escape` exits. The camera is an external orbital camera around the arena;
@@ -63,18 +67,18 @@ reflection; refraction and Fresnel; emissive lava with a local point light; cobb
 mapping; procedural sunset/night environment; seeded procedural island terrain; voxel grid with 3D
 DDA; deterministic tile-based multithreaded rendering.
 
-**Tests.** 731 passing (`cargo test`). `cargo fmt --check`, `cargo check`, and `cargo build
+**Tests.** 732 passing (`cargo test`). `cargo fmt --check`, `cargo check`, and `cargo build
 --release` are clean.
 
-**Performance (Apple M3 Pro, release, 640×360, seed 1847).** Initial view about 9 ms with the
+**Performance (Apple M3 Pro, release, 640×360, seed 1847).** Initial view about 10 ms with the
 automatic worker count (one per CPU); earlier measurements of the same scene without the lava pool
 were 61 / 16 / 8 ms at 1 / 4 / automatic workers. Interactive views run in roughly 10–35 ms
 depending on the pose. Local observations, not universal benchmarks.
 
 **Known limitations.** Glass and lava cast opaque shadows; no nested-medium tracking (glass
 touching another block shows that block's interior face); props are axis-aligned (no tilted lids
-or angled arrows); the sealed North egg is not instantiated; one lava pool and one lava light
-only (no general lava-region extraction); no camera collision (zoom can enter an island); no
+or angled arrows); the sealed North egg is not instantiated; one lava pool with one lava light, and
+one unlit spill, only (no general lava-region extraction); no camera collision (zoom can enter an island); no
 antialiasing; origin biases assume roughly unit-scale geometry.
 
 **Recording the demonstration video.** Run the command above in release mode, start a screen
@@ -2486,7 +2490,7 @@ diagnostic showcase of five blocks. Each feature also appears intentionally in t
 | Visually complex, visually attractive scene | Delivered: the five-island EggWars aftermath diorama |
 | Visual storytelling | Delivered: bridge damage and egg-defense states, surviving and broken eggs, open chests, arrows, debris, and a lava pool in the central ruin |
 | Final presentation and video | Video instructions in Final Delivery; recording is a manual step |
-| Final performance and visual polish | Delivered (about 9 ms initial view, 640×360) |
+| Final performance and visual polish | Delivered (about 10 ms initial view, 640×360) |
 | Final EggWars aftermath scene | Delivered |
 
 All rows above are used in the final diorama.

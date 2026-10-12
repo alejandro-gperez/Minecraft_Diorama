@@ -32,7 +32,7 @@ mod tests;
 pub use bridges::{BridgeInfo, BridgeLane, BridgeState};
 pub use structures::{
     CentralStructure, DEFENSE_SLOTS, DEFENSE_TEMPLATE, DefenseSlot, DefenseState, EggBase,
-    EggBaseDesign,
+    EggBaseDesign, LavaSpill,
 };
 
 /// The four outer islands, in `IslandId::ALL` order: one bridge and one base each.

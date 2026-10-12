@@ -910,7 +910,7 @@ fn placement_reads_the_arena_without_altering_it() {
     let before = arena.clone();
     let decorations = place_decorations(&arena).unwrap();
     assert_eq!(arena, before);
-    assert_eq!(fingerprint(&arena.grid), 0x1E49_D73E_6655_CEBC);
+    assert_eq!(fingerprint(&arena.grid), 0xD150_C0A7_73AA_E81A);
     // Placing twice gives the same props, and nothing a prop occupies is a block.
     assert_eq!(place_decorations(&arena).unwrap(), decorations);
     assert_eq!(arena.occupied_voxels(), built(1847).occupied_voxels());
