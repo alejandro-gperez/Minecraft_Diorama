@@ -4,6 +4,8 @@ Diorama estático inspirado en Minecraft 1.8, renderizado con un CPU raytracer p
 
 **Autor:** Alejandro Pérez — **Carné:** 24136
 
+[English version](README.en.md)
+
 ## Descripción
 
 Este proyecto renderiza el resultado de una partida de EggWars: cinco islas flotantes generadas
@@ -17,9 +19,7 @@ la CPU; no se usa GPU.
 
 ## Vista previa
 
-<!-- TODO: agregar la captura de pantalla en assets/preview.png y reemplazar este bloque por:
-![Vista previa](assets/preview.png) -->
-*Pendiente: captura de pantalla en `assets/preview.png` (aún no existe).*
+![Vista previa del diorama](assets/preview.png)
 
 ## Tecnologías utilizadas
 
@@ -135,7 +135,7 @@ Son aproximaciones de tiempo real razonable, no una simulación físicamente exa
 | Cámara libre (adicional) | `FreeCamera` espectador | Implementado |
 | Renderizado paralelo y optimización | Tiles + hilos, `VoxelGrid` + 3D DDA, agrupación espacial | Implementado |
 | Escena compleja y atractiva | Diorama EggWars de cinco islas | Implementado |
-| Video de demostración | Ver sección siguiente | Pendiente (URL por proporcionar) |
+| Video de demostración | [YouTube](https://youtu.be/FagbaJLKZds) | Entregado |
 
 ## Ejecución
 
@@ -202,9 +202,9 @@ Los fotogramas sin cambios de cámara no se vuelven a renderizar. Más detalle h
 
 ## Video de demostración
 
-[![Video de demostración](https://img.youtube.com/vi/VIDEO_ID/maxresdefault.jpg)](VIDEO_URL)
+[![Video de demostración](https://img.youtube.com/vi/FagbaJLKZds/maxresdefault.jpg)](https://youtu.be/FagbaJLKZds)
 
-*Pendiente: reemplazar `VIDEO_URL` y `VIDEO_ID` por el enlace real de YouTube.*
+Enlace: <https://youtu.be/FagbaJLKZds>
 
 El video muestra la vista inicial con las cinco islas, la órbita y el zoom, un acercamiento a la
 ruina central (lava, cofres, flechas, vidrio y obsidiana), los puentes y defensas dañados, el cambio
