@@ -111,6 +111,8 @@ pub enum ArenaError {
     Overlap { first: IslandId, second: IslandId },
     /// The global grid enclosing the arena could not be created.
     Grid(VoxelGridError),
+    /// Requested grid bounds do not contain every island region.
+    GridTooSmall,
 }
 
 impl fmt::Display for ArenaError {
@@ -126,6 +128,7 @@ impl fmt::Display for ArenaError {
                 second.name()
             ),
             Self::Grid(error) => write!(formatter, "arena grid: {error}"),
+            Self::GridTooSmall => formatter.write_str("arena grid does not contain every island"),
         }
     }
 }
@@ -311,9 +314,29 @@ pub struct Arena {
 /// The layout was validated when it was built, so the only failure left is creating the grid,
 /// which happens before any island is written: an error never yields a partial arena.
 pub fn generate_arena(layout: &ArenaLayout, global_seed: u64) -> Result<Arena, ArenaError> {
-    let (width, height, depth) = layout.grid_dimensions();
+    generate_arena_in(layout, global_seed, layout.bounds)
+}
+
+/// Like `generate_arena`, but into a grid covering `bounds`, which must contain the layout's
+/// bounds: the extra cells are empty room for construction. Islands never depend on the grid
+/// around them, so the terrain is cell-for-cell the terrain `generate_arena` produces.
+pub fn generate_arena_in(
+    layout: &ArenaLayout,
+    global_seed: u64,
+    bounds: IslandBounds,
+) -> Result<Arena, ArenaError> {
+    let required = layout.bounds;
+    if !bounds.contains(required.min) || !bounds.contains(required.max) {
+        return Err(ArenaError::GridTooSmall);
+    }
+    let extent = |min: i32, max: i32| (i64::from(max) - i64::from(min) + 1) as usize;
+    let (width, height, depth) = (
+        extent(bounds.min.x, bounds.max.x),
+        extent(bounds.min.y, bounds.max.y),
+        extent(bounds.min.z, bounds.max.z),
+    );
     let mut grid =
-        VoxelGrid::try_new(layout.bounds.min, width, height, depth).map_err(ArenaError::Grid)?;
+        VoxelGrid::try_new(bounds.min, width, height, depth).map_err(ArenaError::Grid)?;
 
     let islands = IslandId::ALL.map(|id| {
         let config = layout.config(id);
@@ -335,7 +358,7 @@ pub fn generate_arena(layout: &ArenaLayout, global_seed: u64) -> Result<Arena, A
             global_seed,
             separation: layout.separation,
             islands,
-            grid_origin: layout.bounds.min,
+            grid_origin: bounds.min,
             grid_dimensions: (width, height, depth),
             occupied_voxels,
         },

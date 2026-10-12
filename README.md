@@ -15,9 +15,12 @@ derived normal map for cobblestone. Phase 4 (performance architecture) is implem
 passed its final technical audit: a dense voxel grid, 3D DDA traversal, hybrid voxel + AABB scene
 queries, and a deterministic tile renderer whose tiles scoped CPU worker threads claim dynamically.
 Phase 5 (the EggWars world) is in progress: Mission 28 added a deterministic, seeded procedural
-floating-island generator, and Mission 29 uses it to build the five-island EggWars arena (a 24×24
-central island and four 16×16 outer islands) in one global voxel grid from one seed. Bridges,
-structures, storytelling props, and the final scene do not exist yet.
+floating-island generator, Mission 29 uses it to build the five-island EggWars arena (a 24×24
+central island and four 16×16 outer islands) in one global voxel grid from one seed, and Mission 30
+builds the arena's architecture on that terrain: four bridges in their narrative states (complete,
+damaged, severed, abandoned), a small base with a five-block obsidian egg defense on each outer
+island, and a ruined central structure with glass windows. Eggs, chests, arrows, lava, and the
+final lighting and composition do not exist yet.
 
 ## Current Status
 
@@ -27,7 +30,7 @@ structures, storytelling props, and the final scene do not exist yet.
 | 2 — Materials, Textures, and Lighting | Complete and audited |
 | 3 — Raytracing Effects | Complete and audited |
 | 4 — Performance Architecture | Complete and audited (see Phase 4 Audit) |
-| 5 — EggWars World | In progress: Missions 28 (procedural floating island) and 29 (five-island arena) complete |
+| 5 — EggWars World | In progress: Missions 28 (procedural floating island), 29 (five-island arena), and 30 (bridges, structures, and egg defenses) complete |
 
 The rendering pipeline is: every radiance and shadow ray queries one hybrid scene (3D DDA over a
 voxel grid plus a linear scan of arbitrary AABB objects), tiles of the framebuffer are claimed
@@ -38,7 +41,8 @@ recursive Snell refraction rays whose split with reflection follows Schlick's Fr
 approximation. Lava is self-luminous and lights nearby surfaces through a finite local point light.
 Cobblestone is normal mapped from a map derived offline from its own texture. The scenes that exist
 are the default five-block showcase, the small voxel diagnostic scene, one seeded procedural
-floating island, and the seeded five-island EggWars arena (terrain only).
+floating island, and the seeded five-island EggWars arena with its bridges, bases, egg defenses, and
+central ruin (no eggs, props, or lava yet).
 
 The current implementation includes:
 
@@ -90,6 +94,11 @@ The current implementation includes:
 - the five-island EggWars arena: a 24×24 central island and four 16×16 outer islands on the
   cardinal axes, each with its own seed derived from one global seed, generated into one global
   voxel grid and selected with `--eggwars [--seed <u64>]`.
+- deterministic EggWars construction on that terrain: four terrain-attached cobblestone bridges
+  (complete, damaged, severed, incomplete), outer bases whose five-position obsidian egg defenses
+  hold 5, 4, 3, and 2 blocks, a ruined central structure with an obsidian floor inlay and two glass
+  windows, and metadata (future egg cells, defense slots, bridge ends, central open area) for the
+  next mission.
 
 ## Architecture
 
@@ -1173,8 +1182,9 @@ rejected; 21 is the closest valid layout.
 
 The global grid is exactly the union of the five regions: origin `(-40, -14, -40)`, 80 × 16 × 80 =
 102,400 cells, 100 KiB at one byte per voxel. No margin is added: future bridges run at the surface
-level between islands, inside this box. Structures that rise above `y = 1` will need the grid's top
-raised when they are built. Cells outside the five regions, including every gap corridor, stay
+level between islands, inside this box. Structures that rise above `y = 1` need the grid's top
+raised; Mission 30 does so (see EggWars Construction below), and `generate_arena` itself still
+returns this exact grid. Cells outside the five regions, including every gap corridor, stay
 `Voxel::Empty`; each island is exactly one face-connected landmass that never touches another.
 
 ### Scene, CLI, and camera
@@ -1212,6 +1222,162 @@ overlapping terrain, no detached fragments, and a readable sunset/night sky. Acr
 arena holds 7,169–8,771 blocks (central island 2,394–3,558, outer islands 985–1,502) and 104–204
 ores, with mean counts per arena of 87.3 coal, 44.4 iron, 18.6 gold, and 6.0 diamond.
 
+## EggWars Construction (Phase 5, Mission 30)
+
+`src/world/construction.rs` (with `construction/bridges.rs` and `construction/structures.rs`)
+turns the five-island terrain into a recognizable EggWars map. Construction is designed, not
+generated: one fixed composition, written once into the same global `VoxelGrid` as ordinary voxels
+(cobblestone, obsidian, and glass only). There is no AABB per block, no second grid, no template
+framework, and nothing in the renderer, scene queries, DDA, or lighting knows about it.
+
+### Pipeline
+
+```text
+global seed
+  -> generate_arena_in(eggwars layout, seed, construction_bounds)   five islands (Mission 28/29)
+  -> read anchors from the terrain-only grid
+  -> plan bridges, outer bases and egg defenses, central ruin        (block list + metadata)
+  -> validate the whole plan: inside the grid, empty cell, planned once
+  -> write it                                                         one global VoxelGrid
+  -> existing CPU renderer
+```
+
+`build_eggwars_arena(seed) -> Result<EggWarsArena, ConstructionError>` runs it once during scene
+construction; camera movement never rebuilds anything. Planning reads only the terrain, so no
+element depends on another or on planning or writing order, and validation precedes the first
+write: construction never replaces terrain, never clips, and an error (`OutsideGrid`, `Occupied`,
+`MissingTerrain`, or the arena's own error) leaves the grid untouched. Generation and construction
+stay separate: the island generator and `generate_arena` are unchanged, and `generate_arena_in`
+only generates the same islands into a larger grid.
+
+### Grid expansion
+
+The design's height requirements are: bridge decks at the grass level `y = 0` (one scaffold block
+at `y = −1`); outer base floors at `y = 1`, eggs and defenses at `y = 2`, gate pillars up to `y = 3`;
+the central floor at `y = 1`, walls up to `y = 4`, and the tallest pillar's obsidian cap at
+`y = 5`. `CONSTRUCTION_TOP = 5`, and `construction_bounds` raises only the layout's top to it:
+origin `(−40, −14, −40)`, 80 × 20 × 80 = 128,000 cells, 125 KiB at one byte per voxel (Mission 29:
+80 × 16 × 80, 100 KiB). Bridges run inside the existing horizontal extent, so X and Z do not grow,
+and the top layer is exactly the tallest block. Terrain is cell-for-cell the Mission 29 terrain:
+islands, derived seeds, stats, and the pinned arena fingerprint are unchanged.
+
+### Anchors
+
+`surface_anchor(grid, x, z)` is the first free cell above the topmost block of a column, read from
+the terrain-only grid, so it rests on real grass at that column's height (`y` 0, 1, or 2 for grass
+at −1, 0, or +1), never inside terrain; it is `None` for empty columns and outside the grid. Every
+structure column fills from its anchor up to its design level: a floor fills a sunken column up to
+`y = 1` and leaves a raised grass block in place as part of the floor; pillars and walls start on
+whichever is there. All structure columns lie inside the smallest possible silhouette
+(`SILHOUETTE_MIN_RADIUS` of the half extent), so every one has ground for every seed. There is no
+pathfinding.
+
+Outer-island designs are written once in a local `(side, forward)` frame, `forward` pointing at
+the center, and rotated a quarter turn at a time about the island's center point (a cell corner),
+so the same shape and handedness appear on all four islands.
+
+### Bridges
+
+Each bridge is a two-block-wide cobblestone deck at `y = 0` on the lanes straddling the island's
+center line (`x ∈ {−1, 0}` or `z ∈ {−1, 0}`), pointing straight at the center. Its ends come from
+the terrain: starting in the void between the two islands' regions, each lane walks toward each
+island across open void and across rim grass that sank below the deck (the deck rests on it), and
+stops beside the first column whose ground reaches the deck. Each end block therefore touches
+terrain face to face, so attached ends never have a gap and no deck block is buried.
+
+| Bridge | State | Design |
+| --- | --- | --- |
+| North | `Complete` | Both lanes continuous from North's rim to the center's rim; one scaffold block hangs under the deck. |
+| East | `Damaged` | Three cells missing from both lanes (the seed shifts the gap one cell either way); one lane's break is one cell longer, so the edge is ragged; both stubs stay attached. |
+| South | `Severed` | Six cells missing from both lanes, plus one ragged cell; two separate segments, one attached to each island. |
+| West | `Incomplete` | Built from West's rim six cells into the 12-cell void (one lane five), then nothing: no segment grows from the center. |
+
+Damage is defined on the 12-cell void that separates the regions for every seed, so terrain can move
+a deck's ends but never close a gap, reconnect the severed bridge, or complete the abandoned one.
+Only North connects two landmasses.
+
+### Outer bases and egg defenses
+
+Each outer island has a 5 × 5 cobblestone floor around its future egg, two gate pillars flanking the
+bridge's approach, and an obsidian defense. The egg cell is on bridge lane 0, two cells behind the
+island's center, inside the always-flat middle, at `y = 2` on the floor. The defense template is
+five positions around it, as `(side, forward)` offsets from the egg:
+
+```text
+   toward the center / bridge (attack)
+        [-1,+1] [0,+1] [+1,+1]      front row
+        [-1, 0]  EGG   [+1, 0]      side blocks
+                 open               back stays open: the egg is visible and reachable
+```
+
+Missing blocks are never random: blocks are lost front first, from the bridge's lanes outward, so
+every breach opens the egg toward the attack direction (the center).
+
+| Island | Defense | Obsidian | Missing | Gates | Floor |
+| --- | --- | --- | --- | --- | --- |
+| North | `Intact` | 5 / 5 | none | 3 and 3 high | whole |
+| West | `Damaged` | 4 / 5 | front | 3 and 2 | whole |
+| East | `Breached` | 3 / 5 | front and front-left (in line with the bridge lanes) | 2 and 1 | one front corner gone |
+| South | `Destroyed` | 2 / 5 | the whole front row | 1 and 0 (one stump) | front-left corner cratered |
+
+Defense blocks stand on the floor above the grass, with their tops open to the sky, so obsidian's
+reflection stays visible; obsidian reflectivity is unchanged (0.35). Eggs are not placed: their
+cells are empty and recorded for Mission 31.
+
+### Central ruin and glass
+
+On the central island an 8 × 8 cobblestone floor (`x, z ∈ −4..3`) at `y = 1` holds a 2 × 2 obsidian
+inlay at its middle, four corner pillars crumbling toward the south-east (4 high with an obsidian
+cap, 3, 2, and 1), a partial north wall (3, 3, 3, 3, 2, 1 high), and a lower west wall (2, 2, 1, 1).
+The south and east sides are open, so the default camera looks into the open 6 × 6 interior where
+loot will be contested. Two glass panes sit in the north wall at `(−2, 3, −4)` and `(0, 3, −4)`,
+one cell apart, with open air in front and behind and cobblestone on every other side; they touch no
+terrain and no other glass. A refracted ray leaving a pane sideways still meets the known exit-bias
+limitation, but the neighbor is uniformly textured cobblestone, so it is not visible in practice.
+
+### Metadata
+
+```rust
+pub struct EggWarsArena { pub grid: VoxelGrid, pub terrain: ArenaInfo, pub construction: ConstructionInfo }
+pub struct ConstructionInfo {
+    pub bridges: [BridgeInfo; 4],        // OUTER_ISLANDS order: island, state, toward_center,
+                                         // lanes (outer_end, center_end), missing_span
+    pub bases: [EggBase; 4],             // island, defense_state, egg, attack_direction,
+                                         // defense: [DefenseSlot { position, intact }; 5]
+    pub central: CentralStructure,       // floor, inlay, open_area (empty cells for loot)
+    pub surface_levels: [i32; 5],        // measured grass level at each island's center
+    // + per-block-type counts: count(BlockType), total()
+}
+```
+
+### Determinism and seeds
+
+The same seed builds the identical arena (a test pins the constructed fingerprint for seed 1847).
+The seed reaches construction only through terrain heights and silhouettes and three stateless
+hashes on their own domains (`con-gaps`, `con-ragd`, `con-scaf`): the East gap's one-cell shift,
+which lane is ragged, and where the North scaffold hangs. Different seeds keep every bridge state,
+gap length, defense position and state, egg cell, and the central ruin; tests check the narrative
+over 52 seeds.
+
+### Scene, CLI, and camera
+
+`--eggwars [--seed <u64>]` now renders the constructed arena; no CLI mode was added, and the other
+modes' renders are byte-identical to Mission 29. Startup prints the arena line (total, terrain, and
+ore blocks, grid, time), a construction line (block counts by type), the per-island lines, and one
+line per outer island with its bridge and defense states. The default camera (yaw 0.7, pitch 0.35,
+radius 68) still frames all five islands and every structure without clipping, so it is unchanged.
+
+### Visual results
+
+Seeds 42, 1847, 2026, and 0, from the initial view, above, low against the sunset, near the central
+ruin, through the glass, and close to each defense: the five islands stay distinct with the central
+island dominant; the bridges read as two-wide player bridges pointing at the center, with the East
+gap, the long South break, and the abandoned West stub obvious from above and from the initial
+view; the four defenses read as intact, missing one, breached, and destroyed; the panes refract the
+sky and the ruin's interior without artifacts; nothing floats, nothing is buried, and the
+structures are modest next to the grass. Across seeds 0–255 construction places 269–310 blocks
+(always 19 obsidian and 2 glass); an arena holds 7,459–9,055 blocks in total.
+
 ## Known Limitations
 
 These are deliberate scope boundaries of the current diagnostic renderer, not hidden defects:
@@ -1242,15 +1408,19 @@ These are deliberate scope boundaries of the current diagnostic renderer, not hi
   contact.
 - Materials, light colors, and the sun direction are diagnostic values. Final artistic tuning
   belongs to the EggWars scene.
-- The final EggWars scene does not exist yet: the five-island arena is terrain only, with no
-  bridges, structures, lava, or storytelling props, and no lighting or material tuning for it.
+- The final EggWars scene does not exist yet: the arena has terrain, bridges, bases, defenses, and
+  the central ruin, but no eggs, chests, arrows, lava, or other props, and no lighting or material
+  tuning for it.
+- Construction is designed for `ArenaLayout::eggwars()` only; another separation would need its
+  bridge damage repositioned.
 - The island generator writes only the island's blocks and never clears other cells in its region;
   `ArenaLayout` validates that arena islands keep apart, while direct `generate_island` callers are
   responsible for overlap. Islands contain no glass or lava, and ores appear only on side-exposed
   rock (none hidden inside, none on downward-only faces).
-- The arena grid is tight around the islands: anything later built above `y = 1` needs the grid's
-  top raised. Most of the arena's single-threaded render cost is DDA stepping through empty cells
-  (see Performance); it is acceptable at the current resolution.
+- The constructed arena's grid ends at `y = 5`, the tallest structure; anything later built higher
+  needs `CONSTRUCTION_TOP` raised. Most of the arena's single-threaded render cost is DDA stepping
+  through empty cells, and the taller grid made it larger (see Performance); it is acceptable at
+  the current resolution.
 - The orbital camera has no collision: zooming in far enough places it inside an island.
 - Changing generator constants changes what every seed produces; seeds are reproducible for a fixed
   code version only.
@@ -1550,6 +1720,41 @@ sparse grid, chunking, or empty-space skipping was added. If a later, larger gri
 headroom for structures) is measured to be too slow, empty-space skipping is the first candidate.
 These are local development observations, not universal benchmarks.
 
+### Constructed arena (Mission 30)
+
+Same machine and method as Mission 29 (release, 320×180; generation median of 100 runs including
+grid allocation; renders medians of 9 or 25 runs of the initial view):
+
+| Seed | Blocks (construction) | Generate + construct | 1 worker | 4 workers | Automatic |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1847 | 8,461 (293) | 0.23 ms (first run, cold) | 12.27 ms | 3.47 ms | 1.74 ms |
+| 42 | 8,482 (298) | 0.106 ms | 11.89 ms | 3.44 ms | 1.73 ms |
+| 2026 | 8,372 (291) | 0.107 ms | 12.00 ms | 3.46 ms | 1.75 ms |
+| 0 | 8,044 (288) | 0.103 ms | 12.10 ms | 3.49 ms | 1.75 ms |
+| 7 | 8,728 (290) | 0.111 ms | 12.10 ms | 3.50 ms | 1.77 ms |
+| `u64::MAX` | 8,243 (297) | 0.113 ms | 12.09 ms | 3.46 ms | 1.74 ms |
+
+Planning, validating, and writing the construction alone takes about 5 µs; generation time is
+unchanged within noise. Seed 1847, in several views, comparing the Mission 29 terrain in its exact
+80 × 16 × 80 grid, the same terrain in the taller 80 × 20 × 80 grid, and the constructed arena
+(one / four / automatic workers, ms):
+
+| View | Mission 29 terrain | Terrain, taller grid | Constructed |
+| --- | ---: | ---: | ---: |
+| Initial (radius 68) | 8.82 / 2.57 / 1.40 | 12.27 / 3.36 / 1.72 | 11.90 / 3.45 / 1.74 |
+| Central ruin (radius 22) | 10.94 / 3.12 / 1.64 | 16.45 / 4.73 / 2.38 | 17.78 / 5.12 / 2.57 |
+| Glass close-up (radius 7) | 9.14 / 2.56 / 1.41 | 16.55 / 4.40 / 2.29 | 22.52 / 5.97 / 3.13 |
+| East base (radius 24) | 11.78 / 3.37 / 1.75 | 17.09 / 4.59 / 2.30 | 16.49 / 4.71 / 2.39 |
+| Top down (pitch 1.45) | 6.01 / 1.73 / 0.96 | 7.85 / 2.15 / 1.15 | 7.94 / 2.17 / 1.14 |
+| Low, against the sunset | 10.25 / 2.95 / 1.55 | 12.73 / 3.62 / 1.87 | 12.84 / 3.61 / 1.87 |
+
+The structures themselves cost little: nearly all of the increase comes from the four extra empty
+layers, which rays from an elevated camera now cross cell by cell. The glass close-up adds the
+recursive refraction and Fresnel reflection rays of the two panes. At the automatic worker count
+every measured view renders in 1.1–3.2 ms, so no new acceleration structure was added;
+empty-space skipping remains the first candidate if a later scene measures too slow. These are
+local development observations, not universal benchmarks.
+
 ## Testing
 
 The Phase 4 suite contained 529 tests covering vector arithmetic and normalization, ray invariants,
@@ -1623,6 +1828,31 @@ scene queries, voxel traversal, lighting, and environment contain no arena-speci
 `--eggwars` CLI (default, explicit, zero, and maximum seeds, missing and malformed seeds, repeats,
 and conflicting modes).
 
+Mission 30 adds 38 tests, for 651 passing; the 613 earlier tests are unchanged. Grid and terrain:
+the construction grid raises only the top to the tallest block (80 × 20 × 80, exact horizontal
+extent), terrain in the taller grid is cell-for-cell the Mission 29 arena (same island stats and
+the pinned fingerprint), construction never replaces terrain and adds only cobblestone, obsidian,
+and glass, bounds that clip an island are rejected, and construction refuses to clip, overwrite, or
+build twice without touching the grid; negative coordinates. Anchors: topmost-block anchors for
+every column, never buried, measured surface levels, every designed column inside the smallest
+silhouette, and empty future egg cells on the floor, open above and behind. Bridges, by voxel
+occupancy: the narrative states and directions, a continuous North route connected to the center,
+East's single three-cell gap with stubs attached to both islands, South's single six-cell gap with
+two attached segments, West stopping short with a bare center end, ends touching terrain face to
+face, level unburied decks, only North connecting two landmasses and nothing floating, and all four
+states across 52 seeds. Defenses: 5/4/3/2 obsidian blocks in the grid, one template turned toward
+the center on every island, missing blocks only in the front row and opening the egg toward the
+attack, and exposed obsidian. Structures: base floors and gate heights, the central floor and
+inlay, open interior, tallest pillar and partial walls, and exactly two exposed glass panes with
+air behind and no terrain or glass contact. Reproducibility: identical arenas for equal seeds, a
+pinned constructed fingerprint, a seed-independent layout, and independence from island generation,
+planning, and write order. Rendering: the scene attaches one taller grid and no objects or lights,
+DDA hits on every bridge end with normal-mapped cobblestone and misses through every gap, canonical
+reflective obsidian on intact slots and the floor under broken ones, canonical refractive glass
+whose panes change the image, construction shadows with open sky under the gaps, the initial camera
+framing the constructed arena without clipping, an assorted-viewpoint sweep with an unchanged grid,
+and tiling equivalence.
+
 The Phase 4 audit changed no runtime behavior and added no tests; the suite was unchanged at 529
 passing tests.
 
@@ -1647,11 +1877,13 @@ runs `cargo fmt --check`, `cargo test`, `cargo check`, `cargo build --release`, 
 ## Planned Features
 
 The following are not yet implemented. Phase 5 (EggWars world) is in progress; Mission 28 added
-the procedural floating-island generator and Mission 29 the five-island arena:
+the procedural floating-island generator, Mission 29 the five-island arena, and Mission 30 its
+bridges, structures, and egg defenses:
 
 - transparent or colored shadows through glass, absorption, and nested or merged glass media;
 - procedural lava-region extraction into representative point lights;
-- bridges, structures, defenses, chests, arrows, and the EggWars battle-aftermath scene;
+- eggs, chests, arrows, and the other battle-aftermath details (Mission 31), lava, and the final
+  EggWars scene;
 - visual storytelling, the final presentation and video, and final performance and visual polish;
 - grouped acceleration for decorative AABB objects, only if the final scene's measured object count
   warrants it.
@@ -1674,10 +1906,10 @@ intentionally in the final EggWars diorama, which does not exist yet.
 | Normal mapping | Implemented: derived cobblestone normal map lighting with a per-face tangent basis |
 | Sunset/night skybox/environment | Procedural CPU environment implemented; shared miss path for every traced ray |
 | Procedural floating-island terrain (16×16, seeded) | Implemented (Missions 28–29): seeded radial-mask islands with layered terrain and visible ores; the EggWars arena has a 24×24 central island and four 16×16 outer islands from one global seed |
-| Voxel grid and 3D DDA | Implemented and audited; renders the voxel diagnostic, the procedural island, and the five-island arena in one global grid |
+| Voxel grid and 3D DDA | Implemented and audited; renders the voxel diagnostic, the procedural island, and the constructed five-island arena in one global grid |
 | Tile-based CPU parallel rendering | Implemented and audited with scoped standard-library threads and dynamic tile claiming (about 5.8× on 11 CPUs for the default view, 6.0× for close glass); byte-identical to the sequential renderer |
 | Visually complex, visually attractive scene | Pending: the final EggWars scene does not exist |
-| Visual storytelling | Pending (Phase 5–6) |
+| Visual storytelling | In progress: bridge damage and egg-defense states (Mission 30); props pending |
 | Final presentation and video | Pending (Phase 6) |
 | Final performance and visual polish | Pending (Phase 6) |
 | Final EggWars aftermath scene | Planned (Phase 5–6) |

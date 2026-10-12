@@ -20,8 +20,34 @@ player entity or gameplay system.
 - Phase 2 — Materials, Textures, and Lighting: complete.
 - Phase 3 — Raytracing Effects: complete (missions 14–20).
 - Phase 4 — Performance Architecture: complete and audited (missions 21–27B).
-- Phase 5 — Procedural EggWars Diorama: in progress (`AGENTS.md` names it current). Missions 28
-  and 29 complete; Mission 30 (bridges and structures) is next and needs its own prompt.
+- Phase 5 — Procedural EggWars Diorama: in progress (`AGENTS.md` names it current). Missions 28,
+  29, and 30 complete; Mission 31 (battle aftermath details) is next and needs its own prompt.
+- Mission 30 construction: complete. `src/world/construction.rs` (+ `bridges.rs`, `structures.rs`,
+  `tests.rs`). `build_eggwars_arena(seed) -> Result<EggWarsArena { grid, terrain: ArenaInfo,
+  construction: ConstructionInfo }, ConstructionError>`: `generate_arena_in(layout, seed,
+  construction_bounds)` (same terrain in a taller grid; `generate_arena` unchanged, exact grid),
+  then plan from terrain-only anchors (`surface_anchor` = first free cell above a column's top),
+  validate all (inside grid, empty, once; error leaves grid untouched), write. Designed for
+  `ArenaLayout::eggwars()` only. Outer designs use a rotated `(side, forward)` `Frame` (forward =
+  toward center, rotation about the island's corner center). `CONSTRUCTION_TOP = 5` → grid
+  origin (-40,-14,-40), 80×20×80, 125 KiB. Levels: `DECK_Y = 0`, `FLOOR_Y = 1`, `EGG_Y = 2`.
+  Bridges: 2-wide cobblestone lanes side −1/0, ends found by walking from the 12-cell void (f 8..19)
+  over void and sunken rim to the first column reaching the deck (face contact). North `Complete`
+  (+1 scaffold block at y −1), East `Damaged` (3-cell gap in both lanes, seed shift ±1, ragged
+  lane), South `Severed` (6-cell gap + ragged cell), West `Incomplete` (lanes reach f 13/12). Bases:
+  5×5 floor (side −2..2, forward −4..0), egg at (0, −2) y 2 (empty), gate pillars at side −3/2,
+  forward 3; `DEFENSE_TEMPLATE` front row (−1..1, +1) + sides (±1, 0), back open; North `Intact` 5,
+  West `Damaged` 4 (front gone), East `Breached` 3 (front + front-left, the bridge lanes), South
+  `Destroyed` 2 (front row gone). Central ruin: floor x/z −4..3 y 1 with 2×2 obsidian inlay,
+  pillars 4 (obsidian cap, y 5)/3/2/1, north wall 3,3,3,3,2,1 with glass at (−2,3,−4) and
+  (0,3,−4), west wall 2,2,1,1, open 6×6 interior (`open_area`). Seed variations only via domains
+  `con-gaps`/`con-ragd`/`con-scaf`. Construction per seed: 269–310 blocks, always 19 obsidian and
+  2 glass. Constructed fingerprint for seed 1847 pinned; Mission 29 fingerprints unchanged.
+- Mission 30 measurements (M3 Pro, 320×180, release): construction alone ~5 µs; generate +
+  construct ~0.10–0.11 ms warm; initial view 12.1 / 3.47 / 1.74 ms (1 / 4 / automatic workers,
+  Mission 29: 8.8 / 2.6 / 1.40); views 1.1–3.2 ms automatic. The increase is almost all the four
+  extra empty layers (terrain alone in the taller grid measures the same); glass close-up adds
+  recursion. No acceleration structure added.
 - Mission 29 five-island arena: complete. `src/world/arena.rs`: `IslandId` enum
   (Center/North/South/East/West, `ALL`, index = discriminant, `direction()` = unit `(dx, dz)`
   outward, north `-Z`, east `+X`); `island_seed(global, id) = hash3(global, tag, 0, 0, 0)` with
@@ -31,14 +57,17 @@ player entity or gameplay system.
   the origin, outer 16×16 thickness 12 at ±32 on X/Z, all at surface `y = 0`; nominal gap 12
   (visible 12–17). `generate_arena(&layout, seed) -> Result<Arena { grid, info: ArenaInfo }>`
   allocates one grid exactly the regions' union — origin (-40, -14, -40), 80×16×80, 100 KiB, no
-  margin (structures above `y = 1` will need the top raised) — then calls `generate_island` once
-  per island. Pinned derived seeds and arena fingerprint for seed 1847.
+  margin — then calls `generate_island` once per island; `generate_arena_in` takes larger bounds
+  (`ArenaError::GridTooSmall` if they clip an island). Pinned derived seeds and arena fingerprint for seed 1847.
 - EggWars mode: `--eggwars [--seed <u64>]` (default 42, `cli::DEFAULT_SEED`, renamed from
   `DEFAULT_ISLAND_SEED`); two mode flags, or `--seed` with `--voxel-diagnostic`, exit 2; `--seed`
   alone is still the procedural island. Scene = arena grid, no objects/lights. Camera targets the
-  central island (yaw 0.7, pitch 0.35, radius 68; all five islands fully in frame). Startup log has
-  one arena line plus one line per island (derived seed); overlay shows only the global seed; PPM
-  `output/eggwars_seed_<seed>.ppm`. Existing mode PPMs byte-identical to Mission 28.
+  central island (yaw 0.7, pitch 0.35, radius 68; all five islands and all structures fully in
+  frame, unchanged by Mission 30). Since Mission 30 the mode renders the constructed arena
+  (`eggwars_world` in `main.rs`; `eggwars_arena` is the test-only terrain stage). Startup log: arena
+  line, construction line, one line per island (derived seed), one per outer island (bridge and
+  defense state); overlay shows only the global seed; PPM `output/eggwars_seed_<seed>.ppm`. Other
+  modes' PPMs byte-identical to Mission 29.
 - Mission 29 measurements (M3 Pro, 320×180, release): generation ~0.10 ms warm, 7,169–8,771 blocks
   over seeds 0–255; initial view ~9.0–9.6 ms at 1 worker, ~2.6 ms at 4, ~1.35 ms automatic; all
   measured views 0.8–2.3 ms automatic. An empty 80×16×80 grid alone costs 8.9 ms of the 9.5 ms
@@ -163,12 +192,13 @@ player entity or gameplay system.
 - Important known limitations: opaque glass/lava shadows; no medium tracking (touching glass is
   glass → air → glass; glass on a block exposes that block's interior face); `1e-4` biases assume
   unit scale; edge/corner contact follows the DDA's half-open conventions; AABB objects are scanned
-  linearly (group them only if the real scene's measured object count warrants it); the arena is
-  terrain only (no bridges, structures, lava, or props); no camera collision (zoom can enter an
-  island). The window title in `src/app/app.rs` still says "Phase 3".
+  linearly (group them only if the real scene's measured object count warrants it); the arena has
+  terrain, bridges, bases, defenses, and the central ruin but no eggs, chests, arrows, lava, or
+  props; no camera collision (zoom can enter an island). The window title in `src/app/app.rs`
+  still says "Phase 3".
 - Rubric: all raytracing effects, DDA, and parallel rendering exist in code and diagnostic scenes
   only; they count only when visibly and intentionally used in the final diorama (Phase 5–6).
-- Current suite: 613 passing tests. The showcase PPM is byte-identical to the Mission 21 render.
+- Current suite: 651 passing tests (Mission 30 added 38; the 613 earlier tests are unchanged). The showcase PPM is byte-identical to the Mission 21 render.
 - Development resolution: 320×180, presented at 960×540.
 - Pre-Phase-4 baseline (local, single-threaded, brute-force AABB traversal): default view about
   4.9 ms, close cobblestone about 10.7 ms, close lava about 18 ms, close glass about 30 ms. These
@@ -178,7 +208,8 @@ player entity or gameplay system.
   showcase through the release app binary: test-binary layout shifted it by ~10% with no code cause.
 - Compiler state: no rustc warnings; clippy reports only the known `clippy::module_inception`
   warnings (plus two pre-existing `assertions_on_constants` warnings in test code).
-- Next work: Mission 30 (bridges and structures), from the user's exact prompt. Not authorized by
+- Next work: Mission 31 (battle aftermath details: eggs per `EggBase::egg`, chests in
+  `CentralStructure::open_area`, arrows, props), from the user's exact prompt. Not authorized by
   this checkpoint.
 
 The repository is expected to begin each mission from a clean checkpoint. Verify the actual
@@ -186,9 +217,9 @@ repository state instead of assuming this section is current.
 
 ## Mission boundary
 
-Phase 4 is complete and audited; Phase 5 is in progress with Missions 28 and 29 complete. Do not
-start further Phase 4 optimization (SIMD, persistent pools, BVH, reciprocal DDA), Mission 30,
-bridges, structures, lava, or decorations from this handoff. The user and planning assistant
+Phase 4 is complete and audited; Phase 5 is in progress with Missions 28, 29, and 30 complete. Do
+not start further Phase 4 optimization (SIMD, persistent pools, BVH, reciprocal DDA), Mission 31,
+eggs, chests, arrows, lava, or decorations from this handoff. The user and planning assistant
 will provide the exact prompt and API for each future mission. Do not implement future missions
 early. Stop at mission boundaries.
 

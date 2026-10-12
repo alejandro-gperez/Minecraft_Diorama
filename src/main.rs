@@ -17,7 +17,8 @@ use render::{Color, Framebuffer};
 use scene::{Scene, SceneObject};
 use voxel::{BlockMaterials, BlockType, Voxel, VoxelGrid, VoxelPosition};
 use world::{
-    Arena, ArenaLayout, IslandConfig, IslandId, IslandStats, generate_arena, generate_island,
+    ArenaLayout, EggWarsArena, IslandConfig, IslandId, IslandStats, build_eggwars_arena,
+    generate_island,
 };
 
 pub mod app;
@@ -121,7 +122,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         SceneMode::EggWars { seed } => {
             let started = Instant::now();
-            let arena = eggwars_arena(seed);
+            let arena = eggwars_world(seed);
             let generation_ms = started.elapsed().as_secs_f64() * 1_000.0;
             log_arena(&arena, generation_ms);
             (
@@ -370,28 +371,47 @@ fn procedural_island_camera(aspect_ratio: f32) -> OrbitalCamera {
     .expect("procedural island camera configuration must be valid")
 }
 
-/// Generates the five-island arena for `seed` into its one global grid.
-fn eggwars_arena(seed: u64) -> Arena {
-    generate_arena(&ArenaLayout::eggwars(), seed)
+/// The terrain stage alone: the five islands in a grid sized exactly to them (Mission 29). The
+/// app renders `eggwars_world`; terrain-level scene tests use this.
+#[cfg(test)]
+fn eggwars_arena(seed: u64) -> world::Arena {
+    world::generate_arena(&ArenaLayout::eggwars(), seed)
         .expect("the EggWars arena grid must be allocatable")
 }
 
-/// Startup summary: one line for the arena and one per island, never per block.
-fn log_arena(arena: &Arena, generation_ms: f64) {
-    let info = &arena.info;
+/// Generates the five-island terrain for `seed` into the one global grid and builds the
+/// designed bridges and structures on it, once, before the scene exists.
+fn eggwars_world(seed: u64) -> EggWarsArena {
+    build_eggwars_arena(seed).expect("the EggWars arena must generate and construct")
+}
+
+/// Startup summary: one line for the arena, one for construction, and one per island, never
+/// per block.
+fn log_arena(arena: &EggWarsArena, generation_ms: f64) {
+    let info = &arena.terrain;
+    let construction = &arena.construction;
     let (width, height, depth) = info.grid_dimensions;
     let origin = info.grid_origin;
     println!(
-        "EggWars arena seed {}: {} islands, {} blocks ({} ores) in a {width}x{height}x{depth} grid \
-         at origin ({}, {}, {}), separation {}, generated in {generation_ms:.3} ms",
+        "EggWars arena seed {}: {} islands, {} blocks ({} terrain, {} ores) in a \
+         {width}x{height}x{depth} grid at origin ({}, {}, {}), separation {}, generated and \
+         constructed in {generation_ms:.3} ms",
         info.global_seed,
         info.islands.len(),
+        arena.occupied_voxels(),
         info.occupied_voxels,
         info.ores(),
         origin.x,
         origin.y,
         origin.z,
         info.separation,
+    );
+    println!(
+        "  Construction: {} blocks ({} cobblestone, {} obsidian, {} glass)",
+        construction.total(),
+        construction.count(BlockType::Cobblestone),
+        construction.count(BlockType::Obsidian),
+        construction.count(BlockType::Glass),
     );
     for island in &info.islands {
         let config = island.config;
@@ -406,6 +426,16 @@ fn log_arena(arena: &Arena, generation_ms: f64) {
             island.seed,
             island.stats.total(),
             island.stats.ores(),
+        );
+    }
+    for (bridge, base) in construction.bridges.iter().zip(&construction.bases) {
+        let intact = base.defense.iter().filter(|slot| slot.intact).count();
+        println!(
+            "  {:<6} bridge {:?} ({} missing), defense {:?} ({intact}/5 obsidian)",
+            bridge.island.name(),
+            bridge.state,
+            bridge.missing_span,
+            base.defense_state,
         );
     }
 }
@@ -458,7 +488,7 @@ mod tests {
     use std::f32::consts::FRAC_PI_4;
 
     use super::{
-        HEIGHT, ISLAND_CONFIG, WIDTH, eggwars_arena, eggwars_camera, eggwars_scene,
+        HEIGHT, ISLAND_CONFIG, WIDTH, eggwars_arena, eggwars_camera, eggwars_scene, eggwars_world,
         phase2_lighting, phase2_test_scene, procedural_island_camera, procedural_island_grid,
         procedural_island_scene, voxel_diagnostic_scene,
     };
@@ -471,7 +501,7 @@ mod tests {
         render::{Framebuffer, Renderer, renderer::tile_tests::assert_tiling_matches_reference},
         scene::{HitSource, Scene},
         voxel::{BlockType, Voxel, VoxelGrid, VoxelPosition},
-        world::{ArenaLayout, IslandId},
+        world::{ArenaLayout, BridgeState, IslandId, construction::OUTER_ISLANDS},
     };
 
     #[test]
@@ -1121,6 +1151,289 @@ mod tests {
     #[test]
     fn eggwars_tiling_matches_the_sequential_reference() {
         let scene = arena_scene();
+        let lighting = phase2_lighting();
+
+        for (width, height) in [(96, 54), (70, 41)] {
+            let camera = eggwars_camera(width as f32 / height as f32);
+            assert_tiling_matches_reference(&scene, &lighting, &camera, width, height);
+        }
+    }
+
+    fn constructed_scene() -> Scene {
+        eggwars_scene(eggwars_world(ARENA_SEED).grid).unwrap()
+    }
+
+    fn down_onto(position: VoxelPosition) -> Ray {
+        let origin = Vec3::new(position.x as f32 + 0.5, 30.0, position.z as f32 + 0.5);
+        Ray::try_new(origin, Vec3::new(0.0, -1.0, 0.0)).unwrap()
+    }
+
+    #[test]
+    fn constructed_eggwars_scene_attaches_one_taller_grid_and_nothing_else() {
+        let world = eggwars_world(ARENA_SEED);
+        let scene = eggwars_scene(world.grid.clone()).unwrap();
+
+        assert_eq!(scene.voxel_grid(), Some(&world.grid));
+        assert_eq!(scene.len(), 0, "no block is also an AABB object");
+        assert!(scene.point_lights().is_empty());
+        assert_eq!(world.terrain.grid_dimensions, (80, 20, 80));
+        assert_eq!(
+            world.terrain.islands,
+            eggwars_arena(ARENA_SEED).info.islands
+        );
+    }
+
+    #[test]
+    fn bridges_render_through_the_dda_with_normal_mapped_cobblestone() {
+        let world = eggwars_world(ARENA_SEED);
+        let scene = eggwars_scene(world.grid.clone()).unwrap();
+        let materials = scene.block_materials().unwrap();
+
+        for bridge in world.construction.bridges {
+            let (dx, dz) = bridge.toward_center;
+            for lane in bridge.lanes {
+                // Straight down onto each lane's first deck block, then along the deck to the
+                // first missing cell, through which the ray falls into the void.
+                let hit = scene.closest_hit(down_onto(lane.outer_end), 0.0, f32::INFINITY);
+                let hit = hit.unwrap();
+                assert_eq!(
+                    hit.source,
+                    HitSource::Voxel {
+                        position: lane.outer_end,
+                        block: BlockType::Cobblestone,
+                    }
+                );
+                assert_eq!(hit.material_id, materials.cobblestone);
+                let material = scene.material(hit.material_id).unwrap();
+                assert!(material.normal_map().is_some());
+
+                let mut cell = lane.outer_end;
+                while cell != lane.center_end && world.grid.is_occupied_world(cell) {
+                    cell = VoxelPosition::new(cell.x + dx, cell.y, cell.z + dz);
+                }
+                let gap = scene.closest_hit(down_onto(cell), 0.0, f32::INFINITY);
+                match bridge.state {
+                    BridgeState::Complete => {
+                        assert!(gap.is_some(), "the complete bridge has no gap")
+                    }
+                    _ => assert!(gap.is_none(), "{:?} gap at {cell:?}", bridge.island),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn defenses_resolve_to_canonical_reflective_obsidian() {
+        let world = eggwars_world(ARENA_SEED);
+        let scene = eggwars_scene(world.grid.clone()).unwrap();
+        let materials = scene.block_materials().unwrap();
+
+        for base in world.construction.bases {
+            for slot in base.defense {
+                let hit = scene
+                    .closest_hit(down_onto(slot.position), 0.0, f32::INFINITY)
+                    .unwrap();
+                let HitSource::Voxel { position, block } = hit.source else {
+                    panic!("the arena has no AABB objects");
+                };
+                if slot.intact {
+                    assert_eq!((position, block), (slot.position, BlockType::Obsidian));
+                    assert_eq!(hit.material_id, materials.obsidian);
+                    let obsidian = scene.material(hit.material_id).unwrap();
+                    assert_eq!(obsidian.reflectivity(), 0.35);
+                    assert_eq!(obsidian.transparency(), 0.0);
+                } else {
+                    // A broken slot shows the floor it stood on.
+                    assert_eq!(position.y, slot.position.y - 1, "{:?}", base.island);
+                    assert_ne!(block, BlockType::Obsidian);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn central_windows_refract_through_canonical_glass() {
+        let world = eggwars_world(ARENA_SEED);
+        let scene = eggwars_scene(world.grid.clone()).unwrap();
+        let materials = scene.block_materials().unwrap();
+        let window = VoxelPosition::new(-2, 3, -4);
+
+        // From inside the ruin, straight at the pane.
+        let origin = Vec3::new(-1.5, 3.5, -2.5);
+        let ray = Ray::try_new(origin, Vec3::new(0.0, 0.0, -1.0)).unwrap();
+        let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+        assert_eq!(
+            hit.source,
+            HitSource::Voxel {
+                position: window,
+                block: BlockType::Glass,
+            }
+        );
+        assert_eq!(hit.material_id, materials.glass);
+        let glass = scene.material(hit.material_id).unwrap();
+        assert!(glass.transparency() > 0.0);
+        assert_eq!(glass.ior(), 1.5);
+        assert_eq!(glass.reflectivity(), 0.15);
+
+        // Looking at the wall, the panes change the image: light passes through them.
+        let lighting = phase2_lighting();
+        let environment = Environment::sunset();
+        let camera = OrbitalCamera::try_new(
+            Vec3::new(-1.0, 3.5, -4.0),
+            0.2,
+            0.1,
+            6.0,
+            50.0_f32.to_radians(),
+            32.0 / 18.0,
+        )
+        .unwrap();
+        let mut with_glass = Framebuffer::try_new(32, 18).unwrap();
+        Renderer::render(&camera, &scene, &lighting, &environment, &mut with_glass).unwrap();
+        let mut grid = world.grid.clone();
+        for pane in [window, VoxelPosition::new(0, 3, -4)] {
+            grid.set_world(pane, Voxel::Block(BlockType::Cobblestone))
+                .unwrap();
+        }
+        let solid = eggwars_scene(grid).unwrap();
+        let mut without = Framebuffer::try_new(32, 18).unwrap();
+        Renderer::render(&camera, &solid, &lighting, &environment, &mut without).unwrap();
+        assert!(with_glass.pixels().iter().all(|color| color.is_finite()));
+        assert_ne!(with_glass.pixels(), without.pixels());
+    }
+
+    #[test]
+    fn construction_casts_shadows_and_bridge_gaps_do_not() {
+        let world = eggwars_world(ARENA_SEED);
+        let scene = eggwars_scene(world.grid.clone()).unwrap();
+        let up = Vec3::new(0.0, 1.0, 0.0);
+        let below = |p: VoxelPosition| Vec3::new(p.x as f32 + 0.5, -20.0, p.z as f32 + 0.5);
+
+        let north = world.construction.bridge(IslandId::North).unwrap();
+        let (dx, dz) = north.toward_center;
+        let start = north.lanes[0].outer_end;
+        // Under the middle of the complete bridge, in the void: the deck shades it.
+        let middle = VoxelPosition::new(start.x + dx * 6, 0, start.z + dz * 6);
+        assert!(scene.is_occluded(Ray::try_new(below(middle), up).unwrap(), 0.0, f32::INFINITY));
+
+        let east = world.construction.bridge(IslandId::East).unwrap();
+        let (dx, dz) = east.toward_center;
+        let mut cell = east.lanes[0].outer_end;
+        while world.grid.is_occupied_world(cell) {
+            cell = VoxelPosition::new(cell.x + dx, cell.y, cell.z + dz);
+        }
+        assert!(!scene.is_occluded(Ray::try_new(below(cell), up).unwrap(), 0.0, f32::INFINITY));
+
+        // The intact front-right defense block shades the empty egg cell from the light.
+        let sun = Vec3::new(0.6, 1.0, 0.8);
+        let base = world.construction.base(IslandId::North).unwrap();
+        let slot = base.defense[2].position;
+        let shaded = slot.min_corner() + Vec3::new(0.5, 0.05, 0.5) - Vec3::new(0.6, 0.0, 0.8);
+        assert!(!world.grid.is_occupied_world(VoxelPosition::new(
+            shaded.x.floor() as i32,
+            shaded.y.floor() as i32,
+            shaded.z.floor() as i32
+        )));
+        assert_eq!(
+            VoxelPosition::new(
+                shaded.x.floor() as i32,
+                shaded.y.floor() as i32,
+                shaded.z.floor() as i32
+            ),
+            base.egg
+        );
+        assert!(scene.is_occluded(Ray::try_new(shaded, sun).unwrap(), 0.0, f32::INFINITY));
+    }
+
+    #[test]
+    fn initial_eggwars_camera_frames_the_constructed_arena_without_clipping() {
+        let world = eggwars_world(ARENA_SEED);
+        let terrain = eggwars_arena(ARENA_SEED).grid;
+        let scene = eggwars_scene(world.grid.clone()).unwrap();
+        let layout = ArenaLayout::eggwars();
+        let camera = eggwars_camera(WIDTH as f32 / HEIGHT as f32);
+        let (columns, rows) = (160, 90);
+        let mut seen = [0; 5];
+        let mut construction = 0;
+
+        for row in 0..rows {
+            for column in 0..columns {
+                let u = column as f32 / (columns - 1) as f32;
+                let v = row as f32 / (rows - 1) as f32;
+                let ray = camera.ray_for_viewport(u, v).unwrap();
+                let Some(hit) = scene.closest_hit(ray, 0.0, f32::INFINITY) else {
+                    continue;
+                };
+                let border = row == 0 || column == 0 || row == rows - 1 || column == columns - 1;
+                assert!(
+                    !border,
+                    "the arena touches the frame edge at ({column}, {row})"
+                );
+                let HitSource::Voxel { position, .. } = hit.source else {
+                    panic!("the arena has no AABB objects");
+                };
+                if !terrain.is_occupied_world(position) {
+                    construction += 1;
+                }
+                if let Some(island) = hit_island(&layout, hit.source) {
+                    seen[island as usize] += 1;
+                }
+            }
+        }
+        assert!(seen.iter().all(|&pixels| pixels > 50), "{seen:?}");
+        assert!(seen[IslandId::Center as usize] > seen[IslandId::North as usize]);
+        assert!(
+            construction > 100,
+            "bridges and structures are in view: {construction}"
+        );
+    }
+
+    #[test]
+    fn constructed_arena_renders_from_assorted_viewpoints_without_rebuilding() {
+        let scene = constructed_scene();
+        let lighting = phase2_lighting();
+        let environment = Environment::sunset();
+        let mut framebuffer = Framebuffer::try_new(32, 18).unwrap();
+        let world = eggwars_world(ARENA_SEED);
+        let mut targets = vec![eggwars_camera(1.0).target(), Vec3::new(0.0, 3.0, 0.0)];
+        targets.extend(OUTER_ISLANDS.map(|id| {
+            let egg = world.construction.base(id).unwrap().egg;
+            egg.min_corner() + Vec3::new(0.5, 0.5, 0.5)
+        }));
+
+        for target in targets {
+            for yaw_step in 0..8 {
+                for pitch in [-0.9, 0.2, 0.7, 1.4] {
+                    // Inside structures, beside them, across the arena, and far outside.
+                    for radius in [1.0, 6.0, 30.0, 110.0] {
+                        let camera = OrbitalCamera::try_new(
+                            target,
+                            yaw_step as f32 * FRAC_PI_4 + 0.2,
+                            pitch,
+                            radius,
+                            50.0_f32.to_radians(),
+                            32.0 / 18.0,
+                        )
+                        .unwrap();
+                        Renderer::render(
+                            &camera,
+                            &scene,
+                            &lighting,
+                            &environment,
+                            &mut framebuffer,
+                        )
+                        .unwrap();
+                        assert!(framebuffer.pixels().iter().all(|color| color.is_finite()));
+                    }
+                }
+            }
+        }
+        // Camera movement never touches the world: it is still exactly a fresh build.
+        assert_eq!(scene.voxel_grid(), Some(&world.grid));
+    }
+
+    #[test]
+    fn constructed_eggwars_tiling_matches_the_sequential_reference() {
+        let scene = constructed_scene();
         let lighting = phase2_lighting();
 
         for (width, height) in [(96, 54), (70, 41)] {
