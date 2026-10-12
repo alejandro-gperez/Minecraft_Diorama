@@ -11,7 +11,7 @@ use raylib::prelude::{
 };
 
 use crate::{
-    camera::OrbitalCamera,
+    camera::{FreeCamera, OrbitalCamera},
     environment::Environment,
     lighting::Lighting,
     output::write_ppm,
@@ -28,6 +28,9 @@ const MAX_INPUT_DELTA_SECONDS: f32 = 0.1;
 const ORBIT_SPEED_RADIANS_PER_SECOND: f32 = 1.4;
 const KEYBOARD_ZOOM_UNITS_PER_SECOND: f32 = 5.0;
 const MOUSE_WHEEL_ZOOM_UNITS: f32 = 0.75;
+/// Free (spectator) camera: world units per second and radians per mouse pixel.
+const FREE_MOVE_UNITS_PER_SECOND: f32 = 14.0;
+const MOUSE_LOOK_RADIANS_PER_PIXEL: f32 = 0.0025;
 
 /// Window size that shows a `framebuffer_width` x `framebuffer_height` frame at `WINDOW_SCALE`.
 pub fn window_size(framebuffer_width: i32, framebuffer_height: i32) -> (i32, i32) {
@@ -42,7 +45,7 @@ pub fn window_size(framebuffer_width: i32, framebuffer_height: i32) -> (i32, i32
 }
 
 pub fn run(
-    mut camera: OrbitalCamera,
+    camera: OrbitalCamera,
     scene: Scene,
     lighting: Lighting,
     environment: Environment,
@@ -70,12 +73,16 @@ pub fn run(
     texture.set_texture_filter(&thread, TextureFilter::TEXTURE_FILTER_POINT);
 
     let mut rgba_pixels = vec![0; framebuffer.pixels().len() * 4];
+    let mut rig = CameraRig::new(camera);
     let mut dirty = true;
     let mut initial_ppm_pending = true;
     let mut last_render_seconds = 0.0_f64;
     let mut cpu_render_count = 0_u64;
 
-    println!("Controls: arrow keys orbit; mouse wheel or W/S zoom; Esc closes the window.");
+    println!(
+        "Controls: arrow keys orbit; mouse wheel or W/S zoom; C toggles the free camera \
+         (W/A/S/D move, Space up, Shift down, mouse looks); Esc closes the window."
+    );
     println!(
         "CPU raytracing on up to {} scoped worker threads (available parallelism).",
         default_worker_count()
@@ -83,13 +90,36 @@ pub fn run(
 
     while !raylib.window_should_close() {
         let frame_seconds = raylib.get_frame_time().clamp(0.0, MAX_INPUT_DELTA_SECONDS);
+        if raylib.is_key_pressed(KeyboardKey::KEY_C) && rig.toggle() {
+            // The mouse is captured only while the free camera is active. The first mouse delta
+            // after a toggle is stale, so it is read and dropped.
+            if rig.is_free() {
+                raylib.disable_cursor();
+            } else {
+                raylib.enable_cursor();
+            }
+            let _ = raylib.get_mouse_delta();
+            dirty = true;
+        }
         let input = CameraInput::read(&raylib);
-        dirty |= apply_camera_input(&mut camera, input, frame_seconds);
+        let free_input = FreeInput::read(&raylib);
+        dirty |= rig.update(input, free_input, frame_seconds);
 
         if dirty {
             let started = Instant::now();
-            Renderer::render(&camera, &scene, &lighting, &environment, &mut framebuffer)
-                .expect("Phase 3 render configuration and scene data must remain valid");
+            match &rig.mode {
+                CameraMode::Orbital => Renderer::render(
+                    &rig.orbital,
+                    &scene,
+                    &lighting,
+                    &environment,
+                    &mut framebuffer,
+                ),
+                CameraMode::Free(free) => {
+                    Renderer::render(free, &scene, &lighting, &environment, &mut framebuffer)
+                }
+            }
+            .expect("Phase 3 render configuration and scene data must remain valid");
             last_render_seconds = started.elapsed().as_secs_f64();
             cpu_render_count += 1;
 
@@ -143,7 +173,11 @@ pub fn run(
         );
         drawing.draw_text(&diagnostics, 12, 8, 18, RaylibColor::RAYWHITE);
         drawing.draw_text(
-            "Arrows: orbit | Mouse wheel or W/S: zoom | Esc: close",
+            if rig.is_free() {
+                "FREE: W/A/S/D move | Space up | Shift down | Mouse look | C: orbital | Esc: close"
+            } else {
+                "Arrows: orbit | Mouse wheel or W/S: zoom | C: free camera | Esc: close"
+            },
             12,
             32,
             18,
@@ -183,6 +217,113 @@ impl CameraInput {
             wheel: raylib.get_mouse_wheel_move(),
         }
     }
+}
+
+/// Spectator-camera input for one frame: movement axes and the mouse motion in pixels.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct FreeInput {
+    right_axis: f32,
+    forward_axis: f32,
+    up_axis: f32,
+    mouse_dx: f32,
+    mouse_dy: f32,
+}
+
+impl FreeInput {
+    fn read(raylib: &RaylibHandle) -> Self {
+        let mouse = raylib.get_mouse_delta();
+        Self {
+            right_axis: axis(
+                raylib.is_key_down(KeyboardKey::KEY_D),
+                raylib.is_key_down(KeyboardKey::KEY_A),
+            ),
+            forward_axis: axis(
+                raylib.is_key_down(KeyboardKey::KEY_W),
+                raylib.is_key_down(KeyboardKey::KEY_S),
+            ),
+            up_axis: axis(
+                raylib.is_key_down(KeyboardKey::KEY_SPACE),
+                raylib.is_key_down(KeyboardKey::KEY_LEFT_SHIFT)
+                    || raylib.is_key_down(KeyboardKey::KEY_RIGHT_SHIFT),
+            ),
+            mouse_dx: mouse.x,
+            mouse_dy: mouse.y,
+        }
+    }
+}
+
+/// Which camera renders. The orbital camera is always kept, untouched while the free camera is
+/// active, so leaving free mode restores exactly the previous orbital view.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CameraMode {
+    Orbital,
+    Free(FreeCamera),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CameraRig {
+    orbital: OrbitalCamera,
+    mode: CameraMode,
+}
+
+impl CameraRig {
+    fn new(orbital: OrbitalCamera) -> Self {
+        Self {
+            orbital,
+            mode: CameraMode::Orbital,
+        }
+    }
+
+    fn is_free(&self) -> bool {
+        matches!(self.mode, CameraMode::Free(_))
+    }
+
+    /// Switches camera. Entering free mode starts from the orbital camera's exact position and
+    /// view; leaving it restores the orbital camera as it was. Returns whether the mode changed,
+    /// in which case the caller renders once.
+    fn toggle(&mut self) -> bool {
+        match self.mode {
+            CameraMode::Orbital => match FreeCamera::from_orbital(&self.orbital) {
+                Some(free) => {
+                    self.mode = CameraMode::Free(free);
+                    true
+                }
+                None => false,
+            },
+            CameraMode::Free(_) => {
+                self.mode = CameraMode::Orbital;
+                true
+            }
+        }
+    }
+
+    /// Applies one frame of input to the active camera only; true if it changed.
+    fn update(&mut self, orbital: CameraInput, free: FreeInput, frame_seconds: f32) -> bool {
+        match &mut self.mode {
+            CameraMode::Orbital => apply_camera_input(&mut self.orbital, orbital, frame_seconds),
+            CameraMode::Free(camera) => apply_free_input(camera, free, frame_seconds),
+        }
+    }
+}
+
+fn apply_free_input(camera: &mut FreeCamera, input: FreeInput, frame_seconds: f32) -> bool {
+    let original = *camera;
+
+    if frame_seconds.is_finite() && frame_seconds > 0.0 {
+        let step = FREE_MOVE_UNITS_PER_SECOND * frame_seconds;
+        camera.translate(
+            input.right_axis * step,
+            input.forward_axis * step,
+            input.up_axis * step,
+        );
+    }
+    // Moving the mouse right turns the view right, which lowers yaw; moving it down looks down.
+    camera.look(
+        -input.mouse_dx * MOUSE_LOOK_RADIANS_PER_PIXEL,
+        -input.mouse_dy * MOUSE_LOOK_RADIANS_PER_PIXEL,
+    );
+
+    *camera != original
 }
 
 fn axis(positive: bool, negative: bool) -> f32 {
@@ -230,7 +371,8 @@ mod tests {
     use std::f32::consts::FRAC_PI_2;
 
     use super::{
-        CameraInput, WINDOW_SCALE, apply_camera_input, copy_framebuffer_to_rgba, window_size,
+        CameraInput, CameraMode, CameraRig, FreeInput, WINDOW_SCALE, apply_camera_input,
+        copy_framebuffer_to_rgba, window_size,
     };
     use crate::{
         camera::OrbitalCamera,
@@ -309,5 +451,87 @@ mod tests {
         assert_ne!(camera, original);
         assert!(camera.radius() < original.radius());
         assert!(camera.pitch() > original.pitch());
+    }
+
+    fn rig() -> CameraRig {
+        CameraRig::new(camera())
+    }
+
+    const FRAME: f32 = 1.0 / 60.0;
+
+    #[test]
+    fn toggling_to_free_keeps_the_view_and_back_restores_the_orbital_state() {
+        let mut rig = rig();
+        let orbital = rig.orbital;
+        assert!(rig.toggle());
+        let CameraMode::Free(free) = rig.mode else {
+            panic!("expected free mode");
+        };
+        assert!((free.position() - orbital.position()).length() < 1.0e-4);
+        assert!((free.forward() - orbital.forward()).length() < 1.0e-4);
+
+        // Flying around leaves the stored orbital camera untouched.
+        let flying = FreeInput {
+            forward_axis: 1.0,
+            mouse_dx: 30.0,
+            ..FreeInput::default()
+        };
+        assert!(rig.update(CameraInput::default(), flying, FRAME));
+        assert_eq!(rig.orbital, orbital);
+
+        assert!(rig.toggle());
+        assert_eq!(rig.mode, CameraMode::Orbital);
+        assert_eq!(rig.orbital, orbital);
+    }
+
+    #[test]
+    fn switching_is_one_dirty_render_and_idle_frames_are_clean() {
+        let mut rig = rig();
+        let idle = (CameraInput::default(), FreeInput::default());
+        assert!(!rig.update(idle.0, idle.1, FRAME));
+        assert!(rig.toggle(), "the switch itself asks for one render");
+        assert!(!rig.update(idle.0, idle.1, FRAME), "idle free frame");
+        assert!(rig.toggle());
+        assert!(!rig.update(idle.0, idle.1, FRAME), "idle orbital frame");
+    }
+
+    #[test]
+    fn each_mode_reads_only_its_own_input() {
+        let mut rig = rig();
+        let orbital_keys = CameraInput {
+            yaw_axis: 1.0,
+            ..CameraInput::default()
+        };
+        let free_keys = FreeInput {
+            up_axis: 1.0,
+            ..FreeInput::default()
+        };
+        assert!(!rig.update(CameraInput::default(), free_keys, FRAME));
+        assert!(rig.update(orbital_keys, free_keys, FRAME));
+        rig.toggle();
+        let start = rig.mode;
+        assert!(!rig.update(orbital_keys, FreeInput::default(), FRAME));
+        assert_eq!(rig.mode, start);
+        assert!(rig.update(orbital_keys, free_keys, FRAME));
+    }
+
+    #[test]
+    fn free_mouse_and_invalid_input_are_handled() {
+        let mut rig = rig();
+        rig.toggle();
+        let look = FreeInput {
+            mouse_dx: 10.0,
+            mouse_dy: -10.0,
+            ..FreeInput::default()
+        };
+        assert!(rig.update(CameraInput::default(), look, FRAME));
+        let before = rig.mode;
+        let bad = FreeInput {
+            right_axis: f32::NAN,
+            mouse_dx: f32::NAN,
+            ..FreeInput::default()
+        };
+        assert!(!rig.update(CameraInput::default(), bad, f32::NAN));
+        assert_eq!(rig.mode, before);
     }
 }

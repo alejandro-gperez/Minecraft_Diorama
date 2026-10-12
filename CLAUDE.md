@@ -16,6 +16,16 @@ player entity or gameplay system.
 
 ## Verified checkpoint
 
+- FREE CAMERA (last feature, one commit): `src/camera/free.rs` `FreeCamera` (position, yaw/pitch,
+  same conventions as `OrbitalCamera`; `from_orbital`, `look`, `translate`, bounded pitch, invalid
+  input ignored) and `src/camera/view.rs` `ViewCamera: Sync` (`aspect_ratio`, `ray_for_viewport`),
+  implemented by both cameras. `Renderer` entry points take `&impl ViewCamera` (nothing else in
+  the renderer changed; PPM byte-identical). `src/app/app.rs`: `CameraRig` { orbital, mode } with
+  `toggle`/`update`; `C` toggles, free mode reads W/A/S/D, Space, Shift, mouse delta
+  (cursor captured only while free; first delta after a toggle dropped); the orbital camera is
+  kept untouched and restored on exit; the toggle is one dirty render, idle frames stay clean.
+  743 tests. Keyboard/mouse interaction was not exercised automatically (no input injection).
+
 - LAVA SPILL (final polish, one commit after the lava pool): `plan_lava_spill` in
   `construction/structures.rs` walks south along `SPILL_X = 5` to the central island's outermost
   land column, puts a lava source on its top block and a one-wide column (`SPILL_LENGTH = 4`) in the

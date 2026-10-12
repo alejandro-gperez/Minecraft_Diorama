@@ -57,9 +57,12 @@ against the cliff, ordinary lava voxels in the one global grid, no extra light),
 default camera. Its position follows each seed's rim; it is placed only in empty cells beside
 terrain.
 
-**Camera controls.** Arrow keys orbit (horizontal) and change elevation; `W` / `S` or the mouse
-wheel zoom in and out; `Escape` exits. The camera is an external orbital camera around the arena;
-there is no player or gameplay.
+**Camera controls.** Orbital mode (default): arrow keys orbit (horizontal) and change elevation;
+`W` / `S` or the mouse wheel zoom; `Escape` exits. Press `C` to switch to the free spectator
+camera, which starts from the exact orbital position and view: `W`/`S` forward/backward, `A`/`D`
+strafe, `Space` up, `Shift` down, mouse looks around (the mouse is captured only in this mode);
+`C` returns to the orbital camera exactly as it was. The free camera is noclip, with no physics,
+gravity or collision, and there is no player or gameplay.
 
 **Rubric features implemented and visible in the final scene.** CPU raytracing; orbital camera and
 zoom; five textured canonical materials; Lambert/Blinn-Phong lighting with hard shadows;
@@ -1876,10 +1879,24 @@ These are deliberate scope boundaries of the current diagnostic renderer, not hi
 
 ## Controls
 
+Orbital camera (default):
+
 - Arrow keys: orbit horizontally and vertically.
 - `W` / `S`: zoom in and out.
 - Mouse wheel: zoom in and out.
+- `C`: switch to the free camera.
 - `Escape`: exit.
+
+Free spectator camera (`C` toggles; mouse captured only in this mode):
+
+- `W` / `S`: forward / backward along the view; `A` / `D`: strafe left / right.
+- `Space`: up; `Shift`: down (world up/down).
+- Mouse: look around (pitch is bounded).
+- `C`: back to the orbital camera, restored exactly; `Escape`: exit.
+
+The renderer is generic over the small `ViewCamera` trait (`aspect_ratio`, `ray_for_viewport`),
+implemented by `OrbitalCamera` and `FreeCamera`; moving a camera never regenerates the world, and
+idle frames still skip rendering.
 
 ## Running
 

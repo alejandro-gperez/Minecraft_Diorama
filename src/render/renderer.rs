@@ -1,5 +1,5 @@
 use crate::{
-    camera::OrbitalCamera,
+    camera::ViewCamera,
     environment::Environment,
     lighting::{Lighting, PointLight, shade_point_light, shade_surface},
     material::{AIR_IOR, shading_normal},
@@ -83,7 +83,7 @@ impl Renderer {
     /// Renders the whole framebuffer with the default tile size on one worker thread per
     /// available CPU (see `parallel::default_worker_count`).
     pub fn render(
-        camera: &OrbitalCamera,
+        camera: &impl ViewCamera,
         scene: &Scene,
         lighting: &Lighting,
         environment: &Environment,
@@ -105,7 +105,7 @@ impl Renderer {
     /// `1` renders sequentially on the calling thread. Larger requests are bounded by the tile
     /// count and `parallel::MAX_WORKERS`; zero is `RenderError::InvalidWorkerCount`.
     pub fn render_with_worker_count(
-        camera: &OrbitalCamera,
+        camera: &impl ViewCamera,
         scene: &Scene,
         lighting: &Lighting,
         environment: &Environment,
@@ -125,7 +125,7 @@ impl Renderer {
 
     /// Renders with a custom tile size and the automatic worker count.
     pub(crate) fn render_with_tile_size(
-        camera: &OrbitalCamera,
+        camera: &impl ViewCamera,
         scene: &Scene,
         lighting: &Lighting,
         environment: &Environment,
@@ -153,7 +153,7 @@ impl Renderer {
     /// path traces into one worker-owned tile buffer per worker, which each worker copies into
     /// the framebuffer under a short lock.
     pub(crate) fn render_with_configuration(
-        camera: &OrbitalCamera,
+        camera: &impl ViewCamera,
         scene: &Scene,
         lighting: &Lighting,
         environment: &Environment,
@@ -190,7 +190,7 @@ impl Renderer {
 
 /// Traces and writes every pixel of `tile` directly into `framebuffer`.
 fn render_tile(
-    camera: &OrbitalCamera,
+    camera: &impl ViewCamera,
     tracer: &Tracer,
     framebuffer: &mut Framebuffer,
     tile: Tile,
@@ -205,7 +205,7 @@ fn render_tile(
 /// Traces every pixel of `tile` into `pixels`, a tile-local row-major buffer of exactly
 /// `tile.width() * tile.height()` colors.
 fn render_tile_into(
-    camera: &OrbitalCamera,
+    camera: &impl ViewCamera,
     tracer: &Tracer,
     framebuffer_size: (usize, usize),
     tile: Tile,
@@ -222,7 +222,7 @@ fn render_tile_into(
 /// Rays use the pixel's global framebuffer coordinates, never tile-local ones, so a pixel's color
 /// does not depend on which tile, worker, or buffer computes it.
 fn trace_tile(
-    camera: &OrbitalCamera,
+    camera: &impl ViewCamera,
     tracer: &Tracer,
     (width, height): (usize, usize),
     tile: Tile,
@@ -239,7 +239,7 @@ fn trace_tile(
 }
 
 fn primary_ray(
-    camera: &OrbitalCamera,
+    camera: &impl ViewCamera,
     x: usize,
     y: usize,
     width: usize,
