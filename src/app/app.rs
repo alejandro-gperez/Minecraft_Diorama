@@ -36,6 +36,7 @@ pub fn run(
     environment: Environment,
     mut framebuffer: Framebuffer,
     ppm_path: &Path,
+    overlay_label: Option<&str>,
 ) -> io::Result<()> {
     let framebuffer_width = i32::try_from(framebuffer.width())
         .expect("framebuffer width must fit the Raylib presentation API");
@@ -119,7 +120,14 @@ pub fn run(
             WINDOW_SCALE,
             RaylibColor::WHITE,
         );
-        drawing.draw_rectangle(0, 0, WINDOW_WIDTH, 58, RaylibColor::new(0, 0, 0, 180));
+        let overlay_height = if overlay_label.is_some() { 82 } else { 58 };
+        drawing.draw_rectangle(
+            0,
+            0,
+            WINDOW_WIDTH,
+            overlay_height,
+            RaylibColor::new(0, 0, 0, 180),
+        );
         drawing.draw_text(&diagnostics, 12, 8, 18, RaylibColor::RAYWHITE);
         drawing.draw_text(
             "Arrows: orbit | Mouse wheel or W/S: zoom | Esc: close",
@@ -128,6 +136,9 @@ pub fn run(
             18,
             RaylibColor::LIGHTGRAY,
         );
+        if let Some(label) = overlay_label {
+            drawing.draw_text(label, 12, 56, 18, RaylibColor::GOLD);
+        }
     }
 
     Ok(())

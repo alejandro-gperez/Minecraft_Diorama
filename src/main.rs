@@ -2,10 +2,12 @@ use std::{
     error::Error,
     f32::consts::PI,
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use app::run;
 use camera::OrbitalCamera;
+use cli::{SceneMode, USAGE};
 use environment::Environment;
 use geometry::Aabb;
 use lighting::{AmbientLight, DirectionalLight, Lighting, PointLight};
@@ -14,9 +16,11 @@ use math::Vec3;
 use render::{Color, Framebuffer};
 use scene::{Scene, SceneObject};
 use voxel::{BlockMaterials, BlockType, Voxel, VoxelGrid, VoxelPosition};
+use world::{IslandConfig, IslandStats, generate_island};
 
 pub mod app;
 pub mod camera;
+pub mod cli;
 pub mod color;
 pub mod environment;
 pub mod geometry;
@@ -28,12 +32,22 @@ pub mod ray;
 pub mod render;
 pub mod scene;
 pub mod voxel;
+pub mod world;
 
 const WIDTH: usize = 320;
 const HEIGHT: usize = 180;
 const OUTPUT_PATH: &str = "output/phase1.ppm";
-const VOXEL_DIAGNOSTIC_FLAG: &str = "--voxel-diagnostic";
 const VOXEL_DIAGNOSTIC_OUTPUT_PATH: &str = "output/voxel_diagnostic.ppm";
+const VERTICAL_FOV_DEGREES: f32 = 50.0;
+
+/// The procedural-island diagnostic: one standard 16×16 island whose flat surface level is
+/// `y = 0`. The camera and grid derive from this config, so moving the island moves both.
+const ISLAND_CONFIG: IslandConfig = IslandConfig::new(VoxelPosition::new(0, 0, 0), 12);
+/// Initial orbit for the island: from the south-east, where the directional light falls, low
+/// enough to see the rocky underside and high enough to see the grass surface.
+const ISLAND_CAMERA_YAW: f32 = 1.05;
+const ISLAND_CAMERA_PITCH: f32 = 0.25;
+const ISLAND_CAMERA_RADIUS: f32 = 22.0;
 
 /// Position, color, intensity, and radius of the one representative light for the showcase lava.
 ///
@@ -49,23 +63,54 @@ const LAVA_LIGHT_RADIUS: f32 = 5.0;
 const VOXEL_LAVA_LIGHT_POSITION: Vec3 = Vec3::new(2.0, 0.5, 1.5);
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let arguments = std::env::args_os().skip(1);
+    let mode = match cli::parse_args(arguments.map(|a| a.to_string_lossy().into_owned())) {
+        Ok(mode) => mode,
+        Err(error) => {
+            eprintln!("error: {error}\n{USAGE}");
+            std::process::exit(2);
+        }
+    };
+
     let aspect_ratio = WIDTH as f32 / HEIGHT as f32;
-    let camera = OrbitalCamera::try_new(
-        Vec3::new(0.0, 0.7, 0.0),
-        0.55 + PI,
-        0.15,
-        10.0,
-        50.0 * PI / 180.0,
-        aspect_ratio,
-    )
-    .expect("Phase 2 camera configuration must be valid");
     // The default showcase stays the Phase 3 five-block AABB scene so its render remains a
-    // regression reference; the flag swaps in the small hybrid voxel scene instead.
-    let voxel_diagnostic = std::env::args().any(|argument| argument == VOXEL_DIAGNOSTIC_FLAG);
-    let (scene, output_path) = if voxel_diagnostic {
-        (voxel_diagnostic_scene()?, VOXEL_DIAGNOSTIC_OUTPUT_PATH)
-    } else {
-        (phase2_test_scene()?, OUTPUT_PATH)
+    // regression reference; the flags swap in the voxel diagnostic or the procedural island.
+    let (camera, scene, output_path, overlay_label) = match mode {
+        SceneMode::Showcase => (
+            development_camera(aspect_ratio),
+            phase2_test_scene()?,
+            PathBuf::from(OUTPUT_PATH),
+            None,
+        ),
+        SceneMode::VoxelDiagnostic => (
+            development_camera(aspect_ratio),
+            voxel_diagnostic_scene()?,
+            PathBuf::from(VOXEL_DIAGNOSTIC_OUTPUT_PATH),
+            None,
+        ),
+        SceneMode::ProceduralIsland { seed } => {
+            let started = Instant::now();
+            let (grid, stats) = procedural_island_grid(seed);
+            let generation_ms = started.elapsed().as_secs_f64() * 1_000.0;
+            println!(
+                "Procedural island seed {seed}: {} blocks ({} ores) in a {}x{}x{} grid, \
+                 generated in {generation_ms:.3} ms",
+                stats.total(),
+                stats.ores(),
+                grid.width(),
+                grid.height(),
+                grid.depth(),
+            );
+            (
+                procedural_island_camera(aspect_ratio),
+                procedural_island_scene(grid)?,
+                PathBuf::from(format!("output/procedural_island_seed_{seed}.ppm")),
+                Some(format!(
+                    "Procedural island | seed {seed} | {}x{} footprint",
+                    ISLAND_CONFIG.footprint_width, ISLAND_CONFIG.footprint_depth,
+                )),
+            )
+        }
     };
     let lighting = phase2_lighting();
     let environment = Environment::sunset();
@@ -78,9 +123,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         lighting,
         environment,
         framebuffer,
-        Path::new(output_path),
+        &output_path,
+        overlay_label.as_deref(),
     )?;
     Ok(())
+}
+
+/// The camera of the showcase and the voxel diagnostic.
+fn development_camera(aspect_ratio: f32) -> OrbitalCamera {
+    OrbitalCamera::try_new(
+        Vec3::new(0.0, 0.7, 0.0),
+        0.55 + PI,
+        0.15,
+        10.0,
+        VERTICAL_FOV_DEGREES * PI / 180.0,
+        aspect_ratio,
+    )
+    .expect("Phase 2 camera configuration must be valid")
 }
 
 fn phase2_lighting() -> Lighting {
@@ -236,6 +295,58 @@ fn voxel_diagnostic_scene() -> Result<Scene, PpmLoadError> {
     Ok(scene)
 }
 
+/// Generates the diagnostic island for `seed` into a grid sized exactly to the island's region.
+///
+/// This grid is the scene's one global grid. Later islands will share a larger one; for a single
+/// island, a tight grid keeps every DDA step inside the island's own box.
+fn procedural_island_grid(seed: u64) -> (VoxelGrid, IslandStats) {
+    let bounds = ISLAND_CONFIG
+        .bounds()
+        .expect("procedural island configuration must be valid");
+    let extent = |min: i32, max: i32| (max - min + 1) as usize;
+    let mut grid = VoxelGrid::try_new(
+        bounds.min,
+        extent(bounds.min.x, bounds.max.x),
+        extent(bounds.min.y, bounds.max.y),
+        extent(bounds.min.z, bounds.max.z),
+    )
+    .expect("procedural island grid dimensions must be valid");
+    let stats = generate_island(&mut grid, &ISLAND_CONFIG, seed)
+        .expect("procedural island must fit the grid built from its bounds");
+    (grid, stats)
+}
+
+/// The procedural-island diagnostic: one generated island and no AABB objects or lights beyond
+/// the shared ambient and directional light. Terrain is generated before this, exactly once.
+fn procedural_island_scene(grid: VoxelGrid) -> Result<Scene, PpmLoadError> {
+    let (mut scene, _) = scene_with_block_materials()?;
+    scene
+        .set_voxel_grid(grid)
+        .expect("block materials are registered before the grid");
+    Ok(scene)
+}
+
+/// Orbits the island's visual center, a third of the way down from the surface toward the tip,
+/// rather than the world origin, so the island stays framed wherever its config places it.
+fn procedural_island_camera(aspect_ratio: f32) -> OrbitalCamera {
+    let center = ISLAND_CONFIG.center;
+    let surface_top = center.y as f32 + 1.0;
+    let target = Vec3::new(
+        center.x as f32,
+        surface_top - ISLAND_CONFIG.thickness as f32 / 3.0,
+        center.z as f32,
+    );
+    OrbitalCamera::try_new(
+        target,
+        ISLAND_CAMERA_YAW,
+        ISLAND_CAMERA_PITCH,
+        ISLAND_CAMERA_RADIUS,
+        VERTICAL_FOV_DEGREES * PI / 180.0,
+        aspect_ratio,
+    )
+    .expect("procedural island camera configuration must be valid")
+}
+
 fn set_block(grid: &mut VoxelGrid, (x, y, z): (i32, i32, i32), block: BlockType) {
     grid.set_world(VoxelPosition::new(x, y, z), Voxel::Block(block))
         .expect("voxel diagnostic blocks must lie inside its grid");
@@ -256,7 +367,10 @@ fn register_texture(
 mod tests {
     use std::f32::consts::FRAC_PI_4;
 
-    use super::{HEIGHT, WIDTH, phase2_lighting, phase2_test_scene, voxel_diagnostic_scene};
+    use super::{
+        HEIGHT, ISLAND_CONFIG, WIDTH, phase2_lighting, phase2_test_scene, procedural_island_camera,
+        procedural_island_grid, procedural_island_scene, voxel_diagnostic_scene,
+    };
     use crate::{
         camera::OrbitalCamera,
         environment::Environment,
@@ -264,8 +378,8 @@ mod tests {
         math::Vec3,
         ray::Ray,
         render::{Framebuffer, Renderer, renderer::tile_tests::assert_tiling_matches_reference},
-        scene::HitSource,
-        voxel::{BlockType, VoxelPosition},
+        scene::{HitSource, Scene},
+        voxel::{BlockType, Voxel, VoxelGrid, VoxelPosition},
     };
 
     #[test]
@@ -440,5 +554,236 @@ mod tests {
             let camera = development_camera(width, height);
             assert_tiling_matches_reference(&scene, &lighting, &camera, width, height);
         }
+    }
+
+    const ISLAND_SEED: u64 = 1847;
+    const ORES: [BlockType; 4] = [
+        BlockType::CoalOre,
+        BlockType::IronOre,
+        BlockType::GoldOre,
+        BlockType::DiamondOre,
+    ];
+
+    fn island_scene() -> Scene {
+        procedural_island_scene(procedural_island_grid(ISLAND_SEED).0).unwrap()
+    }
+
+    fn voxel_center(position: VoxelPosition) -> Vec3 {
+        position.min_corner() + Vec3::new(0.5, 0.5, 0.5)
+    }
+
+    #[test]
+    fn procedural_island_attaches_one_generated_grid_with_every_material() {
+        let (grid, stats) = procedural_island_grid(ISLAND_SEED);
+        let scene = procedural_island_scene(grid.clone()).unwrap();
+        let showcase = phase2_test_scene().unwrap();
+
+        assert_eq!(scene.voxel_grid(), Some(&grid));
+        assert_eq!(scene.len(), 0);
+        assert!(scene.point_lights().is_empty());
+        assert_eq!(scene.texture_count(), showcase.texture_count());
+        assert_eq!(scene.material_count(), showcase.material_count());
+        // The grid is exactly the island's region.
+        let bounds = ISLAND_CONFIG.bounds().unwrap();
+        assert_eq!(grid.origin(), bounds.min);
+        assert_eq!((grid.width(), grid.height(), grid.depth()), (16, 13, 16));
+        assert!(stats.total() > 500);
+
+        let materials = scene.block_materials().unwrap();
+        for block in BlockType::ALL {
+            assert!(scene.material(materials.material(block)).is_some());
+        }
+    }
+
+    #[test]
+    fn island_grass_is_hit_by_dda_with_canonical_grass() {
+        let scene = island_scene();
+        let materials = scene.block_materials().unwrap();
+        let ray = Ray::try_new(Vec3::new(0.5, 30.0, 0.5), Vec3::new(0.0, -1.0, 0.0)).unwrap();
+
+        let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+
+        assert_eq!(
+            hit.source,
+            HitSource::Voxel {
+                position: VoxelPosition::new(0, 0, 0),
+                block: BlockType::Grass,
+            }
+        );
+        assert_eq!(hit.geometry.position.y, 1.0);
+        assert_eq!(hit.material_id, materials.grass);
+        let grass = scene.material(hit.material_id).unwrap();
+        assert!(matches!(
+            grass.textures(),
+            TextureSelection::TopSideBottom { .. }
+        ));
+    }
+
+    #[test]
+    fn island_rock_and_ores_resolve_through_dda_to_their_materials() {
+        let scene = island_scene();
+        let grid = scene.voxel_grid().unwrap();
+        let materials = scene.block_materials().unwrap();
+        let bounds = ISLAND_CONFIG.bounds().unwrap();
+
+        // Straight up into every column's lowest block: cobblestone there is normal mapped.
+        let mut cobblestone_hits = 0;
+        for z in bounds.min.z..=bounds.max.z {
+            for x in bounds.min.x..=bounds.max.x {
+                let origin = Vec3::new(x as f32 + 0.5, -40.0, z as f32 + 0.5);
+                let ray = Ray::try_new(origin, Vec3::new(0.0, 1.0, 0.0)).unwrap();
+                let Some(hit) = scene.closest_hit(ray, 0.0, f32::INFINITY) else {
+                    continue;
+                };
+                let HitSource::Voxel { block, .. } = hit.source else {
+                    panic!("the island scene has no AABB objects");
+                };
+                assert_eq!(hit.material_id, materials.material(block));
+                if block == BlockType::Cobblestone {
+                    cobblestone_hits += 1;
+                    let material = scene.material(hit.material_id).unwrap();
+                    assert!(material.normal_map().is_some());
+                }
+            }
+        }
+        assert!(cobblestone_hits > 50);
+
+        // From the open cell beside every ore, toward the ore: the DDA reports that ore.
+        let mut ore_hits = 0;
+        for y in bounds.min.y..=bounds.max.y {
+            for z in bounds.min.z..=bounds.max.z {
+                for x in bounds.min.x..=bounds.max.x {
+                    let position = VoxelPosition::new(x, y, z);
+                    let Some(block) = grid.get_world(position).unwrap().block() else {
+                        continue;
+                    };
+                    if !ORES.contains(&block) {
+                        continue;
+                    }
+                    let open = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                        .into_iter()
+                        .map(|(dx, dz)| VoxelPosition::new(x + dx, y, z + dz))
+                        .find(|&n| !grid.is_occupied_world(n))
+                        .expect("ores are only placed with an open side");
+                    let start = voxel_center(open);
+                    let ray = Ray::try_new(start, voxel_center(position) - start).unwrap();
+
+                    let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+
+                    assert_eq!(hit.source, HitSource::Voxel { position, block });
+                    assert_eq!(hit.geometry.t, 0.5);
+                    assert_eq!(hit.material_id, materials.material(block));
+                    let material = scene.material(hit.material_id).unwrap();
+                    assert!(material.normal_map().is_none());
+                    ore_hits += 1;
+                }
+            }
+        }
+        assert!(ore_hits > 0, "seed {ISLAND_SEED} must expose ore");
+    }
+
+    #[test]
+    fn island_camera_orbits_the_island_center() {
+        let camera = procedural_island_camera(WIDTH as f32 / HEIGHT as f32);
+        let center = ISLAND_CONFIG.center;
+        let target = camera.target();
+
+        assert_eq!((target.x, target.z), (center.x as f32, center.z as f32));
+        assert!(target.y < center.y as f32 + 1.0);
+        assert!(target.y > (center.y - ISLAND_CONFIG.thickness as i32) as f32);
+        // Elevated above the surface, so the grass is visible as well as the underside.
+        assert!(camera.position().y > center.y as f32 + 1.0);
+    }
+
+    #[test]
+    fn orbit_and_zoom_render_the_same_unchanged_terrain() {
+        let scene = island_scene();
+        let generated = scene.voxel_grid().unwrap().clone();
+        let lighting = phase2_lighting();
+        let environment = Environment::sunset();
+        let mut framebuffer = Framebuffer::try_new(32, 18).unwrap();
+        let mut camera = procedural_island_camera(32.0 / 18.0);
+        let mut renders = Vec::new();
+
+        for _ in 0..6 {
+            Renderer::render(&camera, &scene, &lighting, &environment, &mut framebuffer).unwrap();
+            assert!(framebuffer.pixels().iter().all(|color| color.is_finite()));
+            renders.push(framebuffer.pixels().to_vec());
+            camera.orbit_yaw(1.1);
+            camera.orbit_pitch(-0.2);
+            camera.adjust_radius(-2.5);
+        }
+
+        // Every viewpoint differs, yet the scene's terrain never changed and still equals a fresh
+        // generation of the same seed.
+        assert!(renders.windows(2).all(|pair| pair[0] != pair[1]));
+        assert_eq!(scene.voxel_grid(), Some(&generated));
+        assert_eq!(
+            &procedural_island_grid(ISLAND_SEED).0,
+            scene.voxel_grid().unwrap()
+        );
+    }
+
+    #[test]
+    fn procedural_island_renders_from_assorted_viewpoints() {
+        let scene = island_scene();
+        let lighting = phase2_lighting();
+        let environment = Environment::sunset();
+        let mut framebuffer = Framebuffer::try_new(32, 18).unwrap();
+        let target = procedural_island_camera(1.0).target();
+
+        for yaw_step in 0..8 {
+            for pitch in [-1.2, -0.3, 0.25, 1.3] {
+                for radius in [3.0, 12.0, 40.0] {
+                    let camera = OrbitalCamera::try_new(
+                        target,
+                        yaw_step as f32 * FRAC_PI_4 + 0.2,
+                        pitch,
+                        radius,
+                        50.0_f32.to_radians(),
+                        32.0 / 18.0,
+                    )
+                    .unwrap();
+                    Renderer::render(&camera, &scene, &lighting, &environment, &mut framebuffer)
+                        .unwrap();
+                    assert!(framebuffer.pixels().iter().all(|color| color.is_finite()));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn procedural_island_tiling_matches_the_sequential_reference() {
+        let scene = island_scene();
+        let lighting = phase2_lighting();
+
+        for (width, height) in [(WIDTH, HEIGHT), (70, 41)] {
+            let camera = procedural_island_camera(width as f32 / height as f32);
+            assert_tiling_matches_reference(&scene, &lighting, &camera, width, height);
+        }
+    }
+
+    #[test]
+    fn island_grid_holds_only_generated_terrain() {
+        let (grid, stats): (VoxelGrid, _) = procedural_island_grid(ISLAND_SEED);
+        let origin = grid.origin();
+        let mut count = 0;
+        for y in 0..grid.height() as i32 {
+            for z in 0..grid.depth() as i32 {
+                for x in 0..grid.width() as i32 {
+                    let voxel = grid
+                        .get_world(VoxelPosition::new(origin.x + x, origin.y + y, origin.z + z))
+                        .unwrap();
+                    if let Voxel::Block(block) = voxel {
+                        assert!(!matches!(
+                            block,
+                            BlockType::Glass | BlockType::Lava | BlockType::Obsidian
+                        ));
+                        count += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(count, stats.total());
     }
 }

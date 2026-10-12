@@ -14,7 +14,9 @@ Snell refraction with Schlick Fresnel for glass, emissive lava with a local poin
 derived normal map for cobblestone. Phase 4 (performance architecture) is implemented and has
 passed its final technical audit: a dense voxel grid, 3D DDA traversal, hybrid voxel + AABB scene
 queries, and a deterministic tile renderer whose tiles scoped CPU worker threads claim dynamically.
-The larger EggWars world and the final scene do not exist yet; they belong to Phase 5.
+Phase 5 (the EggWars world) is in progress: Mission 28 added a deterministic, seeded procedural
+floating-island generator that writes one 16×16 island into the scene's voxel grid. The five-island
+arena, bridges, structures, and the final scene do not exist yet.
 
 ## Current Status
 
@@ -23,8 +25,8 @@ The larger EggWars world and the final scene do not exist yet; they belong to Ph
 | 1 — Core Raytracer | Complete and audited |
 | 2 — Materials, Textures, and Lighting | Complete and audited |
 | 3 — Raytracing Effects | Complete and audited |
-| 4 — Performance Architecture | Implemented and technically audited (see Phase 4 Audit); formal acceptance by the project owner pending |
-| 5 — EggWars World | Not started |
+| 4 — Performance Architecture | Complete and audited (see Phase 4 Audit) |
+| 5 — EggWars World | In progress: Mission 28 (procedural floating island) complete |
 
 The rendering pipeline is: every radiance and shadow ray queries one hybrid scene (3D DDA over a
 voxel grid plus a linear scan of arbitrary AABB objects), tiles of the framebuffer are claimed
@@ -33,8 +35,9 @@ sunset/night environment in world space. Every radiance ray flows through one bo
 trace path; reflective materials launch recursive reflection rays and transparent materials launch
 recursive Snell refraction rays whose split with reflection follows Schlick's Fresnel
 approximation. Lava is self-luminous and lights nearby surfaces through a finite local point light.
-Cobblestone is normal mapped from a map derived offline from its own texture. The only scenes that
-exist are two diagnostics: the default five-block showcase and the small voxel diagnostic scene.
+Cobblestone is normal mapped from a map derived offline from its own texture. The scenes that exist
+are three diagnostics: the default five-block showcase, the small voxel diagnostic scene, and one
+seeded procedural floating island.
 
 The current implementation includes:
 
@@ -80,17 +83,20 @@ The current implementation includes:
 - a deterministic tile renderer: the framebuffer is split into 16×16 tiles.
 - dynamic tile-based CPU multithreading: one scoped worker thread per available CPU claims tiles
   from an atomic counter, with output byte-identical to the sequential renderer.
+- a deterministic procedural floating-island generator: a seeded 16×16 radial-mask island of
+  grass, dirt, and a tapered cobblestone underside with exposed ores, generated once into the
+  scene's voxel grid and selected with `--procedural-island` / `--seed <u64>`.
 
 ## Architecture
 
 ```text
-Source PNG assets
-        |
-        | offline preparation
-        v
-Runtime PPM assets -> TextureRegistry -> Material / MaterialId
-                                              |
-                                              v
+Source PNG assets                      Seed + IslandConfig
+        |                                      |
+        | offline preparation                  | procedural generation, once per scene
+        v                                      v
+Runtime PPM assets -> TextureRegistry -> Material / MaterialId    VoxelGrid (one, global)
+                                              |                        |
+                                              v                        v
           Scene -> AABB objects (linear scan) -----+
                    VoxelGrid + BlockMaterials (DDA) -+-> nearest SurfaceHit -> SceneHit
                                                                                   |
@@ -938,6 +944,137 @@ Recommendations only; none of this is implemented.
 - Preserve the established material reflectivity values, including grass, cobblestone, and lava.
 - Measure the real final scene before optimizing further.
 
+## Procedural Floating Islands (Phase 5, Mission 28)
+
+`src/world/` generates Minecraft-style floating islands into the scene's single global
+`VoxelGrid`. Generation runs once while the scene is built; the renderer, tracer, DDA, scene
+queries, lighting, and materials are unchanged and never sample noise. Camera orbit and zoom only
+rerender the same grid.
+
+### API
+
+```rust
+pub struct IslandConfig {
+    pub center: VoxelPosition, // x/z: footprint center line; y: surface (flat grass) level
+    pub footprint_width: u32,  // X extent, default 16
+    pub footprint_depth: u32,  // Z extent, default 16
+    pub thickness: u32,        // surface level down to the deepest possible block, inclusive
+}
+
+IslandConfig::new(center, thickness)            // a standard 16×16 island
+IslandConfig::bounds() -> Result<IslandBounds, IslandError>
+generate_island(&mut VoxelGrid, &IslandConfig, seed: u64) -> Result<IslandStats, IslandError>
+```
+
+The footprint covers world `x` in `center.x - width / 2 ..` for `width` cells (likewise `z`), so a
+16-wide island at `center.x = 0` spans `-8..=7`. `bounds()` is the box every block of the island lies
+in for any seed: the full footprint, from `center.y - (thickness - 1)` up to `center.y + 1`. The
+seed is a separate argument, so one placement can be regenerated with any variation, and future
+islands can share one grid at different centers, including negative coordinates.
+
+**Validation before writing.** `generate_island` rejects a zero footprint (`ZeroFootprint`), a
+thickness below 5 (`ThicknessTooSmall`: a rim column needs grass, dirt, and rock), any cell of the
+region beyond the `i32` range (`CoordinateOverflow`), and a region not entirely inside the grid
+(`OutsideGrid`). All checks run before the first write, so an error leaves the grid untouched and an
+island is never clipped. Only the island's own blocks are written; other cells keep their contents.
+
+### Determinism
+
+Every random decision is a pure hash of `(seed, domain, integer coordinates)`: SplitMix64's
+finalizer folds in the seed, an eight-byte domain tag, and each coordinate in turn. There is no
+RNG stream, no global state, no hash map, and no time or OS randomness, so results do not depend on
+call order, on how many values another feature draws, or on the grid's previous contents.
+Coordinates are local to the footprint, so a translated island is the same island. Smooth
+variation is value noise (hashed lattice values blended with smoothstep weights) using only
+`+ - * / floor round sqrt` on `f32`, which IEEE 754 defines exactly; no `atan2`, `sin`, or `pow` is used, so
+a seed gives bit-identical terrain on every platform for a fixed code version. A test pins the
+fingerprint of the reference seed's voxels. Future generator changes may change historical seeds;
+there is no versioning.
+
+Independent domains: silhouette (`isl-silh`) and its detail octave (`isl-sdet`), surface height
+(`isl-surf`), dirt depth (`isl-dirt`), underside jitter (`isl-undr`) and tip offset (`isl-utip`),
+and ore clusters (`isl-orec`) and ore fill (`isl-oref`). A new feature takes a new tag and cannot
+shift existing terrain or ores.
+
+### Shape
+
+The generator evaluates every one of the 16 × 16 footprint cells and plans one vertical run of
+blocks per cell.
+
+- **Radial mask.** For cell `(i, j)`, `nx = (i + 0.5 - W/2) / (W/2)` and likewise `nz`, so the
+  footprint edge is at 1. The cell is land when `sqrt(nx² + nz²) <= R(direction)`, where
+  `R = 0.96 + 0.12·n₅ + 0.05·n₉` and `n₅`, `n₉` are smooth periodic noises in `[-1, 1)` with 5 and 9
+  control points around the outline. Direction is a "diamond angle" (one division instead of
+  `atan2`). `R` stays in `[0.79, 1.13]`: corners are always empty, everything within 0.79 is land,
+  and the island spans at least 12 (typically 14–16) cells on each axis. Because `R` depends only on
+  direction, the silhouette is star-shaped around the center: no detached cells, no spikes.
+- **Surface.** With `edge = distance / R`, the grass is exactly at the surface level for
+  `edge < 0.45` (a flat center for future structures). Outside it, value noise at a 4-cell scale
+  raises coherent patches by one block (`noise > 0.62`, only for `edge < 0.85`) and sinks patches
+  at the rim by one (`noise < 0.38`, only for `edge > 0.8`). Grass is always at level −1, 0, or +1.
+- **Dirt.** `1 + floor(2.2 · noise)` blocks (4-cell scale): mostly one or two, occasionally three,
+  always leaving at least one rock block below.
+- **Underside.** Depth below the surface level falls from the full thickness under a tip offset by
+  up to 0.2 of the half extent (per seed) to 4 at the rim:
+  `depth = 4 + (thickness - 5) · t · (0.4 + 0.6 t) ± 1.5 · t · noise`, with `t = 1 - distance to tip / R`.
+  The profile lies between a cone and a spike, giving wide shoulders and a small irregular tip;
+  the jitter fades toward the rim.
+- **Coherence.** Every column contains the level just below the surface, so the 4-connected
+  footprint forms one face-connected landmass with no cavities or floating blocks, and below the
+  lowest possible grass each layer is a subset of the layer above: the underside tapers
+  monotonically.
+
+### Layers and ores
+
+Each column is grass (canonical grass material: top, side, and dirt-bottom textures), then dirt
+(auxiliary dirt material), then cobblestone (canonical, normal mapped) down to its bottom. No new
+material, texture, glass, or lava is generated.
+
+Ores replace only cobblestone that has a side (`±X`/`±Z`) face open to the air, the rock surface an
+orbiting camera sees; interior and downward-only faces would hide them. Local space is divided into
+2 × 2 × 2 cluster cells. Each cluster cell draws one ore or none, and each eligible block inside it
+becomes that ore with the ore's fill probability, giving small clusters without order-dependent
+spreading:
+
+| Ore | Cluster probability | Fill | Mean per island (seeds 0–255) |
+| --- | ---: | ---: | ---: |
+| Coal | 10% | 75% | 14.6 |
+| Iron | 6% | 65% | 7.3 |
+| Gold | 3% | 55% | 3.5 |
+| Diamond | 1.5% | 35% | 1.2 |
+
+No island is guaranteed every ore; across seeds the rarity order always holds.
+
+### Diagnostic scene and CLI
+
+```bash
+cargo run --release -- --procedural-island --seed 1847
+cargo run --release -- --seed 1847        # --seed alone implies --procedural-island
+cargo run --release -- --procedural-island # default seed 42
+```
+
+The island is `IslandConfig::new((0, 0, 0), 12)`, generated into a 16 × 13 × 16 grid sized
+exactly to its bounds (3,328 cells), with no AABB objects and no point lights, under the existing
+ambient and directional light and sunset environment. The camera orbits the island's visual center
+(the footprint center, a third of the thickness below the grass) from the lit south-east side at
+pitch 0.25 and radius 22, high enough to see the grass and low enough to see the underside.
+Default seed 42 was chosen because its initial view shows coal, iron, and diamond ore on the lit
+rock face. The startup log prints the seed, block and ore counts, grid size, and generation time;
+the window overlay shows the active seed; the first render is written to
+`output/procedural_island_seed_<seed>.ppm`. The same seed rebuilds the same island after any
+restart, with no saved world files.
+
+The parser uses the standard library only. A seed is ASCII decimal digits (leading zeros allowed)
+from `0` to `18446744073709551615`. A missing value, a negative, signed, or non-decimal value,
+overflow, a repeated option, an unknown argument, or combining `--voxel-diagnostic` with the island
+options prints an error and the usage line and exits with status 2; a malformed seed never falls
+back to the default. No arguments still renders the showcase.
+
+Inspected seeds 1847, 2026, 42, 0, 7, and 99 (initial view, from below, from above, and close up)
+all show a round, irregular grass top with a flat center, one-block terraces, a grass/dirt rim, a
+cobblestone underside tapering to a small tip, visible ore clusters on side faces, and no holes,
+detached blocks, or square outline.
+
 ## Known Limitations
 
 These are deliberate scope boundaries of the current diagnostic renderer, not hidden defects:
@@ -968,8 +1105,13 @@ These are deliberate scope boundaries of the current diagnostic renderer, not hi
   contact.
 - Materials, light colors, and the sun direction are diagnostic values. Final artistic tuning
   belongs to the EggWars scene.
-- The final EggWars scene does not exist yet: no procedural terrain, no islands, no seeds, and no
-  storytelling props. Only the two diagnostic scenes can be rendered.
+- The final EggWars scene does not exist yet: only one procedural diagnostic island, no arena of
+  five islands, no bridges, and no storytelling props. Three diagnostic scenes can be rendered.
+- The island generator writes only the island's blocks and never clears other cells in its region;
+  overlapping islands are the caller's responsibility. Islands contain no glass or lava, and ores
+  appear only on side-exposed rock (none hidden inside, none on downward-only faces).
+- Changing generator constants changes what every seed produces; seeds are reproducible for a fixed
+  code version only.
 
 ## Controls
 
@@ -988,7 +1130,8 @@ cargo run --release
 ```
 
 Add `-- --voxel-diagnostic` to render the small hybrid voxel diagnostic scene instead of the
-default five-block showcase.
+default five-block showcase, or `-- --procedural-island [--seed <u64>]` (or just `-- --seed <u64>`)
+to render one procedural floating island; see Procedural Floating Islands above.
 
 Rendering uses one CPU worker thread per available CPU; the application prints the count at
 startup. The development framebuffer is rendered at 320×180 and presented in a 960×540 window using an
@@ -1012,7 +1155,8 @@ The initial CPU render is exported to:
 output/phase1.ppm
 ```
 
-or, with `--voxel-diagnostic`, to `output/voxel_diagnostic.ppm`.
+or, with `--voxel-diagnostic`, to `output/voxel_diagnostic.ppm`, or, in procedural-island mode, to
+`output/procedural_island_seed_<seed>.ppm`.
 
 The `output/` directory is ignored by Git so generated renders remain local debugging artifacts.
 
@@ -1196,6 +1340,30 @@ steps, seven pitches, six radii from 0.8 to 25) at 64×36 over both the voxel di
 the showcase produced no render error and no non-finite pixel. These are local development
 observations.
 
+### Procedural island (Mission 28)
+
+Apple M3 Pro, 11 CPUs, release build, 320×180, in one process: generation is the median of 200
+runs including the grid allocation; renders are medians of 25 (one and four workers, automatic =
+11) of the initial view.
+
+| Seed | Blocks | Ores | Generation | 1 worker | 4 workers | Automatic |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1847 | 1,089 | 29 | 0.040 ms | 4.99 ms | 1.40 ms | 0.83 ms |
+| 2026 | 1,280 | 40 | 0.016 ms | 4.89 ms | 1.40 ms | 0.85 ms |
+| 42 | 1,226 | 21 | 0.015 ms | 4.67 ms | 1.28 ms | 0.79 ms |
+| 0 | 1,168 | 33 | 0.015 ms | 4.66 ms | 1.32 ms | 0.82 ms |
+| 7 | 1,223 | 26 | 0.015 ms | 4.49 ms | 1.28 ms | 0.77 ms |
+| 99 | 1,267 | 18 | 0.015 ms | 4.82 ms | 1.37 ms | 0.82 ms |
+| `u64::MAX` | 1,232 | 31 | 0.016 ms | 4.86 ms | 1.33 ms | 0.80 ms |
+
+Across seeds 0–255 an island has 966–1,452 blocks in its 3,328-cell grid. Seed 1847 under orbit and
+zoom (automatic / one worker, ms): initial 0.83 / 4.87, orbit +90° 0.76 / 4.46, +180° 0.70 / 4.04,
+from below 0.92 / 5.57, from above 0.81 / 4.69, radius 10 1.47 / 9.94, radius 5 0.69 / 3.82,
+radius 45 0.53 / 2.33. Startups through `cargo run --release -- --procedural-island --seed 1847`
+reported 0.02–0.07 ms of generation and 1.07–1.50 ms for the first render. Generation is negligible next to one frame, and the
+renderer needed no new acceleration. These are local development observations, not universal
+benchmarks.
+
 ## Testing
 
 The current suite contains 529 tests covering vector arithmetic and normalization, ray invariants,
@@ -1235,7 +1403,23 @@ worker panic propagation with its message, exactly-once pixel coverage, one reus
 worker, and a render that still works after a failed one. Every AABB and every voxel remains an opaque shadow blocker, including
 glass.
 
-The Phase 4 audit changed no runtime behavior and added no tests; the suite is unchanged at 529
+Mission 28 adds 48 tests, for 577 passing: hash purity, seed and domain separation, `u64::MAX` and
+zero seeds, smooth and periodic noise, and the diamond angle; island reproducibility, idempotent
+regeneration, seed variation, order and prior-content independence, unrelated domain sampling, and
+a pinned reference fingerprint; placement at the origin and at negative, translated, and extreme
+coordinates with identical local shape, documented bounds, no writes outside the region, and every
+validation error leaving the grid untouched; the full 16 × 16 evaluation domain, a round
+non-square silhouette within its radial bounds, a flat occupied center, and a 4-connected
+footprint; grass over one to three dirt over rock in every column, a single face-connected
+landmass, one-level surface variation, and a monotonically tapering underside; ore rarity across
+seeds, deterministic and seed-dependent ore arrangements, side-exposed ores only, and only terrain
+block types; scene integration (DDA hits on grass with the canonical material, normal-mapped
+cobblestone, and every ore's auxiliary material), the island camera target, unchanged terrain
+under orbit and zoom, an assorted-viewpoint render sweep, and tiling equivalence; and the CLI
+(valid, zero, and maximum seeds, missing, negative, invalid, and overflowing values, unknown and
+repeated options, and the existing modes).
+
+The Phase 4 audit changed no runtime behavior and added no tests; the suite was unchanged at 529
 passing tests.
 
 The Phase 3 audit changed no runtime behavior and added no tests; the count was unchanged at 343.
@@ -1258,13 +1442,13 @@ runs `cargo fmt --check`, `cargo test`, `cargo check`, `cargo build --release`, 
 
 ## Planned Features
 
-The following are not yet implemented. Phase 4 (performance architecture) is complete and audited
-and Phase 5 (EggWars world) has not started:
+The following are not yet implemented. Phase 5 (EggWars world) is in progress; Mission 28 added
+the procedural floating-island generator:
 
 - transparent or colored shadows through glass, absorption, and nested or merged glass media;
 - procedural lava-region extraction into representative point lights;
-- deterministic procedural 16×16 floating islands and configurable seeds;
-- ore placement in terrain and the EggWars battle-aftermath scene;
+- the four outer islands and the larger central island in one shared grid;
+- bridges, structures, defenses, chests, arrows, and the EggWars battle-aftermath scene;
 - visual storytelling, the final presentation and video, and final performance and visual polish;
 - grouped acceleration for decorative AABB objects, only if the final scene's measured object count
   warrants it.
@@ -1286,7 +1470,7 @@ intentionally in the final EggWars diorama, which does not exist yet.
 | Emissive lava | Implemented: visible self-radiance plus a local lava point light with hard shadows |
 | Normal mapping | Implemented: derived cobblestone normal map lighting with a per-face tangent basis |
 | Sunset/night skybox/environment | Procedural CPU environment implemented; shared miss path for every traced ray |
-| Procedural floating-island terrain (16×16, seeded) | Planned (Phase 5) |
+| Procedural floating-island terrain (16×16, seeded) | Implemented (Mission 28): one seeded 16×16 radial-mask island with layered terrain and visible ores in the procedural-island diagnostic; the five-island arena is pending |
 | Voxel grid and 3D DDA | Implemented and audited; exercised only by the voxel diagnostic scene |
 | Tile-based CPU parallel rendering | Implemented and audited with scoped standard-library threads and dynamic tile claiming (about 5.8× on 11 CPUs for the default view, 6.0× for close glass); byte-identical to the sequential renderer |
 | Visually complex, visually attractive scene | Pending: the final EggWars scene does not exist |

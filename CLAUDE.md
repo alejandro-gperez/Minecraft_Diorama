@@ -19,8 +19,35 @@ player entity or gameplay system.
 - Phase 1 — Core Raytracer: complete.
 - Phase 2 — Materials, Textures, and Lighting: complete.
 - Phase 3 — Raytracing Effects: complete (missions 14–20).
-- Phase 4 — Performance Architecture: implementation complete (missions 21–27B) and technically
-  audited; the user has not yet formally accepted the audit. `AGENTS.md` still names Phase 4 current.
+- Phase 4 — Performance Architecture: complete and audited (missions 21–27B).
+- Phase 5 — Procedural EggWars Diorama: in progress (`AGENTS.md` names it current). Mission 28
+  complete; Mission 29 is next and needs its own prompt.
+- Mission 28 procedural floating island: complete. `src/world/noise.rs`: stateless SplitMix64-style
+  `hash3(seed, Domain, x, y, z)`, smooth 2D value noise, periodic 1D noise, and a "diamond angle"
+  (no `atan2`/`sin`/`pow`: only exactly rounded float ops, so seeds are bit-reproducible across
+  platforms). Each feature has its own 8-byte `Domain` tag (silhouette, detail, surface, dirt,
+  underside, tip, ore cluster, ore fill); no RNG stream. `src/world/island.rs`:
+  `IslandConfig { center, footprint_width, footprint_depth, thickness }` (`new` = 16×16; `center.y`
+  is the flat grass level), `bounds()` (seed-independent region), and
+  `generate_island(&mut VoxelGrid, &IslandConfig, seed) -> Result<IslandStats, IslandError>`, which
+  validates everything (zero footprint, thickness < 5, i32 overflow, region outside grid) before
+  writing, never clips, and writes only island blocks. Shape: per-column plan over all W×D cells;
+  star-shaped radial mask `R ∈ [0.79, 1.13]` of the half extent; flat center (`edge < 0.45`); grass
+  at −1/0/+1; dirt 1–3; cobblestone body to a depth tapering from `thickness - 1` under an offset tip
+  to 4 at the rim; every column contains level −1 (one connected landmass), lower layers are subsets
+  (monotonic taper). Ores replace only side-exposed cobblestone via 2×2×2 cluster cells (cluster /
+  fill: coal 10%/75%, iron 6%/65%, gold 3%/55%, diamond 1.5%/35%). Local coordinates make it
+  translation invariant. A test pins seed 1847's fingerprint; constant changes update it.
+- Seed CLI (`src/cli.rs`, std only): no args = showcase; `--voxel-diagnostic`;
+  `--procedural-island [--seed <u64>]` or `--seed <u64>` alone; default seed 42. Malformed,
+  negative, overflowing, missing, repeated, unknown, or conflicting arguments exit 2 with usage.
+  Island mode: `ISLAND_CONFIG = IslandConfig::new((0,0,0), 12)` in `main.rs`, one global grid sized
+  to its bounds (16×13×16), no objects or lights, camera targets the island's visual center (yaw
+  1.05, pitch 0.25, radius 22), PPM `output/procedural_island_seed_<seed>.ppm`, seed shown in the
+  overlay (`run` takes an `overlay_label`). Showcase and voxel diagnostic PPMs are byte-identical
+  to the previous commit; no renderer, DDA, scene-query, lighting, or material change.
+- Mission 28 measurements (M3 Pro, 320×180, release): generation 0.015–0.04 ms; 966–1,452 blocks
+  over seeds 0–255; initial island view ~0.8 ms automatic, ~1.3 ms at 4 workers, ~4.7 ms at 1.
 - Mission 21 voxel grid foundation: complete. `src/voxel/` holds `BlockType`, one-byte `Voxel`,
   integer `VoxelPosition`, a dense `VoxelGrid` with a configurable origin, and `BlockMaterials`.
 - Mission 22 voxel scene integration foundation: complete. `BlockType` adds `Dirt` (10 variants,
@@ -115,10 +142,11 @@ player entity or gameplay system.
   glass → air → glass; glass on a block exposes that block's interior face); `1e-4` biases assume
   unit scale; edge/corner contact follows the DDA's half-open conventions; AABB objects are scanned
   linearly (group them only if the real scene's measured object count warrants it); the final
-  EggWars scene does not exist. The window title in `src/app/app.rs` still says "Phase 3".
+  EggWars scene does not exist (one diagnostic island only). The window title in
+  `src/app/app.rs` still says "Phase 3".
 - Rubric: all raytracing effects, DDA, and parallel rendering exist in code and diagnostic scenes
   only; they count only when visibly and intentionally used in the final diorama (Phase 5–6).
-- Current suite: 529 passing tests. The showcase PPM is byte-identical to the Mission 21 render.
+- Current suite: 577 passing tests. The showcase PPM is byte-identical to the Mission 21 render.
 - Development resolution: 320×180, presented at 960×540.
 - Pre-Phase-4 baseline (local, single-threaded, brute-force AABB traversal): default view about
   4.9 ms, close cobblestone about 10.7 ms, close lava about 18 ms, close glass about 30 ms. These
@@ -128,17 +156,16 @@ player entity or gameplay system.
   showcase through the release app binary: test-binary layout shifted it by ~10% with no code cause.
 - Compiler state: no rustc warnings; clippy reports only the known `clippy::module_inception`
   warnings (plus two pre-existing `assertions_on_constants` warnings in test code).
-- Next work: the user reviews this audit and, if accepted, formally advances the phase. Phase 5
-  planning comes next; Phase 5 implementation is not authorized by this checkpoint.
+- Next work: Mission 29, from the user's exact prompt. Not authorized by this checkpoint.
 
 The repository is expected to begin each mission from a clean checkpoint. Verify the actual
 repository state instead of assuming this section is current.
 
 ## Mission boundary
 
-Phase 4 implementation is complete and audited. Do not start further Phase 4 optimization (SIMD,
-persistent pools, BVH, reciprocal DDA) or Phase 5 (procedural terrain, the EggWars scene) from this
-handoff. The user and planning assistant
+Phase 4 is complete and audited; Phase 5 is in progress with Mission 28 complete. Do not start
+further Phase 4 optimization (SIMD, persistent pools, BVH, reciprocal DDA), Mission 29, the
+five-island arena, bridges, or structures from this handoff. The user and planning assistant
 will provide the exact prompt and API for each future mission. Do not implement future missions
 early. Stop at mission boundaries.
 
@@ -192,13 +219,14 @@ user explicitly requests it.
 - Original classic Minecraft texture assets are converted offline to runtime PPM and loaded by
   project-owned CPU code; do not recreate final block artwork procedurally without approval.
 - Face-specific texture selection must remain possible.
-- Terrain will later use a configurable deterministic seed.
+- Terrain uses a configurable deterministic `u64` seed and stateless per-domain hashing; never
+  introduce a shared mutable RNG stream or external randomness.
 - Future performance architecture is a voxel grid, 3D DDA, and dynamic tile-based CPU
   multithreading.
 - The voxel grid stores block identity only: no per-voxel `Aabb` or `Material`, and interior
-  voxels stay stored. Never also add `SceneObject`s duplicating occupied voxels. Do not introduce
-  persistent thread pools, unsafe framebuffer writes, SIMD, or procedural terrain before their
-  missions.
+  voxels stay stored. Never also add `SceneObject`s duplicating occupied voxels. All islands share
+  one global `VoxelGrid` (no chunks, octrees, or per-island grids). Do not introduce persistent
+  thread pools, unsafe framebuffer writes, or SIMD before their missions.
 
 ## Phase 3 summary
 
