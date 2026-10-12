@@ -22,6 +22,67 @@ damaged, severed, abandoned), a small base with a nine-block obsidian egg defens
 island, and a ruined central structure with glass windows. Eggs, chests, arrows, lava, and the
 final lighting and composition do not exist yet.
 
+## Final Delivery
+
+The delivered diorama is the seeded EggWars arena. Reference seed: **1847**.
+
+```bash
+cargo run --release -- --eggwars --seed 1847
+```
+
+This opens a 1280×720 window (640×360 CPU framebuffer, exact 2× nearest-neighbor presentation) and
+writes `output/eggwars_seed_1847.ppm`. Seeds are deterministic: the same seed always builds the
+same arena, byte for byte. Other seeds: `-- --eggwars --seed <u64>`.
+
+**Architecture.** `Scene + OrbitalCamera -> CPU raytracer -> CPU framebuffer -> presentation ->
+Raylib window`. Raylib only opens the window, reads input, times frames, and uploads pixels
+(`src/app/app.rs`); everything else is project code on the Rust standard library. Modules:
+`math`, `ray`, `geometry` (AABBs), `voxel` (one global dense grid plus 3D DDA traversal), `scene`
+(hybrid voxel + AABB queries, grouped decorative AABBs), `material` (canonical materials, PPM
+textures, decorative materials), `lighting`, `environment` (procedural sunset/night sky), `render`
+(recursive trace, tiles, scoped-thread workers), `camera`, and `world` (stateless seeded noise,
+island generator, five-island arena, bridges/structures construction, battle-aftermath props).
+
+**What the diorama shows (seed 1847).** Five procedural floating islands (24×24 center, four
+16×16 outer); bridges in four states (North complete, East damaged, South severed, West
+incomplete); nine-block obsidian egg defenses (North intact, West damaged, East breached, South
+destroyed); a surviving egg on West and a sealed intact North egg; open chests and embedded arrows
+in the central ruin; cobblestone normal mapping; reflective obsidian; glass windows with Snell
+refraction and Schlick Fresnel; the procedural sunset-to-night sky; and, in the final pass, a small
+2×2 **emissive lava pool** set into the ruin's floor, lit by one representative warm point light
+(never one light per lava voxel) that visibly warms the surrounding cobblestone. Zoom into the
+ruin (`W` or mouse wheel) to see it clearly.
+
+**Camera controls.** Arrow keys orbit (horizontal) and change elevation; `W` / `S` or the mouse
+wheel zoom in and out; `Escape` exits. The camera is an external orbital camera around the arena;
+there is no player or gameplay.
+
+**Rubric features implemented and visible in the final scene.** CPU raytracing; orbital camera and
+zoom; five textured canonical materials; Lambert/Blinn-Phong lighting with hard shadows;
+reflection; refraction and Fresnel; emissive lava with a local point light; cobblestone normal
+mapping; procedural sunset/night environment; seeded procedural island terrain; voxel grid with 3D
+DDA; deterministic tile-based multithreaded rendering.
+
+**Tests.** 731 passing (`cargo test`). `cargo fmt --check`, `cargo check`, and `cargo build
+--release` are clean.
+
+**Performance (Apple M3 Pro, release, 640×360, seed 1847).** Initial view about 9 ms with the
+automatic worker count (one per CPU); earlier measurements of the same scene without the lava pool
+were 61 / 16 / 8 ms at 1 / 4 / automatic workers. Interactive views run in roughly 10–35 ms
+depending on the pose. Local observations, not universal benchmarks.
+
+**Known limitations.** Glass and lava cast opaque shadows; no nested-medium tracking (glass
+touching another block shows that block's interior face); props are axis-aligned (no tilted lids
+or angled arrows); the sealed North egg is not instantiated; one lava pool and one lava light
+only (no general lava-region extraction); no camera collision (zoom can enter an island); no
+antialiasing; origin biases assume roughly unit-scale geometry.
+
+**Recording the demonstration video.** Run the command above in release mode, start a screen
+recording, and show: (1) the initial view with all five islands, (2) slow orbit with the arrow
+keys, (3) zoom to the central ruin to show the lava glow, chests, arrows, glass refraction and
+reflective obsidian, (4) zoom to the West egg and the broken bridges and defenses on the other
+islands, then (5) rerun with another seed (for example `--seed 42`) to show seed variation.
+
 ## Current Status
 
 | Phase | Status |
@@ -30,7 +91,7 @@ final lighting and composition do not exist yet.
 | 2 — Materials, Textures, and Lighting | Complete and audited |
 | 3 — Raytracing Effects | Complete and audited |
 | 4 — Performance Architecture | Complete and audited (see Phase 4 Audit) |
-| 5 — EggWars World | In progress: Missions 28 (procedural floating island), 29 (five-island arena), 30 (bridges, structures, and egg defenses), 30.5 (nine-block egg defenses and a 640×360 internal resolution), 31 (battle-aftermath decorations), and 31.25 (spatial grouping of decorative AABBs) complete |
+| 5 — EggWars World | Complete (final delivery adds the ruin lava pool and its light); Missions: Missions 28 (procedural floating island), 29 (five-island arena), 30 (bridges, structures, and egg defenses), 30.5 (nine-block egg defenses and a 640×360 internal resolution), 31 (battle-aftermath decorations), and 31.25 (spatial grouping of decorative AABBs) complete |
 
 The rendering pipeline is: every radiance and shadow ray queries one hybrid scene (3D DDA over a
 voxel grid plus a scan of arbitrary AABB objects that skips any spatial group whose bounds the ray
@@ -44,7 +105,7 @@ Cobblestone is normal mapped from a map derived offline from its own texture. Th
 are the default five-block showcase, the small voxel diagnostic scene, one seeded procedural
 floating island, and the seeded five-island EggWars arena with its bridges, bases, egg defenses,
 central ruin, and battle-aftermath props: two surviving eggs, shell fragments, open chests, arrows,
-and block fragments (no lava yet; final lighting and composition are pending).
+block fragments, and, in the final delivery pass, a small emissive lava pool in the central ruin with one representative point light.
 
 The current implementation includes:
 
@@ -2400,15 +2461,13 @@ bridges, structures, and egg defenses, Mission 31 its battle-aftermath props, an
 spatial grouping for those props:
 
 - transparent or colored shadows through glass, absorption, and nested or merged glass media;
-- procedural lava-region extraction into representative point lights;
-- lava and the final EggWars composition and lighting;
+- procedural lava-region extraction into representative point lights (the final scene has one hand-placed lava pool and light);
 - visual storytelling, the final presentation and video, and final performance and visual polish;
 
 ## Course Rubric Mapping
 
 "Implemented" below means the renderer feature exists and is demonstrated in the current
-diagnostic showcase of five blocks. Rubric credit also requires each feature to appear
-intentionally in the final EggWars diorama, which does not exist yet.
+diagnostic showcase of five blocks. Each feature also appears intentionally in the final EggWars diorama (seed 1847); see Final Delivery.
 
 | Target | Status |
 | --- | --- |
@@ -2424,16 +2483,14 @@ intentionally in the final EggWars diorama, which does not exist yet.
 | Procedural floating-island terrain (16×16, seeded) | Implemented (Missions 28–29): seeded radial-mask islands with layered terrain and visible ores; the EggWars arena has a 24×24 central island and four 16×16 outer islands from one global seed |
 | Voxel grid and 3D DDA | Implemented and audited; renders the voxel diagnostic, the procedural island, and the constructed five-island arena in one global grid |
 | Tile-based CPU parallel rendering | Implemented and audited with scoped standard-library threads and dynamic tile claiming (about 5.8× on 11 CPUs for the default view, 6.0× for close glass); byte-identical to the sequential renderer |
-| Visually complex, visually attractive scene | Pending: the final EggWars scene does not exist |
-| Visual storytelling | In progress: bridge damage and egg-defense states (Mission 30); surviving and broken eggs, open chests, arrows, and debris (Mission 31); final composition pending |
-| Final presentation and video | Pending (Phase 6) |
-| Final performance and visual polish | Pending (Phase 6) |
-| Final EggWars aftermath scene | Planned (Phase 5–6) |
+| Visually complex, visually attractive scene | Delivered: the five-island EggWars aftermath diorama |
+| Visual storytelling | Delivered: bridge damage and egg-defense states, surviving and broken eggs, open chests, arrows, debris, and a lava pool in the central ruin |
+| Final presentation and video | Video instructions in Final Delivery; recording is a manual step |
+| Final performance and visual polish | Delivered (about 9 ms initial view, 640×360) |
+| Final EggWars aftermath scene | Delivered |
 
-The status column describes code and diagnostic scenes only. A feature earns rubric credit when it
-is visibly and intentionally used in the final diorama, so none of the rows above is claimed as
-final credit yet.
+All rows above are used in the final diorama.
 
 ## Video
 
-Final project video: to be added during the delivery/polish phase.
+Final project video: recorded manually; see "Recording the demonstration video" under Final Delivery.

@@ -16,6 +16,16 @@ player entity or gameplay system.
 
 ## Verified checkpoint
 
+- FINAL DELIVERY PASS (supersedes the "next work" notes below): one commit adds a 2×2 lava pool to
+  the central ruin (`LAVA_POOL = 1..=2` in `construction/structures.rs`: lava at `FLOOR_Y` on the
+  south-east interior floor, cobblestone filling any sunken column below; clear of chests, arrows,
+  pillars) and one representative `PointLight` (`RUIN_LAVA_LIGHT_POSITION`, reusing the lava light
+  color/intensity/radius) added in `eggwars_diorama_scene`. Construction is now 303 blocks for seed
+  1847 (268 cobblestone, 4 lava, 29 obsidian, 2 glass); constructed fingerprint for 1847 is
+  `0x1E49_D73E_6655_CEBC`; the `linear_diorama` test helper copies the light. 731 tests pass; initial
+  view ≈ 9 ms at 640×360 (auto workers). README has the final delivery section. Mission 31.5 (free
+  camera) was deliberately not implemented.
+
 - Phase 1 — Core Raytracer: complete.
 - Phase 2 — Materials, Textures, and Lighting: complete.
 - Phase 3 — Raytracing Effects: complete (missions 14–20).

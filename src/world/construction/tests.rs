@@ -236,11 +236,11 @@ fn construction_never_replaces_terrain() {
             let count = added.iter().filter(|&&(_, b)| b == block).count();
             assert_eq!(count, arena.construction.count(block), "{block:?}");
         }
-        // Only the designed building blocks: no new materials, no lava, no terrain types.
+        // Only the designed building blocks (and the ruin's lava pool): no terrain types.
         for (_, block) in &added {
             assert!(matches!(
                 block,
-                BlockType::Cobblestone | BlockType::Obsidian | BlockType::Glass
+                BlockType::Cobblestone | BlockType::Obsidian | BlockType::Glass | BlockType::Lava
             ));
         }
     }
@@ -1073,6 +1073,10 @@ fn central_ruin_has_an_obsidian_floor_pillars_walls_and_an_open_middle() {
                 let floor = at(&arena.grid, (x, FLOOR_Y, z));
                 if central.inlay.contains(VoxelPosition::new(x, FLOOR_Y, z)) {
                     assert_eq!(floor, Some(BlockType::Obsidian));
+                } else if super::structures::LAVA_POOL.contains(&x)
+                    && super::structures::LAVA_POOL.contains(&z)
+                {
+                    assert_eq!(floor, Some(BlockType::Lava), "seed {seed}: ({x}, {z})");
                 } else {
                     // Cobblestone, or grass that already rises to the floor.
                     assert!(
@@ -1166,7 +1170,7 @@ fn reference_constructed_arena_fingerprint_is_stable() {
     assert_eq!(fingerprint(&built(1847).grid), REFERENCE_FINGERPRINT);
 }
 
-const REFERENCE_FINGERPRINT: u64 = 0x9B34_718C_2742_6F74;
+const REFERENCE_FINGERPRINT: u64 = 0x1E49_D73E_6655_CEBC;
 
 #[test]
 fn different_seeds_keep_the_construction_layout() {

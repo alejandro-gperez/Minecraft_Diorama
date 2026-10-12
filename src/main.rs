@@ -74,6 +74,10 @@ const LAVA_LIGHT_RADIUS: f32 = 5.0;
 /// `z 1..2`), half a block above the pool's center in an empty cell.
 const VOXEL_LAVA_LIGHT_POSITION: Vec3 = Vec3::new(2.0, 0.5, 1.5);
 
+/// The one representative light for the central ruin's lava pool (`x 1..3`, `z 1..3`, top at
+/// `y 2`), half a block above its center in the open interior.
+const RUIN_LAVA_LIGHT_POSITION: Vec3 = Vec3::new(2.0, 2.5, 2.0);
+
 fn main() -> Result<(), Box<dyn Error>> {
     let arguments = std::env::args_os().skip(1);
     let mode = match cli::parse_args(arguments.map(|a| a.to_string_lossy().into_owned())) {
@@ -487,7 +491,8 @@ fn eggwars_scene(grid: VoxelGrid) -> Result<Scene, PpmLoadError> {
 /// group's bounds skips its parts. Object order and the objects themselves are unchanged.
 ///
 /// The decorative materials are registered here, once, over one shared solid white texture; prop
-/// fragments of cobblestone and obsidian reuse the canonical materials. Props add no lights.
+/// fragments of cobblestone and obsidian reuse the canonical materials. Props add no lights; the
+/// ruin's lava pool gets the one representative point light.
 fn eggwars_diorama_scene(
     grid: VoxelGrid,
     decorations: &Decorations,
@@ -511,6 +516,15 @@ fn eggwars_diorama_scene(
                 .map(|part| SceneObject::new(part.bounds, materials.material(part.material))),
         );
     }
+    scene.add_point_light(
+        PointLight::try_new(
+            RUIN_LAVA_LIGHT_POSITION,
+            LAVA_LIGHT_COLOR,
+            LAVA_LIGHT_INTENSITY,
+            LAVA_LIGHT_RADIUS,
+        )
+        .expect("ruin lava light configuration must be valid"),
+    );
     Ok(scene)
 }
 
@@ -1630,7 +1644,11 @@ mod tests {
             .flat_map(|decoration| decorations.parts_of(decoration))
             .collect();
         assert_eq!(visible_parts.len(), scene.len());
-        assert!(scene.point_lights().is_empty(), "props add no lights");
+        assert_eq!(
+            scene.point_lights().len(),
+            1,
+            "one light for the ruin lava pool"
+        );
         // Ten block materials plus seven decorative ones; one shared white texture.
         assert_eq!(scene.material_count(), 17);
         assert_eq!(scene.texture_count(), 13);
@@ -2019,6 +2037,9 @@ mod tests {
         linear.add_decorative_materials(white).unwrap();
         for object in scene.objects() {
             linear.add(*object);
+        }
+        for light in scene.point_lights() {
+            linear.add_point_light(*light);
         }
         assert_eq!(linear.objects(), scene.objects());
         assert_eq!(linear.object_groups().count(), 0);

@@ -54,6 +54,9 @@ const CENTRAL_MIN: i32 = -4;
 const CENTRAL_MAX: i32 = 3;
 /// The 2×2 obsidian inlay at the center of the floor, `x` and `z` in this range.
 const INLAY: RangeInclusive<i32> = -1..=0;
+/// The small lava pool set into the floor's open south-east interior (`x` and `z` in this range),
+/// flush with the floor, clear of both chests, the wall arrows, and the pillars.
+pub const LAVA_POOL: RangeInclusive<i32> = 1..=2;
 /// Corner pillars: `(x, z, blocks above the floor, obsidian cap)`, crumbling toward the
 /// south-east so the open interior faces the default camera.
 const PILLARS: [(i32, i32, i32, bool); 4] = [
@@ -256,7 +259,13 @@ pub(super) fn plan_central(
     for z in CENTRAL_MIN..=CENTRAL_MAX {
         for x in CENTRAL_MIN..=CENTRAL_MAX {
             let anchor = terrain.anchor(x, z)?;
-            plan.column((x, z), anchor.y, FLOOR_Y, floor_block(x, z));
+            if LAVA_POOL.contains(&x) && LAVA_POOL.contains(&z) {
+                // Lava on top, cobblestone filling any sunken column below it.
+                plan.column((x, z), anchor.y, FLOOR_Y - 1, BlockType::Cobblestone);
+                plan.put(VoxelPosition::new(x, FLOOR_Y, z), BlockType::Lava);
+            } else {
+                plan.column((x, z), anchor.y, FLOOR_Y, floor_block(x, z));
+            }
         }
     }
 
