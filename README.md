@@ -8,30 +8,33 @@ Minecraft-inspired EggWars diorama, drawing on the visual language of the classi
 bridges, damaged defenses, opened chests, exposed resources, and lava beneath a sunset-to-night
 sky.
 
-Phase 1 provides the correct, testable 3D foundation and Phase 2 provides the audited surface and
-lighting system. Phase 3 is underway with a procedural sunset/night environment, bounded
-recursive ray infrastructure, recursive reflections, recursive glass refraction, Schlick
-Fresnel composition for glass, emissive lava with a local lava point light, and a derived normal map
-for cobblestone. Every planned Phase 3 rubric effect is implemented and Phase 3 has passed a
-correctness, architecture, and performance-boundary audit. Phase 4 (performance architecture) is
-in progress: the dense voxel grid, the scene, material, and hit types it feeds, and 3D DDA voxel
-traversal exist, scene queries traverse voxels and AABB objects together, and the framebuffer is
-rendered as deterministic tiles that scoped CPU worker threads claim dynamically, while profiling,
-the larger EggWars world, and the final scene remain planned work.
+Phases 1–3 provide the correct, testable 3D foundation, the audited surface and lighting system,
+and the raytracing effects: a procedural sunset/night environment, bounded recursive reflection,
+Snell refraction with Schlick Fresnel for glass, emissive lava with a local point light, and a
+derived normal map for cobblestone. Phase 4 (performance architecture) is implemented and has
+passed its final technical audit: a dense voxel grid, 3D DDA traversal, hybrid voxel + AABB scene
+queries, and a deterministic tile renderer whose tiles scoped CPU worker threads claim dynamically.
+The larger EggWars world and the final scene do not exist yet; they belong to Phase 5.
 
 ## Current Status
 
-Phase 1 — Core Raytracer — and Phase 2 — Materials, Textures, and Lighting — are complete and
-audited. Phase 3 — Raytracing Effects — is complete. Phase 4 — Performance Architecture — is in
-progress with a logical voxel grid, complete block-to-material mapping, a common renderer-facing
-hit type, and 3D DDA voxel traversal that every radiance and shadow ray now uses through hybrid
-voxel + AABB scene queries, and a deterministic tile renderer whose tiles are claimed dynamically
-by scoped CPU worker threads. Primary-ray misses now sample a project-owned
-procedural sunset/night environment in world space. Every radiance ray flows through one
-bounded, depth-aware trace path; reflective materials launch recursive reflection rays and
-transparent materials launch recursive Snell refraction rays whose split with reflection follows
-Schlick's Fresnel approximation. Lava is self-luminous and lights nearby surfaces through a finite
-local point light. Cobblestone is normal mapped from a map derived offline from its own texture.
+| Phase | Status |
+| --- | --- |
+| 1 — Core Raytracer | Complete and audited |
+| 2 — Materials, Textures, and Lighting | Complete and audited |
+| 3 — Raytracing Effects | Complete and audited |
+| 4 — Performance Architecture | Implemented and technically audited (see Phase 4 Audit); formal acceptance by the project owner pending |
+| 5 — EggWars World | Not started |
+
+The rendering pipeline is: every radiance and shadow ray queries one hybrid scene (3D DDA over a
+voxel grid plus a linear scan of arbitrary AABB objects), tiles of the framebuffer are claimed
+dynamically by scoped CPU worker threads, and primary-ray misses sample a project-owned procedural
+sunset/night environment in world space. Every radiance ray flows through one bounded, depth-aware
+trace path; reflective materials launch recursive reflection rays and transparent materials launch
+recursive Snell refraction rays whose split with reflection follows Schlick's Fresnel
+approximation. Lava is self-luminous and lights nearby surfaces through a finite local point light.
+Cobblestone is normal mapped from a map derived offline from its own texture. The only scenes that
+exist are two diagnostics: the default five-block showcase and the small voxel diagnostic scene.
 
 The current implementation includes:
 
@@ -818,9 +821,10 @@ Interpretation:
   own one-worker time is the same (6.6× against 6.8× at 11 workers), so the lock adds no
   measurable cost there.
 - Scaling is sublinear. Six of the eleven CPUs are efficiency cores, and every render pays for
-  thread creation and tile copies. Two workers scale worse than the rest in every scene; the likely
-  cause, not verified, is the operating system running one of the two threads on an efficiency
-  core.
+  thread creation and tile copies. Two workers scale worse than the rest in every scene. An
+  efficiency-core placement was the first guess, but the Mission 27A investigation gathered
+  evidence against it and did not establish the mechanism; see Phase 4 Audit. It is not a Phase 4
+  blocker.
 - These are local development observations, not universal benchmarks. Parallelism is not
   guaranteed to help on every machine or for very small frames.
 
@@ -831,6 +835,108 @@ and each worker owns one: 11 workers use 33 KiB (33,792 bytes) and the 64-worker
 (196,608 bytes), half of the two-buffer Mission 26 design (66 and 384 KiB) and with no channel
 allocations. Thread stacks are not included. All of it is freed when the render returns. No worker
 allocates a framebuffer or clones scene resources.
+
+## Phase 4 Audit
+
+The final technical audit of Phase 4 (Missions 21–27B, checkpoint `d0dcaac`) read the voxel, scene,
+traversal, tile, parallel, and renderer sources and their tests, and ran the full validation suite.
+It found no implementation defect, so it changed no runtime code and added no tests: the suite is
+unchanged at 529 passing tests.
+
+### Final architecture
+
+```text
+Scene ── AABB objects ── linear slab scan ──┐
+     └─ VoxelGrid + BlockMaterials ─ 3D DDA ┴─> nearest SurfaceHit -> SceneHit / any blocker
+                                                        │
+Renderer::render ─ TileGrid (16×16, row-major) ─ AtomicUsize claim ─ scoped workers
+                                                        │ one tile buffer per worker, no lock while tracing
+                                                        └─ Mutex<&mut Framebuffer>: lock only for write_tile
+```
+
+### What was verified
+
+| Area | Result |
+| --- | --- |
+| Voxel grid | One contiguous `Vec<Voxel>` indexed `x + width * (z + depth * y)`; `Voxel` and `BlockType` are one byte each (asserted by a test); negative origins, world/local conversion in `i64`, bounds checks, and volume/world-range overflow checks are covered; lookups allocate nothing; no per-voxel `Aabb`, material, or visibility; interior voxels stay stored |
+| Block/material mapping | An exhaustive `match` maps every `BlockType` to a registered `MaterialId` (checked on insertion); canonical material parameters are unchanged since Phase 3, including the small reflectivity of grass (0.02), cobblestone (0.03), and lava (0.05), which stay by decision with no reflection threshold; textures are owned once by the scene and referenced by ID, with no string lookup or file access while rendering |
+| 3D DDA | One grid-bounds slab clip, then Amanatides–Woo stepping over contiguous storage; positive, negative, and parallel directions, integer boundaries, edge/corner ties (X > Y > Z), finite and infinite intervals, starts inside empty and solid cells, and a step bound are all handled; no per-cell `Aabb`, no allocation; plane parameters stay `(plane - origin) / direction` |
+| DDA oracle | A test-only brute-force reference of one unit `Aabb` per occupied voxel agrees with the DDA on hit/miss, voxel, `t`, face, normal, UV, position, block, and material over about 27,000 rays × 4 intervals; only nearest contacts on edges or corners, where closed-box and half-open ownership legitimately differ, are excluded |
+| Hybrid queries | `closest_hit` scans objects, then runs the DDA with the nearest object `t` as `t_max`; the object wins exact ties; caller intervals are respected; scenes without a grid take the object path only; a grid cannot be stored without block materials. `is_occluded` tests objects, then the any-hit DDA (no `VoxelHit`, UV, or material work), with early exit; point-light shadow rays keep their finite interval, and glass and lava voxels are opaque blockers |
+| Recursive effects | The renderer has no voxel-specific branch and never reads `HitSource`; reflection, Fresnel refraction, total internal reflection, lava emission, normal mapping, directional and point lighting, and the environment all go through `Scene`, with `MAX_RAY_DEPTH = 3` unchanged. Tests trace every block type against its unit-`Aabb` equivalent |
+| Tiles | Row-major indices; 16×16 default, 240 tiles at 320×180 with a 4-pixel last row; overflow-safe arithmetic, no stored tile list; primary rays use global pixel coordinates; output is independent of tile size and order |
+| Parallel renderer | `std::thread::scope`, `available_parallelism()` default, `MAX_WORKERS = 64`, one effective worker runs the sequential loop on the calling thread; tiles are claimed once each with `fetch_add(1, Relaxed)` (assignment only, never publication); every worker is joined before `render` returns; no pool, no thread per tile, no `unsafe`, no GPU |
+| Mutex integration | One `Framebuffer` behind `Mutex<&mut Framebuffer>`; one reusable tile buffer per worker; no channels, buffer-return protocol, staging frame, or framebuffer clone; the lock covers only `write_tile`, so tracing never holds it |
+| Errors and panics | A worker error stops further claims, claimed tiles finish, and the lowest-index failure is returned (the sequential renderer's error); a worker panic is re-raised after the join, so a panic or poisoned lock can never yield `Ok`; zero workers and invalid tile sizes are rejected; failures and panics in every tile terminate without deadlock |
+| Determinism | Parallel output is byte-identical to the sequential reference for every tested worker count, tile size, partial edge tile, deliberately uneven tile duration, and scene (optics test scene, showcase, voxel diagnostic); there is no shared random state and no floating-point reduction across workers |
+| Hot path | No per-ray, per-hit, per-pixel, or per-tile allocation, no cloning of textures or scene, no logging, mutable RNG, or filesystem access while tracing. The remaining allocations are per render: one tile buffer per worker, one thread handle list, and one result list |
+| Raylib boundary | Raylib appears only in `src/app/app.rs`; core modules and worker threads never see its types |
+
+Clippy reports only the known `clippy::module_inception` warnings (7) and two
+`assertions_on_constants` warnings in test code. `cargo fmt --check`, `cargo check`, and
+`cargo build --release` are clean with no compiler warnings, and `cargo run --release` runs both the
+default showcase and `--voxel-diagnostic` with stable PPM output between runs.
+
+Observations that are not defects: if a worker panics, the remaining workers keep claiming tiles
+until the frame is exhausted before the panic propagates, which only delays an already fatal
+outcome; and the window title still reads "Phase 3".
+
+### Performance baseline
+
+Apple M3 Pro, 11 CPUs (5 performance and 6 efficiency cores), release build, 320×180, 16×16 tiles,
+at the audited commit. A throwaway harness outside the repository (a copy of the sources plus a
+benchmark mode) rendered each configuration for 3 warm-up and 15 measured renders per round, over 8
+rounds interleaved across scenes and worker counts. Each cell is the median of the 8 round medians in
+ms, with the range of round medians in parentheses; "automatic" is 11 workers.
+
+| Scene | 1 worker | 4 workers | Automatic | Speedup at 4 / automatic |
+| --- | ---: | ---: | ---: | ---: |
+| Default showcase | 5.13 (5.04–5.26) | 1.39 (1.38–1.41) | 0.89 (0.85–1.22) | 3.7× / 5.8× |
+| Voxel diagnostic | 5.18 (4.98–5.35) | 1.40 (1.38–1.50) | 0.89 (0.87–0.99) | 3.7× / 5.8× |
+| Close glass | 31.69 (30.89–32.01) | 8.34 (8.08–8.87) | 5.30 (4.82–5.68) | 3.8× / 6.0× |
+| Voxel proxy | 14.08 (13.67–14.32) | 3.75 (3.63–3.90) | 2.00 (1.95–2.14) | 3.8× / 7.0× |
+
+The voxel proxy is a different throwaway scene from the one in the Mission 27B table: five tapered
+voxel islands in a 48×20×48 grid (grass, dirt, cobblestone, iron ore, obsidian pillars, glass, a lava
+row, one point light) orbited at radius 40. It is not in the repository and its rows are not
+comparable with Mission 27B's. The other three rows reproduce the Mission 27B observations
+(default 1.40 ms at four workers and 0.90 ms automatic; close glass 31.9 ms with one worker). Close
+glass at the automatic count measured 5.30 ms here against 4.71 ms then; the one-worker time
+matched and no runtime code changed between the two, so this is treated as run-to-run and harness
+variation, not a regression. These are local development observations, not universal benchmarks.
+
+### Mission 27A conclusions
+
+The read-only performance investigation (its raw data is not stored in the repository) concluded:
+
+- 16×16 tiles are appropriate and the tile size stays at its default.
+- The automatic worker count (`available_parallelism()`) performs well.
+- Scoped-thread creation costs too little to justify a persistent thread pool.
+- The DDA is already efficient; replacing the per-step plane computation with incremental `t_delta`
+  or reciprocal multiplication was rejected because the gain was too small and reciprocal
+  multiplication changed pixel output.
+- No general BVH is currently justified; the remaining linear AABB scan may become expensive if
+  the final scene holds many decorative objects.
+- The two-worker scaling anomaly (about 1.6× against about 3× at four workers) is not explained.
+  Evidence went against the efficiency-core placement hypothesis, and the mechanism was not
+  established. It is not a Phase 4 blocker and was not investigated further.
+
+These rejected optimizations should not be reopened without new evidence.
+
+### Guidance for Phase 5
+
+Recommendations only; none of this is implemented.
+
+- Build block-aligned terrain and structures as voxels, and reserve AABB objects for special
+  non-block geometry such as arrows, chest parts, and eggs.
+- Size the `VoxelGrid` tightly around the scene: DDA cost follows the cells a ray crosses, and memory
+  is one byte per cell.
+- Keep decorative AABB objects few, since each ray scans all of them. Consider grouping them by
+  island only if the measured object count and render time in the real scene warrant it.
+- Light each connected lava region with one or a few representative `PointLight`s, never one per
+  lava voxel; every shaded hit iterates every light.
+- Preserve the established material reflectivity values, including grass, cobblestone, and lava.
+- Measure the real final scene before optimizing further.
 
 ## Known Limitations
 
@@ -852,15 +958,18 @@ These are deliberate scope boundaries of the current diagnostic renderer, not hi
 - The recursion limit is `MAX_RAY_DEPTH = 3`; it was not raised because cost has not been
   profiled at greater depth.
 - AABB objects are still scanned linearly; only voxel geometry is accelerated, by the DDA, so
-  objects should stay few.
+  objects should stay few. Grouped AABB acceleration (a BVH or per-island grouping) is deferred
+  until a real object count warrants it.
 - Worker threads are created and joined on every render, and parallel speedup on the development
-  machine is sublinear (about 5.7× on 11 CPUs for the default view). Tile size has not yet been
-  tuned for the parallel renderer; 16×16 is still the initial choice.
+  machine is sublinear (about 5.8× on 11 CPUs for the default view). The Mission 27A investigation
+  found 16×16 tiles appropriate and scoped-thread creation too cheap to justify a persistent pool.
 - The DDA treats edge and corner contact as zero-measure: a ray exactly through the shared edge of
   two diagonally adjacent blocks passes between them, where the closed-box slab test would report a
   contact.
 - Materials, light colors, and the sun direction are diagnostic values. Final artistic tuning
   belongs to the EggWars scene.
+- The final EggWars scene does not exist yet: no procedural terrain, no islands, no seeds, and no
+  storytelling props. Only the two diagnostic scenes can be rendered.
 
 ## Controls
 
@@ -1126,7 +1235,10 @@ worker panic propagation with its message, exactly-once pixel coverage, one reus
 worker, and a render that still works after a failed one. Every AABB and every voxel remains an opaque shadow blocker, including
 glass.
 
-The Phase 3 audit changed no runtime behavior and added no tests; the count is unchanged at 343.
+The Phase 4 audit changed no runtime behavior and added no tests; the suite is unchanged at 529
+passing tests.
+
+The Phase 3 audit changed no runtime behavior and added no tests; the count was unchanged at 343.
 It also regenerates the runtime assets with `scripts/prepare_assets.sh`, then
 runs `cargo fmt --check`, `cargo test`, `cargo check`, `cargo build --release`, and
 `cargo run --release`.
@@ -1136,21 +1248,26 @@ runs `cargo fmt --check`, `cargo test`, `cargo check`, `cargo build --release`, 
 - Raytracing algorithms and scene geometry are implemented in project code.
 - The raytracer is CPU-only; GPU rendering or GPU acceleration is not used for ray generation,
   intersection, shading, or scene traversal.
-- Raylib is the only direct third-party dependency and is isolated to presentation, input, timing,
-  and platform responsibilities under the current project interpretation.
+- Raylib 6.0.0 is the only direct third-party dependency (`Cargo.toml` is unchanged since the
+  Phase 1 presentation commit) and is isolated to `src/app/app.rs`: presentation, input, timing, and
+  platform responsibilities under the current project interpretation. `cargo tree` lists 39
+  transitive packages, all pulled in by raylib and its `raylib-sys` build.
+- Multithreading uses only the Rust standard library, and the source contains no `unsafe` code.
 - The project does not currently use Raylib 3D primitives, models, lighting, or shaders for the
   scene.
 
 ## Planned Features
 
-The following are not yet implemented. Phase 4 (performance architecture) is in progress and
-Phase 5 (EggWars world) has not started:
+The following are not yet implemented. Phase 4 (performance architecture) is complete and audited
+and Phase 5 (EggWars world) has not started:
 
 - transparent or colored shadows through glass, absorption, and nested or merged glass media;
 - procedural lava-region extraction into representative point lights;
 - deterministic procedural 16×16 floating islands and configurable seeds;
 - ore placement in terrain and the EggWars battle-aftermath scene;
-- profiling-driven optimization and tile-size benchmarking for the parallel renderer.
+- visual storytelling, the final presentation and video, and final performance and visual polish;
+- grouped acceleration for decorative AABB objects, only if the final scene's measured object count
+  warrants it.
 
 ## Course Rubric Mapping
 
@@ -1170,8 +1287,17 @@ intentionally in the final EggWars diorama, which does not exist yet.
 | Normal mapping | Implemented: derived cobblestone normal map lighting with a per-face tangent basis |
 | Sunset/night skybox/environment | Procedural CPU environment implemented; shared miss path for every traced ray |
 | Procedural floating-island terrain (16×16, seeded) | Planned (Phase 5) |
-| Voxel grid, 3D DDA, dynamic tile multithreading | Voxel grid, 3D DDA, and hybrid voxel + AABB scene traversal implemented and rendered (voxel diagnostic scene); dynamic tile multithreading implemented with scoped standard-library threads and measured (about 5.7× on 11 CPUs for the default view, 6.9× for close glass) |
+| Voxel grid and 3D DDA | Implemented and audited; exercised only by the voxel diagnostic scene |
+| Tile-based CPU parallel rendering | Implemented and audited with scoped standard-library threads and dynamic tile claiming (about 5.8× on 11 CPUs for the default view, 6.0× for close glass); byte-identical to the sequential renderer |
+| Visually complex, visually attractive scene | Pending: the final EggWars scene does not exist |
+| Visual storytelling | Pending (Phase 5–6) |
+| Final presentation and video | Pending (Phase 6) |
+| Final performance and visual polish | Pending (Phase 6) |
 | Final EggWars aftermath scene | Planned (Phase 5–6) |
+
+The status column describes code and diagnostic scenes only. A feature earns rubric credit when it
+is visibly and intentionally used in the final diorama, so none of the rows above is claimed as
+final credit yet.
 
 ## Video
 

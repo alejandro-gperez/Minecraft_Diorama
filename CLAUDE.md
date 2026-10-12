@@ -19,7 +19,8 @@ player entity or gameplay system.
 - Phase 1 — Core Raytracer: complete.
 - Phase 2 — Materials, Textures, and Lighting: complete.
 - Phase 3 — Raytracing Effects: complete (missions 14–20).
-- Phase 4 — Performance Architecture: in progress.
+- Phase 4 — Performance Architecture: implementation complete (missions 21–27B) and technically
+  audited; the user has not yet formally accepted the audit. `AGENTS.md` still names Phase 4 current.
 - Mission 21 voxel grid foundation: complete. `src/voxel/` holds `BlockType`, one-byte `Voxel`,
   integer `VoxelPosition`, a dense `VoxelGrid` with a configurable origin, and `BlockMaterials`.
 - Mission 22 voxel scene integration foundation: complete. `BlockType` adds `Dirt` (10 variants,
@@ -79,9 +80,8 @@ player entity or gameplay system.
   order; both app PPMs are byte-identical to Mission 25.
 - Mission 26 measurements (M3 Pro, 11 CPUs = 5P + 6E, 320×180, release, medians): default
   5.08 → 0.89 ms automatic (5.7×), voxel diagnostic 5.13 → 0.91 ms, close glass 31.7 → 4.6 ms
-  (6.9×); 4 workers ~3.0–3.4×. Two workers scale anomalously (~1.6×), probably efficiency-core
-  placement (unverified). The 1-worker path matches the Mission 25 binary within noise. 16×16
-  tiles not yet re-tuned for parallelism.
+  (6.9×); 4 workers ~3.0–3.4×. Two workers scale anomalously (~1.6×); see the Mission 27A
+  conclusions below. The 1-worker path matches the Mission 25 binary within noise.
 - Mission 27B simplified parallel tile integration: complete. `render_tiles_parallel` keeps the
   scoped threads and `AtomicUsize` claiming, but the one framebuffer now sits behind a
   `std::sync::Mutex` (borrowed through the scope, no `Arc`). Each worker owns exactly one
@@ -97,6 +97,27 @@ player entity or gameplay system.
   close glass 2–5% faster at 2–4 workers; at the automatic 11 workers the change is within noise
   (default 0.92 → 0.90 ms, close glass 4.56 → 4.71 ms, which matches a +5.5% code-layout shift of
   the unchanged 1-worker path). No speedup is claimed at the automatic count.
+- Phase 4 technical audit: no implementation defect found, no runtime change, no new tests (529
+  passing). Verified voxel grid, material mapping, DDA and its AABB oracle, hybrid closest-hit and
+  occlusion, recursive-effect integration (no voxel branch in the renderer), tiles, scoped-thread
+  scheduling, the Mutex tile-copy design, errors/panics, determinism, hot-path allocations, the
+  Raylib boundary (only `src/app/app.rs`), and dependencies (raylib 6.0.0 only; no `unsafe`).
+  README has the full audit, baseline, and Phase 5 guidance.
+- Audit baseline (M3 Pro, 11 CPUs, 320×180, release, median of 8 round-medians; 1 / 4 / automatic
+  workers, ms): default showcase 5.13 / 1.39 / 0.89 (3.7× / 5.8×), voxel diagnostic 5.18 / 1.40 /
+  0.89, close glass 31.7 / 8.34 / 5.30 (6.0×), a throwaway five-island voxel proxy 14.1 / 3.75 /
+  2.00 (7.0×). Local observations, not universal benchmarks.
+- Mission 27A conclusions to keep: 16×16 tiles and the automatic worker count are fine; a
+  persistent pool, incremental `t_delta`/reciprocal DDA (it changed pixels), and a general BVH are
+  not justified, and are not to be reopened without new evidence. The two-worker scaling anomaly
+  (~1.6×) is unexplained; evidence went against the efficiency-core hypothesis. Not a blocker.
+- Important known limitations: opaque glass/lava shadows; no medium tracking (touching glass is
+  glass → air → glass; glass on a block exposes that block's interior face); `1e-4` biases assume
+  unit scale; edge/corner contact follows the DDA's half-open conventions; AABB objects are scanned
+  linearly (group them only if the real scene's measured object count warrants it); the final
+  EggWars scene does not exist. The window title in `src/app/app.rs` still says "Phase 3".
+- Rubric: all raytracing effects, DDA, and parallel rendering exist in code and diagnostic scenes
+  only; they count only when visibly and intentionally used in the final diorama (Phase 5–6).
 - Current suite: 529 passing tests. The showcase PPM is byte-identical to the Mission 21 render.
 - Development resolution: 320×180, presented at 960×540.
 - Pre-Phase-4 baseline (local, single-threaded, brute-force AABB traversal): default view about
@@ -107,15 +128,17 @@ player entity or gameplay system.
   showcase through the release app binary: test-binary layout shifted it by ~10% with no code cause.
 - Compiler state: no rustc warnings; clippy reports only the known `clippy::module_inception`
   warnings (plus two pre-existing `assertions_on_constants` warnings in test code).
-- Next work: the Phase 4 audit, as specified by the user.
+- Next work: the user reviews this audit and, if accepted, formally advances the phase. Phase 5
+  planning comes next; Phase 5 implementation is not authorized by this checkpoint.
 
 The repository is expected to begin each mission from a clean checkpoint. Verify the actual
 repository state instead of assuming this section is current.
 
 ## Mission boundary
 
-Do not implement remaining Phase 4 work (profiling-driven optimization, tile-size tuning, SIMD) or
-Phase 5 (procedural terrain, the EggWars scene) from this handoff. The user and planning assistant
+Phase 4 implementation is complete and audited. Do not start further Phase 4 optimization (SIMD,
+persistent pools, BVH, reciprocal DDA) or Phase 5 (procedural terrain, the EggWars scene) from this
+handoff. The user and planning assistant
 will provide the exact prompt and API for each future mission. Do not implement future missions
 early. Stop at mission boundaries.
 
