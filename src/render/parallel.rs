@@ -38,7 +38,7 @@ use super::{
 
 /// Most worker threads one render may use, whatever is requested.
 ///
-/// The development frame has 240 tiles; more threads than this only add creation cost, and an
+/// The development frame has 920 tiles; more threads than this only add creation cost, and an
 /// unbounded request must never spawn thousands of threads.
 pub const MAX_WORKERS: usize = 64;
 

@@ -37,8 +37,9 @@ pub mod scene;
 pub mod voxel;
 pub mod world;
 
-const WIDTH: usize = 320;
-const HEIGHT: usize = 180;
+/// Internal CPU framebuffer; the window shows it at `app::app::WINDOW_SCALE`.
+const WIDTH: usize = 640;
+const HEIGHT: usize = 360;
 const OUTPUT_PATH: &str = "output/phase1.ppm";
 const VOXEL_DIAGNOSTIC_OUTPUT_PATH: &str = "output/voxel_diagnostic.ppm";
 const VERTICAL_FOV_DEGREES: f32 = 50.0;
@@ -486,7 +487,7 @@ fn register_texture(
 
 #[cfg(test)]
 mod tests {
-    use std::f32::consts::FRAC_PI_4;
+    use std::{f32::consts::FRAC_PI_4, process};
 
     use super::{
         HEIGHT, ISLAND_CONFIG, WIDTH, eggwars_arena, eggwars_camera, eggwars_scene, eggwars_world,
@@ -494,10 +495,12 @@ mod tests {
         procedural_island_scene, voxel_diagnostic_scene,
     };
     use crate::{
+        app::app::{WINDOW_SCALE, window_size},
         camera::OrbitalCamera,
         environment::Environment,
         material::TextureSelection,
         math::Vec3,
+        output::write_ppm,
         ray::Ray,
         render::{Framebuffer, Renderer, renderer::tile_tests::assert_tiling_matches_reference},
         scene::{HitSource, Scene},
@@ -1464,5 +1467,147 @@ mod tests {
                 assert!(!source.contains(word), "renderer source mentions {word}");
             }
         }
+    }
+
+    // ---- 640x360 development resolution ----
+
+    #[test]
+    fn internal_resolution_is_640x360_shown_at_an_exact_2x_in_a_1280x720_window() {
+        assert_eq!((WIDTH, HEIGHT), (640, 360));
+        assert_eq!(WIDTH * HEIGHT, 230_400);
+        assert_eq!(WIDTH * 9, HEIGHT * 16, "16:9");
+        assert_eq!(WINDOW_SCALE, 2);
+        let (window_width, window_height) = window_size(WIDTH as i32, HEIGHT as i32);
+        assert_eq!((window_width, window_height), (1280, 720));
+        assert_eq!(window_width % WIDTH as i32, 0);
+        assert_eq!(window_height / HEIGHT as i32, WINDOW_SCALE);
+        // The framebuffer the app allocates and the RGBA upload buffer derived from it.
+        let framebuffer = Framebuffer::try_new(WIDTH, HEIGHT).unwrap();
+        assert_eq!(framebuffer.pixels().len(), 230_400);
+        assert_eq!(framebuffer.pixels().len() * 4, 921_600);
+    }
+
+    #[test]
+    fn cameras_keep_their_composition_at_the_new_aspect_ratio() {
+        let aspect = WIDTH as f32 / HEIGHT as f32;
+        assert_eq!(aspect, 16.0 / 9.0);
+        // Same 16:9 aspect as the old 320x180 frame, so FOV, yaw, pitch, radius, and target give
+        // the identical camera and the initial composition does not move.
+        assert_eq!(eggwars_camera(aspect), eggwars_camera(320.0 / 180.0));
+        assert_eq!(
+            procedural_island_camera(aspect),
+            procedural_island_camera(320.0 / 180.0)
+        );
+        // The framebuffer's own corners and center map to the camera's viewport corners.
+        let camera = eggwars_camera(aspect);
+        let ray = |column: usize, row: usize| {
+            camera
+                .ray_for_viewport(
+                    (column as f32 + 0.5) / WIDTH as f32,
+                    (row as f32 + 0.5) / HEIGHT as f32,
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            ray(0, 0).direction().x.signum(),
+            -ray(WIDTH - 1, HEIGHT - 1).direction().x.signum()
+        );
+    }
+
+    #[test]
+    fn ppm_export_has_the_640x360_header_and_exact_payload() {
+        let path =
+            std::env::temp_dir().join(format!("minecraft_diorama_640_{}.ppm", process::id()));
+        let framebuffer = Framebuffer::try_new(WIDTH, HEIGHT).unwrap();
+
+        write_ppm(&path, &framebuffer).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        let header = b"P6\n640 360\n255\n";
+        assert_eq!(&bytes[..header.len()], header);
+        assert_eq!(bytes.len(), header.len() + 640 * 360 * 3);
+    }
+
+    #[test]
+    fn every_scene_mode_renders_finite_pixels_at_the_new_resolution() {
+        let lighting = phase2_lighting();
+        let environment = Environment::sunset();
+        let aspect = WIDTH as f32 / HEIGHT as f32;
+        let world = eggwars_world(ARENA_SEED);
+        let scenes = [
+            (
+                phase2_test_scene().unwrap(),
+                development_camera(WIDTH, HEIGHT),
+            ),
+            (
+                voxel_diagnostic_scene().unwrap(),
+                development_camera(WIDTH, HEIGHT),
+            ),
+            (island_scene(), procedural_island_camera(aspect)),
+            (
+                eggwars_scene(world.grid.clone()).unwrap(),
+                eggwars_camera(aspect),
+            ),
+        ];
+        let mut framebuffer = Framebuffer::try_new(WIDTH, HEIGHT).unwrap();
+        for (scene, camera) in &scenes {
+            Renderer::render(camera, scene, &lighting, &environment, &mut framebuffer).unwrap();
+            assert_eq!(framebuffer.pixels().len(), 230_400);
+            assert!(framebuffer.pixels().iter().all(|color| color.is_finite()));
+            // Not a blank frame: the sky and the scene differ.
+            assert!(
+                framebuffer
+                    .pixels()
+                    .windows(2)
+                    .any(|pair| pair[0] != pair[1])
+            );
+        }
+    }
+
+    #[test]
+    fn eggwars_640x360_output_ignores_workers_tile_size_and_repetition() {
+        let world = eggwars_world(ARENA_SEED);
+        let scene = eggwars_scene(world.grid.clone()).unwrap();
+        let lighting = phase2_lighting();
+        let environment = Environment::sunset();
+        let camera = eggwars_camera(WIDTH as f32 / HEIGHT as f32);
+        let render = |workers: Option<usize>, tile: usize| {
+            let mut framebuffer = Framebuffer::try_new(WIDTH, HEIGHT).unwrap();
+            match (workers, tile) {
+                (Some(workers), _) => Renderer::render_with_worker_count(
+                    &camera,
+                    &scene,
+                    &lighting,
+                    &environment,
+                    &mut framebuffer,
+                    workers,
+                ),
+                (None, 16) => {
+                    Renderer::render(&camera, &scene, &lighting, &environment, &mut framebuffer)
+                }
+                (None, tile) => Renderer::render_with_tile_size(
+                    &camera,
+                    &scene,
+                    &lighting,
+                    &environment,
+                    &mut framebuffer,
+                    tile,
+                    tile,
+                ),
+            }
+            .unwrap();
+            framebuffer
+        };
+
+        let sequential = render(Some(1), 16);
+        assert_eq!(sequential, render(Some(1), 16), "repeated render");
+        assert_eq!(sequential, render(Some(3), 16), "3 workers");
+        assert_eq!(sequential, render(None, 16), "automatic workers");
+        assert_eq!(sequential, render(None, 8), "8x8 tiles");
+        assert_eq!(sequential, render(None, 64), "64x64 tiles");
+        // Moving the camera never touches the generated world, and the world is a pure function
+        // of the seed.
+        assert_eq!(scene.voxel_grid(), Some(&eggwars_world(ARENA_SEED).grid));
     }
 }

@@ -18,7 +18,7 @@ Phase 5 (the EggWars world) is in progress: Mission 28 added a deterministic, se
 floating-island generator, Mission 29 uses it to build the five-island EggWars arena (a 24×24
 central island and four 16×16 outer islands) in one global voxel grid from one seed, and Mission 30
 builds the arena's architecture on that terrain: four bridges in their narrative states (complete,
-damaged, severed, abandoned), a small base with a five-block obsidian egg defense on each outer
+damaged, severed, abandoned), a small base with a nine-block obsidian egg defense on each outer
 island, and a ruined central structure with glass windows. Eggs, chests, arrows, lava, and the
 final lighting and composition do not exist yet.
 
@@ -30,7 +30,7 @@ final lighting and composition do not exist yet.
 | 2 — Materials, Textures, and Lighting | Complete and audited |
 | 3 — Raytracing Effects | Complete and audited |
 | 4 — Performance Architecture | Complete and audited (see Phase 4 Audit) |
-| 5 — EggWars World | In progress: Missions 28 (procedural floating island), 29 (five-island arena), and 30 (bridges, structures, and egg defenses) complete |
+| 5 — EggWars World | In progress: Missions 28 (procedural floating island), 29 (five-island arena), 30 (bridges, structures, and egg defenses), and 30.5 (nine-block egg defenses and a 640×360 internal resolution) complete |
 
 The rendering pipeline is: every radiance and shadow ray queries one hybrid scene (3D DDA over a
 voxel grid plus a linear scan of arbitrary AABB objects), tiles of the framebuffer are claimed
@@ -95,8 +95,8 @@ The current implementation includes:
   cardinal axes, each with its own seed derived from one global seed, generated into one global
   voxel grid and selected with `--eggwars [--seed <u64>]`.
 - deterministic EggWars construction on that terrain: four terrain-attached cobblestone bridges
-  (complete, damaged, severed, incomplete), outer bases whose five-position obsidian egg defenses
-  hold 5, 4, 3, and 2 blocks, a ruined central structure with an obsidian floor inlay and two glass
+  (complete, damaged, severed, incomplete), outer bases whose nine-position obsidian egg defenses
+  (eight blocks around the egg and one above it) hold 9, 7, 5, and 3 blocks, a ruined central structure with an obsidian floor inlay and two glass
   windows, and metadata (future egg cells, defense slots, bridge ends, central open area) for the
   next mission.
 
@@ -690,8 +690,9 @@ thread, as the work division for the multithreaded scheduler that Mission 26 add
 - Tiles are indexed **row-major**: `tile_x = index % columns`, `tile_y = index / columns`; tile 0
   is the upper-left tile and indices advance left to right, then top to bottom. The same indices
   are claimed dynamically by worker threads.
-- The initial tile size is 16×16 (`TILE_WIDTH`, `TILE_HEIGHT`). At 320×180 that is 20 × 12 = 240
-  tiles; 180 is not a multiple of 16, so the last tile row is 4 pixels high. Edge tiles are clipped,
+- The initial tile size is 16×16 (`TILE_WIDTH`, `TILE_HEIGHT`). At the original 320×180 that was
+  20 × 12 = 240 tiles with a 4-pixel last row; at the current 640×360 it is 40 × 23 = 920 tiles and
+  360 is not a multiple of 16, so the last tile row is 8 pixels high. Edge tiles are clipped,
   so framebuffer dimensions need not be multiples of the tile size, and every pixel belongs to
   exactly one tile.
 - `Renderer::render` keeps its signature; the application knows nothing about tiles. On the
@@ -883,7 +884,7 @@ Renderer::render ─ TileGrid (16×16, row-major) ─ AtomicUsize claim ─ scop
 | DDA oracle | A test-only brute-force reference of one unit `Aabb` per occupied voxel agrees with the DDA on hit/miss, voxel, `t`, face, normal, UV, position, block, and material over about 27,000 rays × 4 intervals; only nearest contacts on edges or corners, where closed-box and half-open ownership legitimately differ, are excluded |
 | Hybrid queries | `closest_hit` scans objects, then runs the DDA with the nearest object `t` as `t_max`; the object wins exact ties; caller intervals are respected; scenes without a grid take the object path only; a grid cannot be stored without block materials. `is_occluded` tests objects, then the any-hit DDA (no `VoxelHit`, UV, or material work), with early exit; point-light shadow rays keep their finite interval, and glass and lava voxels are opaque blockers |
 | Recursive effects | The renderer has no voxel-specific branch and never reads `HitSource`; reflection, Fresnel refraction, total internal reflection, lava emission, normal mapping, directional and point lighting, and the environment all go through `Scene`, with `MAX_RAY_DEPTH = 3` unchanged. Tests trace every block type against its unit-`Aabb` equivalent |
-| Tiles | Row-major indices; 16×16 default, 240 tiles at 320×180 with a 4-pixel last row; overflow-safe arithmetic, no stored tile list; primary rays use global pixel coordinates; output is independent of tile size and order |
+| Tiles | Row-major indices; 16×16 default, 240 tiles at 320×180 with a 4-pixel last row (920 at 640×360 with an 8-pixel last row, since Mission 30.5); overflow-safe arithmetic, no stored tile list; primary rays use global pixel coordinates; output is independent of tile size and order |
 | Parallel renderer | `std::thread::scope`, `available_parallelism()` default, `MAX_WORKERS = 64`, one effective worker runs the sequential loop on the calling thread; tiles are claimed once each with `fetch_add(1, Relaxed)` (assignment only, never publication); every worker is joined before `render` returns; no pool, no thread per tile, no `unsafe`, no GPU |
 | Mutex integration | One `Framebuffer` behind `Mutex<&mut Framebuffer>`; one reusable tile buffer per worker; no channels, buffer-return protocol, staging frame, or framebuffer clone; the lock covers only `write_tile`, so tracing never holds it |
 | Errors and panics | A worker error stops further claims, claimed tiles finish, and the lowest-index failure is returned (the sequential renderer's error); a worker panic is re-raised after the join, so a panic or poisoned lock can never yield `Ok`; zero workers and invalid tile sizes are rejected; failures and panics in every tile terminate without deadlock |
@@ -1300,28 +1301,35 @@ Only North connects two landmasses.
 
 Each outer island has a 5 × 5 cobblestone floor around its future egg, two gate pillars flanking the
 bridge's approach, and an obsidian defense. The egg cell is on bridge lane 0, two cells behind the
-island's center, inside the always-flat middle, at `y = 2` on the floor. The defense template is
-five positions around it, as `(side, forward)` offsets from the egg:
+island's center, inside the always-flat middle, at `y = 2` on the floor. Mission 30 placed five
+defense positions around it; Mission 30.5 replaced them with the nine-position Minecraft EggWars
+enclosure, as `(side, forward, up)` offsets from the egg (`DEFENSE_TEMPLATE`, one template turned
+toward the center on every island):
 
 ```text
-   toward the center / bridge (attack)
-        [-1,+1] [0,+1] [+1,+1]      front row
-        [-1, 0]  EGG   [+1, 0]      side blocks
-                 open               back stays open: the egg is visible and reachable
+   toward the center / bridge (attack)        O O O   forward +1
+                                              O E O   forward  0   E: the egg, empty, with the
+                                              O O O   forward -1      ninth block above it
 ```
 
-Missing blocks are never random: blocks are lost front first, from the bridge's lanes outward, so
+Eight obsidian positions surround the egg at its own level and one sits directly above it (`up = 1`),
+for nine; the egg's cell stays empty and there is no solid 3 × 3 × 3 enclosure. Template order is the
+front row, the two flanks, the back row, then the cap (`DefenseSlot` index 8). All nine cells lie
+inside the base floor and inside the grid (the cap is at `y = 3`, below `CONSTRUCTION_TOP`).
+Missing blocks are never random: damage starts at the front, the side the attackers came from, so
 every breach opens the egg toward the attack direction (the center).
 
 | Island | Defense | Obsidian | Missing | Gates | Floor |
 | --- | --- | --- | --- | --- | --- |
-| North | `Intact` | 5 / 5 | none | 3 and 3 high | whole |
-| West | `Damaged` | 4 / 5 | front | 3 and 2 | whole |
-| East | `Breached` | 3 / 5 | front and front-left (in line with the bridge lanes) | 2 and 1 | one front corner gone |
-| South | `Destroyed` | 2 / 5 | the whole front row | 1 and 0 (one stump) | front-left corner cratered |
+| North | `Intact` | 9 / 9 | none: sealed on every side and from above | 3 and 3 high | whole |
+| West | `Damaged` | 7 / 9 | front-left and front blocks: a notch facing the bridge, cap still standing | 3 and 2 | whole |
+| East | `Breached` | 5 / 9 | the whole front row and the cap: a U of two flanks and the back row open toward the bridge | 2 and 1 | one front corner gone |
+| South | `Destroyed` | 3 / 9 | everything but an L-shaped back corner (left flank, back-left, back middle) | 1 and 0 (one stump) | front-left corner cratered |
 
-Defense blocks stand on the floor above the grass, with their tops open to the sky, so obsidian's
-reflection stays visible; obsidian reflectivity is unchanged (0.35). Eggs are not placed: their
+The ring blocks stand on the floor with open tops, so obsidian's reflection stays visible, and
+obsidian reflectivity is unchanged (0.35). An intact cap sits one block above the empty egg cell and
+touches the ring only along edges, so it is the one construction block that is not face-connected
+to a landmass (tests assert exactly the intact caps are such blocks). Eggs are not placed: their
 cells are empty and recorded for Mission 31.
 
 ### Central ruin and glass
@@ -1343,7 +1351,7 @@ pub struct ConstructionInfo {
     pub bridges: [BridgeInfo; 4],        // OUTER_ISLANDS order: island, state, toward_center,
                                          // lanes (outer_end, center_end), missing_span
     pub bases: [EggBase; 4],             // island, defense_state, egg, attack_direction,
-                                         // defense: [DefenseSlot { position, intact }; 5]
+                                         // defense: [DefenseSlot { position, intact }; 9]
     pub central: CentralStructure,       // floor, inlay, open_area (empty cells for loot)
     pub surface_levels: [i32; 5],        // measured grass level at each island's center
     // + per-block-type counts: count(BlockType), total()
@@ -1373,10 +1381,58 @@ Seeds 42, 1847, 2026, and 0, from the initial view, above, low against the sunse
 ruin, through the glass, and close to each defense: the five islands stay distinct with the central
 island dominant; the bridges read as two-wide player bridges pointing at the center, with the East
 gap, the long South break, and the abandoned West stub obvious from above and from the initial
-view; the four defenses read as intact, missing one, breached, and destroyed; the panes refract the
+view; the four defenses read as sealed, notched, breached, and destroyed; the panes refract the
 sky and the ruin's interior without artifacts; nothing floats, nothing is buried, and the
-structures are modest next to the grass. Across seeds 0–255 construction places 269–310 blocks
-(always 19 obsidian and 2 glass); an arena holds 7,459–9,055 blocks in total.
+structures are modest next to the grass. Across seeds 0–255 Mission 30's construction placed 269–310
+blocks and an arena held 7,459–9,055 (always 19 obsidian and 2 glass); with the nine-block defenses
+every seed holds 10 more construction blocks and 29 obsidian (24 in defenses), so 279–320 and
+7,469–9,065.
+
+## Egg Defense and Resolution Refinement (Phase 5, Mission 30.5)
+
+Two independent changes, two commits.
+
+**Nine-block egg defenses.** See Outer bases and egg defenses above: `DEFENSE_TEMPLATE` holds nine
+`(side, forward, up)` positions, `DefenseState::intact_slots` returns `[bool; 9]`, and the four
+states hold 9, 7, 5, and 3 blocks (North, West, East, South). Terrain, the arena layout, seed
+derivation, bridges, the central ruin, the glass, the base floors, and the egg cells are unchanged,
+so every terrain fingerprint (including the Mission 29 arena's) still passes; only the constructed
+fingerprint for seed 1847 changed, to `0x9B34_718C_2742_6F74`, because the defense geometry
+intentionally changed. Close-ups of all four defenses from the front, the side, and behind show the
+nine-block enclosure, the U-shaped breach, the L-shaped fragment, and the front notch clearly.
+
+**640×360 internal resolution.** `WIDTH × HEIGHT` in `src/main.rs` is now 640×360 (was 320×180),
+presented in a 1280×720 window at an exact integer 2× scale (`WINDOW_SCALE` in `src/app/app.rs`;
+the window size is derived from the framebuffer as `framebuffer × WINDOW_SCALE`). The Raylib texture
+keeps point (nearest-neighbor) filtering, so every framebuffer pixel is an exact 2 × 2 block of
+window pixels; the 16×16 texture assets are not resized. The framebuffer holds 230,400 pixels, the
+reused RGBA upload buffer 921,600 bytes (allocated once), and the PPM is `P6 640 360 255` with
+691,200 payload bytes. The camera aspect ratio comes from the framebuffer dimensions: it stays 16:9
+(the same camera value as at 320×180), so field of view, yaw, pitch, radius, and target are untouched
+and the initial composition does not move. There is still one primary ray per pixel at the pixel
+center: no antialiasing, supersampling, or jitter. Tiles stay 16×16, giving 40 × 23 = 920 tiles with a
+last row 8 pixels high. The renderer, parallel scheduling, DDA, materials, and lighting are unchanged.
+The window title is now the phase-neutral "CPU Raytraced EggWars Diorama".
+
+The PPM bytes intentionally differ from the 320×180 renders; at a fixed resolution output is still
+byte-identical across repeated renders, worker counts (1, 3, automatic), and tile sizes (8, 16, 64).
+
+Release timings, seed 1847 constructed arena, Apple M3 Pro (11 CPUs), medians of 20 renders after 5
+warm-up renders (interactive 1 / 4 / automatic workers, ms), run twice with agreeing results:
+
+| View | 320×180 | 640×360 | Slowdown |
+| --- | ---: | ---: | ---: |
+| Initial (radius 68) | 11.87 / 3.44 / 1.74 | 44.6 / 12.8 / 6.3 | 3.76× / 3.74× / 3.64× |
+| Orbit +1.2 rad, radius 48 | 15.2 / 4.39 / 2.22 | 56.0 / 16.0 / 7.9 | 3.68× / 3.64× / 3.57× |
+| Close (radius 28) | 20.1 / 5.70 / 2.84 | 73.0 / 20.7 / 10.2 | 3.63× / 3.63× / 3.59× |
+
+The frame has 4× the primary rays but costs about 3.6–3.8× as much here, because per-frame fixed work
+and the empty sky share do not scale with pixel count; this is a local measurement for this scene, not
+a general rule. At the automatic worker count a render takes 6–10 ms, so orbiting and zooming stay
+responsive at the 60 FPS target (the application's first render, which includes warm-up, measured
+7.5 ms for the EggWars arena, 3.6 ms for the showcase, 4.1 ms for the voxel diagnostic, and 3.9 ms for
+the island). No optimization was added; the single-threaded 45–73 ms is why the multithreaded renderer
+matters at this resolution.
 
 ## Known Limitations
 
@@ -1422,6 +1478,10 @@ These are deliberate scope boundaries of the current diagnostic renderer, not hi
   through empty cells, and the taller grid made it larger (see Performance); it is acceptable at
   the current resolution.
 - The orbital camera has no collision: zooming in far enough places it inside an island.
+- The resolution is fixed at 640×360 (window 1280×720) at compile time; there is no runtime
+  resolution switching, and a single-threaded render at this size takes 45–73 ms.
+- Intact defense caps (North and West) touch their ring only along edges, so a cap is a block that
+  floats in the voxel-connectivity sense, as in Minecraft.
 - Changing generator constants changes what every seed produces; seeds are reproducible for a fixed
   code version only.
 
@@ -1447,8 +1507,8 @@ to render one procedural floating island, or `-- --eggwars [--seed <u64>]` to re
 five-island arena; see Procedural Floating Islands and Five-Island EggWars Arena above.
 
 Rendering uses one CPU worker thread per available CPU; the application prints the count at
-startup. The development framebuffer is rendered at 320×180 and presented in a 960×540 window using an
-exact 3× scale. The application prints the PPM export path and shows CPU render duration,
+startup. The development framebuffer is rendered at 640×360 and presented in a 1280×720 window using
+an exact 2× scale with nearest-neighbor filtering. The application prints the PPM export path and shows CPU render duration,
 internal resolution, presentation FPS, and render count in a small overlay.
 
 Run the automated tests with:
@@ -1852,6 +1912,19 @@ reflective obsidian on intact slots and the floor under broken ones, canonical r
 whose panes change the image, construction shadows with open sky under the gaps, the initial camera
 framing the constructed arena without clipping, an assorted-viewpoint sweep with an unchanged grid,
 and tiling equivalence.
+
+Mission 30.5 adds 14 tests, for 665 passing. Defenses, by voxel occupancy: the nine-position template
+(eight ring cells plus one cap, no duplicates, no egg-cell position, no solid enclosure), 9 / 7 / 5 / 3
+obsidian blocks counted both in the slot metadata and over the whole volume around each egg, a sealed
+North, East's front row and cap missing, South's face-connected L fragment, West's front notch under
+a standing cap, template rotation to four distinct orientations, positions in bounds, distinct, and
+overwriting no terrain, the cap above the empty egg cell, and 29 obsidian blocks per arena; the
+earlier floating-block test now allows exactly the intact caps. Resolution: 640×360, a 1280×720
+window at an exact 2× scale, the 230,400-pixel framebuffer and 921,600-byte RGBA buffer (and rejection
+of the old buffer size), identical 16:9 cameras at both resolutions, the `P6 640 360 255` PPM header
+and exact payload, finite non-blank renders of all four scene modes, the 920-tile layout with an
+8-pixel last row, pixel coverage at 640×360, and byte-identical EggWars output across repeats,
+worker counts, and tile sizes. Smaller framebuffer sizes in the existing tests were left unchanged.
 
 The Phase 4 audit changed no runtime behavior and added no tests; the suite was unchanged at 529
 passing tests.

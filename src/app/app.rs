@@ -19,15 +19,27 @@ use crate::{
     scene::Scene,
 };
 
-const WINDOW_WIDTH: i32 = 960;
-const WINDOW_HEIGHT: i32 = 540;
-const WINDOW_SCALE: f32 = 3.0;
+/// Whole-number magnification of the framebuffer in the window (640x360 -> 1280x720). It is an
+/// integer so point filtering maps every framebuffer pixel to an exact block of window pixels.
+pub const WINDOW_SCALE: i32 = 2;
 const TARGET_FPS: u32 = 60;
 const MAX_INPUT_DELTA_SECONDS: f32 = 0.1;
 
 const ORBIT_SPEED_RADIANS_PER_SECOND: f32 = 1.4;
 const KEYBOARD_ZOOM_UNITS_PER_SECOND: f32 = 5.0;
 const MOUSE_WHEEL_ZOOM_UNITS: f32 = 0.75;
+
+/// Window size that shows a `framebuffer_width` x `framebuffer_height` frame at `WINDOW_SCALE`.
+pub fn window_size(framebuffer_width: i32, framebuffer_height: i32) -> (i32, i32) {
+    (
+        framebuffer_width
+            .checked_mul(WINDOW_SCALE)
+            .expect("window width must fit the Raylib presentation API"),
+        framebuffer_height
+            .checked_mul(WINDOW_SCALE)
+            .expect("window height must fit the Raylib presentation API"),
+    )
+}
 
 pub fn run(
     mut camera: OrbitalCamera,
@@ -43,9 +55,10 @@ pub fn run(
     let framebuffer_height = i32::try_from(framebuffer.height())
         .expect("framebuffer height must fit the Raylib presentation API");
 
+    let (window_width, window_height) = window_size(framebuffer_width, framebuffer_height);
     let (mut raylib, thread) = raylib::init()
-        .size(WINDOW_WIDTH, WINDOW_HEIGHT)
-        .title("CPU Raytraced EggWars Diorama - Phase 3")
+        .size(window_width, window_height)
+        .title("CPU Raytraced EggWars Diorama")
         .build();
     raylib.set_target_fps(TARGET_FPS);
 
@@ -117,14 +130,14 @@ pub fn run(
             &texture,
             Vector2::new(0.0, 0.0),
             0.0,
-            WINDOW_SCALE,
+            WINDOW_SCALE as f32,
             RaylibColor::WHITE,
         );
         let overlay_height = if overlay_label.is_some() { 82 } else { 58 };
         drawing.draw_rectangle(
             0,
             0,
-            WINDOW_WIDTH,
+            window_width,
             overlay_height,
             RaylibColor::new(0, 0, 0, 180),
         );
@@ -216,7 +229,9 @@ fn copy_framebuffer_to_rgba(framebuffer: &Framebuffer, rgba_pixels: &mut [u8]) -
 mod tests {
     use std::f32::consts::FRAC_PI_2;
 
-    use super::{CameraInput, apply_camera_input, copy_framebuffer_to_rgba};
+    use super::{
+        CameraInput, WINDOW_SCALE, apply_camera_input, copy_framebuffer_to_rgba, window_size,
+    };
     use crate::{
         camera::OrbitalCamera,
         math::Vec3,
@@ -246,6 +261,27 @@ mod tests {
         let mut rgba = [0; 7];
 
         assert!(!copy_framebuffer_to_rgba(&framebuffer, &mut rgba));
+    }
+
+    #[test]
+    fn window_shows_the_framebuffer_at_an_exact_integer_scale() {
+        assert_eq!(WINDOW_SCALE, 2);
+        assert_eq!(window_size(640, 360), (1280, 720));
+        let (width, height) = window_size(37, 21);
+        assert_eq!((width % 37, height % 21), (0, 0));
+        assert_eq!((width / 37, height / 21), (WINDOW_SCALE, WINDOW_SCALE));
+    }
+
+    #[test]
+    fn rgba_upload_buffer_matches_the_development_frame() {
+        let framebuffer = Framebuffer::try_new(640, 360).unwrap();
+        assert_eq!(framebuffer.pixels().len(), 230_400);
+        let mut rgba = vec![0; 640 * 360 * 4];
+        assert_eq!(rgba.len(), 921_600);
+        assert!(copy_framebuffer_to_rgba(&framebuffer, &mut rgba));
+        // The previous 320x180 buffer is rejected rather than silently half-filled.
+        let mut old = vec![0; 320 * 180 * 4];
+        assert!(!copy_framebuffer_to_rgba(&framebuffer, &mut old));
     }
 
     #[test]

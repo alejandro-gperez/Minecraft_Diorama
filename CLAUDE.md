@@ -21,7 +21,27 @@ player entity or gameplay system.
 - Phase 3 — Raytracing Effects: complete (missions 14–20).
 - Phase 4 — Performance Architecture: complete and audited (missions 21–27B).
 - Phase 5 — Procedural EggWars Diorama: in progress (`AGENTS.md` names it current). Missions 28,
-  29, and 30 complete; Mission 31 (battle aftermath details) is next and needs its own prompt.
+  29, 30, and 30.5 complete; Mission 31 (battle aftermath details) is next and needs its own prompt.
+- Mission 30.5 (two commits): (A) nine-block egg defenses, (B) 640×360 internal resolution.
+  (A) `DEFENSE_TEMPLATE: [(side, forward, up); 9]` (`DEFENSE_SLOTS = 9`): the eight cells around
+  the egg at `EGG_Y` (front row, flanks, back row) plus one cap at `(0, 0, 1)` (slot index 8);
+  the egg cell stays empty; one template rotated by the island `Frame`; `EGG_CELL` and the egg
+  position unchanged. States (obsidian intact): North `Intact` 9/9; West `Damaged` 7/9 (front-left
+  and front missing, cap stands); East `Breached` 5/9 (whole front row and cap missing: a U);
+  South `Destroyed` 3/9 (only the back-left L: left flank, back-left, back middle). `EggBase.defense`
+  is `[DefenseSlot; 9]`; `intact_slots() -> [bool; 9]`. An intact cap touches the ring only along
+  edges (not face-connected: the only blocks allowed to "float" in connectivity tests). Terrain
+  fingerprints unchanged; constructed fingerprint for seed 1847 is now `0x9B34_718C_2742_6F74`.
+  Construction per seed: 279–320 blocks, 29 obsidian (24 defense), 2 glass; startup log shows
+  `n/9 obsidian`.
+  (B) `WIDTH × HEIGHT` in `src/main.rs` = 640×360; window = framebuffer × `WINDOW_SCALE` (2,
+  `src/app/app.rs`, `window_size`) = 1280×720 with point filtering; 230,400 pixels, 921,600-byte
+  RGBA upload buffer, 920 tiles (40 × 23, last row 8 px high); camera aspect stays 16:9 so every
+  camera is unchanged; title is now "CPU Raytraced EggWars Diorama". Renderer, scheduler, DDA, and
+  materials untouched. Measurements (M3 Pro, release, EggWars 1847, 1 / 4 / automatic workers):
+  initial 11.9 / 3.4 / 1.7 ms at 320×180 vs 44.6 / 12.8 / 6.3 ms at 640×360 (~3.6–3.8×); close
+  20.1 / 5.7 / 2.8 vs 73.0 / 20.7 / 10.2. Older "320×180" measurements elsewhere in this file and
+  the README are historical. Tests that deliberately use 320×180 or small sizes were left as is.
 - Mission 30 construction: complete. `src/world/construction.rs` (+ `bridges.rs`, `structures.rs`,
   `tests.rs`). `build_eggwars_arena(seed) -> Result<EggWarsArena { grid, terrain: ArenaInfo,
   construction: ConstructionInfo }, ConstructionError>`: `generate_arena_in(layout, seed,
@@ -36,13 +56,11 @@ player entity or gameplay system.
   (+1 scaffold block at y −1), East `Damaged` (3-cell gap in both lanes, seed shift ±1, ragged
   lane), South `Severed` (6-cell gap + ragged cell), West `Incomplete` (lanes reach f 13/12). Bases:
   5×5 floor (side −2..2, forward −4..0), egg at (0, −2) y 2 (empty), gate pillars at side −3/2,
-  forward 3; `DEFENSE_TEMPLATE` front row (−1..1, +1) + sides (±1, 0), back open; North `Intact` 5,
-  West `Damaged` 4 (front gone), East `Breached` 3 (front + front-left, the bridge lanes), South
-  `Destroyed` 2 (front row gone). Central ruin: floor x/z −4..3 y 1 with 2×2 obsidian inlay,
+  forward 3; the egg defense (originally five positions, nine since Mission 30.5: see above). Central ruin: floor x/z −4..3 y 1 with 2×2 obsidian inlay,
   pillars 4 (obsidian cap, y 5)/3/2/1, north wall 3,3,3,3,2,1 with glass at (−2,3,−4) and
   (0,3,−4), west wall 2,2,1,1, open 6×6 interior (`open_area`). Seed variations only via domains
-  `con-gaps`/`con-ragd`/`con-scaf`. Construction per seed: 269–310 blocks, always 19 obsidian and
-  2 glass. Constructed fingerprint for seed 1847 pinned; Mission 29 fingerprints unchanged.
+  `con-gaps`/`con-ragd`/`con-scaf`. Construction per seed at Mission 30: 269–310 blocks, 19 obsidian, 2 glass (now 279–320 and 29).
+  Constructed fingerprint for seed 1847 pinned (updated in 30.5); Mission 29 fingerprints unchanged.
 - Mission 30 measurements (M3 Pro, 320×180, release): construction alone ~5 µs; generate +
   construct ~0.10–0.11 ms warm; initial view 12.1 / 3.47 / 1.74 ms (1 / 4 / automatic workers,
   Mission 29: 8.8 / 2.6 / 1.40); views 1.1–3.2 ms automatic. The increase is almost all the four
@@ -194,12 +212,11 @@ player entity or gameplay system.
   unit scale; edge/corner contact follows the DDA's half-open conventions; AABB objects are scanned
   linearly (group them only if the real scene's measured object count warrants it); the arena has
   terrain, bridges, bases, defenses, and the central ruin but no eggs, chests, arrows, lava, or
-  props; no camera collision (zoom can enter an island). The window title in `src/app/app.rs`
-  still says "Phase 3".
+  props; no camera collision (zoom can enter an island).
 - Rubric: all raytracing effects, DDA, and parallel rendering exist in code and diagnostic scenes
   only; they count only when visibly and intentionally used in the final diorama (Phase 5–6).
-- Current suite: 651 passing tests (Mission 30 added 38; the 613 earlier tests are unchanged). The showcase PPM is byte-identical to the Mission 21 render.
-- Development resolution: 320×180, presented at 960×540.
+- Current suite: 665 passing tests (Mission 30.5 added 14 net; Mission 30 added 38). PPMs are no longer byte-identical to the Mission 21 render because the resolution changed; at a fixed resolution output is deterministic.
+- Development resolution: 640×360, presented at 1280×720 (exact 2×, nearest-neighbor); it was 320×180 / 960×540 through Mission 30.
 - Pre-Phase-4 baseline (local, single-threaded, brute-force AABB traversal): default view about
   4.9 ms, close cobblestone about 10.7 ms, close lava about 18 ms, close glass about 30 ms. These
   are local development observations, not universal benchmarks; the README has the full table.
@@ -208,16 +225,16 @@ player entity or gameplay system.
   showcase through the release app binary: test-binary layout shifted it by ~10% with no code cause.
 - Compiler state: no rustc warnings; clippy reports only the known `clippy::module_inception`
   warnings (plus two pre-existing `assertions_on_constants` warnings in test code).
-- Next work: Mission 31 (battle aftermath details: eggs per `EggBase::egg`, chests in
-  `CentralStructure::open_area`, arrows, props), from the user's exact prompt. Not authorized by
-  this checkpoint.
+- Next work: Mission 31 (battle aftermath details: eggs per `EggBase::egg` — the cell under each
+  defense cap — chests in `CentralStructure::open_area`, arrows, props), from the user's exact
+  prompt. Not authorized by this checkpoint.
 
 The repository is expected to begin each mission from a clean checkpoint. Verify the actual
 repository state instead of assuming this section is current.
 
 ## Mission boundary
 
-Phase 4 is complete and audited; Phase 5 is in progress with Missions 28, 29, and 30 complete. Do
+Phase 4 is complete and audited; Phase 5 is in progress with Missions 28, 29, 30, and 30.5 complete. Do
 not start further Phase 4 optimization (SIMD, persistent pools, BVH, reciprocal DDA), Mission 31,
 eggs, chests, arrows, lava, or decorations from this handoff. The user and planning assistant
 will provide the exact prompt and API for each future mission. Do not implement future missions

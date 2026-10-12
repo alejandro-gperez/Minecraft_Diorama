@@ -324,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn development_resolution_yields_240_tiles_with_partial_last_row() {
+    fn the_previous_320x180_frame_yields_240_tiles_with_partial_last_row() {
         let grid = grid(320, 180, TILE_WIDTH, TILE_HEIGHT);
 
         assert_eq!((TILE_WIDTH, TILE_HEIGHT), (16, 16));
@@ -343,6 +343,27 @@ mod tests {
     }
 
     #[test]
+    fn development_resolution_yields_920_tiles_with_an_8_pixel_last_row() {
+        let grid = grid(640, 360, TILE_WIDTH, TILE_HEIGHT);
+
+        assert_eq!((TILE_WIDTH, TILE_HEIGHT), (16, 16));
+        assert_eq!(grid.columns(), 40);
+        assert_eq!(grid.rows(), 23);
+        assert_eq!(grid.tile_count(), 920);
+        // 360 = 22 * 16 + 8: the final row is eight pixels high, the columns divide evenly.
+        let last_row_first = grid.tile(880).unwrap();
+        assert_eq!(
+            (last_row_first.y_start(), last_row_first.y_end()),
+            (352, 360)
+        );
+        assert_eq!(last_row_first.height(), 8);
+        assert_eq!(grid.tile(919).unwrap().width(), 16);
+        assert_eq!(grid.tile(879).unwrap().height(), 16);
+        assert_eq!(grid.tile(920), None);
+        assert_eq!(grid.tiles().len(), 920);
+    }
+
+    #[test]
     fn partial_last_column_is_clipped() {
         let grid = grid(17, 19, 16, 16);
 
@@ -357,6 +378,7 @@ mod tests {
     fn every_pixel_is_covered_exactly_once() {
         let cases = [
             (320, 180, 16, 16),
+            (640, 360, 16, 16),
             (16, 16, 16, 16),
             (1, 1, 16, 16),
             (5, 3, 16, 16),
