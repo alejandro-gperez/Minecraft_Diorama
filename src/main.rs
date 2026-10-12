@@ -460,14 +460,16 @@ fn eggwars_decorations(arena: &EggWarsArena) -> Decorations {
 fn log_decorations(decorations: &Decorations, placement_ms: f64, scene_ms: f64) {
     println!(
         "  Decorations: {} props ({} eggs, {} shell fragments, {} chests, {} arrows, {} remnants) \
-         as {} AABB objects, placed in {placement_ms:.3} ms, scene built in {scene_ms:.3} ms",
+         as {} AABB objects ({} parts sealed out of sight), placed in {placement_ms:.3} ms, scene \
+         built in {scene_ms:.3} ms",
         decorations.decorations().len(),
         decorations.count(DecorationKind::Egg),
         decorations.count(DecorationKind::ShellFragment),
         decorations.count(DecorationKind::Chest),
         decorations.count(DecorationKind::Arrow),
         decorations.count(DecorationKind::Remnant),
-        decorations.parts().len(),
+        decorations.visible_part_count(),
+        decorations.parts().len() - decorations.visible_part_count(),
     );
 }
 
@@ -477,7 +479,9 @@ fn eggwars_scene(grid: VoxelGrid) -> Result<Scene, PpmLoadError> {
     procedural_island_scene(grid)
 }
 
-/// The EggWars diorama the app renders: the arena stage plus one AABB `SceneObject` per prop part.
+/// The EggWars diorama the app renders: the arena stage plus one AABB `SceneObject` per part of
+/// every visible prop, in placement order. The sealed North egg stays in `decorations` as story
+/// metadata but is not instantiated: its intact defense closes every face of its cell.
 ///
 /// The decorative materials are registered here, once, over one shared solid white texture; prop
 /// fragments of cobblestone and obsidian reuse the canonical materials. Props add no lights.
@@ -496,11 +500,13 @@ fn eggwars_diorama_scene(
         .add_decorative_materials(white)
         .expect("decorative materials must be valid and fit MaterialId");
     let materials = DecorationMaterials::new(blocks, decorative);
-    for part in decorations.parts() {
-        scene.add(SceneObject::new(
-            part.bounds,
-            materials.material(part.material),
-        ));
+    for decoration in decorations.visible() {
+        for part in decorations.parts_of(decoration) {
+            scene.add(SceneObject::new(
+                part.bounds,
+                materials.material(part.material),
+            ));
+        }
     }
     Ok(scene)
 }
@@ -556,16 +562,18 @@ mod tests {
         app::app::{WINDOW_SCALE, window_size},
         camera::OrbitalCamera,
         environment::Environment,
-        material::{DecorativeMaterials, MaterialId, TextureSelection},
+        material::{DecorativeMaterials, MaterialId, Texture, TextureSelection},
         math::Vec3,
         output::write_ppm,
         ray::Ray,
-        render::{Framebuffer, Renderer, renderer::tile_tests::assert_tiling_matches_reference},
-        scene::{HitSource, Scene},
+        render::{
+            Color, Framebuffer, Renderer, renderer::tile_tests::assert_tiling_matches_reference,
+        },
+        scene::{HitSource, Scene, SceneObject},
         voxel::{BlockType, Voxel, VoxelGrid, VoxelPosition},
         world::{
             ArenaLayout, ArrowHeading, BridgeState, DecorationKind, DecorationMaterial,
-            DecorationMaterials, Decorations, EggWarsArena, IslandId, Mount,
+            DecorationMaterials, DecorationSite, Decorations, EggWarsArena, IslandId, Mount,
             construction::OUTER_ISLANDS,
         },
     };
@@ -1562,23 +1570,30 @@ mod tests {
     }
 
     #[test]
-    fn diorama_adds_one_aabb_object_per_decoration_part_over_the_same_grid() {
+    fn diorama_adds_one_aabb_object_per_visible_decoration_part_over_the_same_grid() {
         let (world, decorations, scene) = diorama(ARENA_SEED);
 
         assert_eq!(scene.voxel_grid(), Some(&world.grid));
-        assert_eq!(scene.len(), decorations.parts().len());
-        assert_eq!(scene.len(), 59);
+        // Every part except the five of the sealed North egg, in placement order.
+        assert_eq!(scene.len(), decorations.visible_part_count());
+        assert_eq!(scene.len(), 54);
+        assert_eq!(decorations.parts().len(), 59);
+        let visible_parts: Vec<_> = decorations
+            .visible()
+            .flat_map(|decoration| decorations.parts_of(decoration))
+            .collect();
+        assert_eq!(visible_parts.len(), scene.len());
         assert!(scene.point_lights().is_empty(), "props add no lights");
         // Ten block materials plus seven decorative ones; one shared white texture.
         assert_eq!(scene.material_count(), 17);
         assert_eq!(scene.texture_count(), 13);
         let materials = decoration_materials(&scene);
-        for (object, part) in scene.objects().iter().zip(decorations.parts()) {
+        for (object, part) in scene.objects().iter().zip(visible_parts) {
             assert_eq!(object.bounds, part.bounds);
             assert_eq!(object.material_id, materials.material(part.material));
             assert!(scene.material(object.material_id).is_some());
         }
-        // Materials are shared: 59 objects use only nine distinct materials.
+        // Materials are shared: 54 objects use only nine distinct materials.
         let mut used: Vec<_> = scene.objects().iter().map(|o| o.material_id).collect();
         used.sort_by_key(|id| id.index());
         used.dedup();
@@ -1590,6 +1605,88 @@ mod tests {
         assert_eq!(obsidian.reflectivity(), 0.35);
         let glass = scene.material(blocks.glass).unwrap();
         assert_eq!(glass.ior(), 1.5);
+    }
+
+    #[test]
+    fn the_sealed_north_egg_is_not_geometry_but_west_egg_and_broken_eggs_are() {
+        let (world, decorations, scene) = diorama(ARENA_SEED);
+        let has_parts_of = |island: IslandId, kind: DecorationKind| {
+            let decoration = decorations
+                .of_kind(kind)
+                .find(|decoration| decoration.site == DecorationSite::Base(island))
+                .unwrap();
+            decorations
+                .parts_of(decoration)
+                .iter()
+                .all(|part| scene.objects().iter().any(|o| o.bounds == part.bounds))
+        };
+        assert!(!has_parts_of(IslandId::North, DecorationKind::Egg));
+        assert!(has_parts_of(IslandId::West, DecorationKind::Egg));
+        assert!(has_parts_of(IslandId::East, DecorationKind::ShellFragment));
+        assert!(has_parts_of(IslandId::South, DecorationKind::ShellFragment));
+        // No object at all in North's egg cell; its defense is the full nine obsidian blocks.
+        let north = world.construction.base(IslandId::North).unwrap();
+        let cell = north.egg.min_corner();
+        assert!(scene.objects().iter().all(|object| {
+            let (min, max) = (object.bounds.min(), object.bounds.max());
+            max.x <= cell.x
+                || min.x >= cell.x + 1.0
+                || max.y <= cell.y
+                || min.y >= cell.y + 1.0
+                || max.z <= cell.z
+                || min.z >= cell.z + 1.0
+        }));
+        assert!(north.defense.iter().all(|slot| slot.intact));
+    }
+
+    #[test]
+    fn instantiating_the_sealed_north_egg_would_change_no_pixel() {
+        let (world, decorations, scene) = diorama(ARENA_SEED);
+        // The Mission 31 scene: the same objects plus the North egg's five parts, in order.
+        let mut with_egg = eggwars_scene(world.grid.clone()).unwrap();
+        let blocks = with_egg.block_materials().unwrap();
+        let white = with_egg.add_texture(Texture::solid(Color::WHITE)).unwrap();
+        let decorative = with_egg.add_decorative_materials(white).unwrap();
+        let materials = DecorationMaterials::new(blocks, decorative);
+        for part in decorations.parts() {
+            with_egg.add(SceneObject::new(
+                part.bounds,
+                materials.material(part.material),
+            ));
+        }
+        assert_eq!(with_egg.len(), scene.len() + 5);
+
+        let north = world.construction.base(IslandId::North).unwrap();
+        let egg = north.egg.min_corner() + Vec3::new(0.5, 0.4, 0.5);
+        let lighting = phase2_lighting();
+        let environment = Environment::sunset();
+        let (width, height) = (96, 54);
+        let render = |scene: &Scene, camera: &OrbitalCamera| {
+            let mut framebuffer = Framebuffer::try_new(width, height).unwrap();
+            Renderer::render(camera, scene, &lighting, &environment, &mut framebuffer).unwrap();
+            framebuffer
+        };
+        // Around the defense at egg height and from above, close enough to fill the frame with
+        // obsidian, plus the cap from straight above.
+        for (yaw_step, pitch, radius) in (0..8)
+            .flat_map(|step| [(step, 0.05, 2.5), (step, 0.8, 3.0)])
+            .chain([(0, 1.5, 3.0)])
+        {
+            let camera = OrbitalCamera::try_new(
+                egg,
+                yaw_step as f32 * FRAC_PI_4 + 0.2,
+                pitch,
+                radius,
+                50.0_f32.to_radians(),
+                width as f32 / height as f32,
+            )
+            .unwrap();
+            assert_eq!(
+                render(&scene, &camera),
+                render(&with_egg, &camera),
+                "yaw step {yaw_step}, pitch {pitch}"
+            );
+        }
     }
 
     #[test]

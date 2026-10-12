@@ -179,6 +179,92 @@ fn eggs_keep_clear_of_every_defense_block_and_the_cap() {
     }
 }
 
+/// The six face neighbors of `cell`.
+fn face_neighbors(cell: VoxelPosition) -> [VoxelPosition; 6] {
+    [
+        (-1, 0, 0),
+        (1, 0, 0),
+        (0, -1, 0),
+        (0, 1, 0),
+        (0, 0, -1),
+        (0, 0, 1),
+    ]
+    .map(|(dx, dy, dz)| VoxelPosition::new(cell.x + dx, cell.y + dy, cell.z + dz))
+}
+
+#[test]
+fn only_the_north_egg_is_sealed_and_its_cell_is_closed_on_all_six_faces() {
+    for seed in SEEDS {
+        let (arena, decorations) = placed(seed);
+        let sealed: Vec<_> = decorations
+            .decorations()
+            .iter()
+            .filter(|decoration| decoration.sealed)
+            .collect();
+        assert_eq!(sealed.len(), 1, "{seed}");
+        let egg = sealed[0];
+        assert_eq!(egg.kind, DecorationKind::Egg);
+        assert_eq!(egg.site, base_site(IslandId::North));
+        // The story still has North's egg surviving behind its intact defense.
+        let base = arena.construction.base(IslandId::North).unwrap();
+        assert_eq!(base.defense_state, DefenseState::Intact);
+        assert!(base.defense.iter().all(|slot| slot.intact));
+        assert!(egg_survives(base.defense_state));
+        // Every part is in the egg cell; obsidian on the four sides and above, the base's
+        // cobblestone floor below: the underside is closed too.
+        let parts = decorations.parts_of(egg);
+        assert_eq!(parts.len(), EGG_LAYERS.len());
+        assert!(
+            parts
+                .iter()
+                .all(|part| overlapped_cells(part.bounds).all(|cell| cell == base.egg))
+        );
+        for neighbor in face_neighbors(base.egg) {
+            let expected = if neighbor.y < base.egg.y {
+                BlockType::Cobblestone
+            } else {
+                BlockType::Obsidian
+            };
+            assert_eq!(
+                arena.grid.get_world(neighbor),
+                Some(Voxel::Block(expected)),
+                "{seed} {neighbor:?}"
+            );
+        }
+        // West's egg shows through its notch: not sealed, and its front face is open air.
+        let west = decorations
+            .of_kind(DecorationKind::Egg)
+            .find(|egg| egg.site == base_site(IslandId::West))
+            .unwrap();
+        assert!(!west.sealed);
+        let west_base = arena.construction.base(IslandId::West).unwrap();
+        assert!(
+            face_neighbors(west_base.egg)
+                .iter()
+                .any(|&cell| !arena.grid.is_occupied_world(cell))
+        );
+    }
+}
+
+#[test]
+fn visible_props_are_all_but_the_sealed_north_egg_in_placement_order() {
+    let (_, decorations) = placed(1847);
+    let visible: Vec<_> = decorations.visible().copied().collect();
+    let expected: Vec<_> = decorations
+        .decorations()
+        .iter()
+        .filter(|decoration| {
+            !(decoration.kind == DecorationKind::Egg
+                && decoration.site == base_site(IslandId::North))
+        })
+        .copied()
+        .collect();
+    assert_eq!(visible, expected);
+    assert_eq!(visible.len(), 24);
+    assert_eq!(decorations.visible_part_count(), 54);
+    assert_eq!(decorations.parts().len(), 59);
+}
+
 #[test]
 fn the_egg_is_a_stepped_oval_taller_than_wide_and_widest_low() {
     let frame = Frame::new(VoxelPosition::new(0, 0, 0), (0, -1));
@@ -940,4 +1026,64 @@ fn validation_rejects_buried_floating_overlapping_and_misplaced_props() {
             "{offset:?}"
         );
     }
+}
+
+#[test]
+fn validation_rejects_a_sealed_prop_that_a_ray_could_reach() {
+    let arena = built(1847);
+    let north = arena.construction.base(IslandId::North).unwrap();
+    let west = arena.construction.base(IslandId::West).unwrap();
+    let sealed_egg = |base: &crate::world::construction::EggBase| {
+        let support = VoxelPosition::new(base.egg.x, FLOOR_Y, base.egg.z);
+        let mut decorations = Decorations::default();
+        decorations.push(
+            DecorationKind::Egg,
+            base_site(base.island),
+            Mount::Resting { support },
+            egg(Frame::new(base.egg, base.attack_direction)),
+        );
+        decorations.seal_last();
+        decorations
+    };
+
+    assert_eq!(validate(&arena.grid, &sealed_egg(north)), Ok(()));
+    // West's front is open: sealing its egg is rejected.
+    assert_eq!(
+        validate(&arena.grid, &sealed_egg(west)),
+        Err(DecorationError::NotSealed { decoration: 0 })
+    );
+    // North with its cap removed, or its front block turned to glass.
+    for (slot, voxel) in [
+        (CAP, Voxel::Empty),
+        (1, Voxel::Block(BlockType::Glass)),
+        (3, Voxel::Empty),
+    ] {
+        let mut grid = arena.grid.clone();
+        grid.set_world(north.defense[slot].position, voxel).unwrap();
+        assert_eq!(
+            validate(&grid, &sealed_egg(north)),
+            Err(DecorationError::NotSealed { decoration: 0 }),
+            "{slot} {voxel:?}"
+        );
+    }
+    // Without its floor block the egg is both unsupported and open underneath.
+    let mut grid = arena.grid.clone();
+    let floor = VoxelPosition::new(north.egg.x, FLOOR_Y, north.egg.z);
+    grid.set_world(floor, Voxel::Empty).unwrap();
+    assert!(validate(&grid, &sealed_egg(north)).is_err());
+    // A prop spanning two cells cannot be sealed in one.
+    let mut two_cells = Decorations::default();
+    let target = north.defense[1].position;
+    let heading = ArrowHeading::against(north.attack_direction);
+    two_cells.push(
+        DecorationKind::Arrow,
+        DecorationSite::Center,
+        Mount::Embedded { target, heading },
+        super::models::arrow(target, heading, (8.0, 8.0)),
+    );
+    two_cells.seal_last();
+    assert_eq!(
+        validate(&arena.grid, &two_cells),
+        Err(DecorationError::NotSealed { decoration: 0 })
+    );
 }

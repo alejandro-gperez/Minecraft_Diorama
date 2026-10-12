@@ -141,6 +141,10 @@ pub struct Decoration {
     pub kind: DecorationKind,
     pub site: DecorationSite,
     pub mount: Mount,
+    /// Shut inside one cell whose six face neighbors are opaque blocks (validated): North's egg
+    /// behind its intact defense. It is part of the story, but no ray can reach it, so the scene
+    /// does not instantiate its parts (see `Decorations::visible`).
+    pub sealed: bool,
     first_part: usize,
     part_count: usize,
 }
@@ -180,6 +184,19 @@ impl Decorations {
             .filter(move |decoration| decoration.kind == kind)
     }
 
+    /// The props a ray can reach, in placement order: every prop except the sealed ones. These
+    /// are the props the scene instantiates.
+    pub fn visible(&self) -> impl Iterator<Item = &Decoration> {
+        self.decorations
+            .iter()
+            .filter(|decoration| !decoration.sealed)
+    }
+
+    /// Parts of the visible props: one `SceneObject` each.
+    pub fn visible_part_count(&self) -> usize {
+        self.visible().map(|decoration| decoration.part_count).sum()
+    }
+
     fn push(&mut self, kind: DecorationKind, site: DecorationSite, mount: Mount, model: Model) {
         let first_part = self.parts.len();
         self.parts.extend(model.parts());
@@ -187,9 +204,17 @@ impl Decorations {
             kind,
             site,
             mount,
+            sealed: false,
             first_part,
             part_count: self.parts.len() - first_part,
         });
+    }
+
+    /// Marks the last placed prop as sealed in; `validate` checks that it really is.
+    fn seal_last(&mut self) {
+        if let Some(decoration) = self.decorations.last_mut() {
+            decoration.sealed = true;
+        }
     }
 }
 
@@ -210,6 +235,8 @@ pub enum DecorationError {
     Unsupported { decoration: usize },
     /// Parts of two different props overlap.
     Overlap { first: usize, second: usize },
+    /// A sealed prop is not shut inside one cell with an opaque block on each of its six faces.
+    NotSealed { decoration: usize },
 }
 
 impl fmt::Display for DecorationError {
@@ -240,6 +267,9 @@ impl fmt::Display for DecorationError {
             }
             Self::Overlap { first, second } => {
                 write!(formatter, "decorations {first} and {second} overlap")
+            }
+            Self::NotSealed { decoration } => {
+                write!(formatter, "sealed decoration {decoration} is not enclosed")
             }
         }
     }
@@ -434,8 +464,9 @@ impl Placer<'_> {
             self.resting(DecorationKind::Egg, site, frame, egg(frame))?;
         }
         match base.defense_state {
-            // North held: its egg stands sealed behind all nine blocks, untouched.
-            DefenseState::Intact => {}
+            // North held: its egg stands sealed behind all nine blocks, untouched. Ring, cap, and
+            // floor close every face of its cell, so it is story metadata only, never geometry.
+            DefenseState::Intact => self.decorations.seal_last(),
             // West: one broken obsidian piece lies in front of the notch, an arrow is stuck in
             // the surviving front-right block, and the egg shows through the gap.
             DefenseState::Damaged => {

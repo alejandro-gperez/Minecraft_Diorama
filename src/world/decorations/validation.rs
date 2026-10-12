@@ -1,10 +1,10 @@
 //! The placement rules every prop set must satisfy before `place_decorations` returns it.
 
-use super::{DecorationError, DecorationMaterial, Decorations, Mount};
+use super::{DecorationError, DecorationMaterial, DecorationPart, Decorations, Mount};
 use crate::{
     geometry::Aabb,
     math::Vec3,
-    voxel::{VoxelGrid, VoxelPosition},
+    voxel::{BlockType, Voxel, VoxelGrid, VoxelPosition},
 };
 
 /// Cells whose interior a box overlaps (touching a cell's face does not count).
@@ -29,6 +29,32 @@ pub(super) fn overlaps(a: Aabb, b: Aabb) -> bool {
     a0.x < b1.x && b0.x < a1.x && a0.y < b1.y && b0.y < a1.y && a0.z < b1.z && b0.z < a1.z
 }
 
+/// Whether every part lies inside one cell whose six face neighbors all hold an opaque block (any
+/// block but glass). A ray can then reach the parts only by crossing an opaque face first; the one
+/// exception is the DDA's zero-measure edge convention (a ray exactly along a shared edge passes
+/// between two blocks), which the renders confirm never exposes the North egg.
+pub(super) fn sealed_in_one_cell(grid: &VoxelGrid, parts: &[DecorationPart]) -> bool {
+    let mut cells = parts.iter().flat_map(|part| overlapped_cells(part.bounds));
+    let Some(cell) = cells.next() else {
+        return false;
+    };
+    let opaque = |(dx, dy, dz): (i32, i32, i32)| {
+        let neighbor = VoxelPosition::new(cell.x + dx, cell.y + dy, cell.z + dz);
+        matches!(grid.get_world(neighbor), Some(Voxel::Block(block)) if block != BlockType::Glass)
+    };
+    cells.all(|other| other == cell)
+        && [
+            (-1, 0, 0),
+            (1, 0, 0),
+            (0, -1, 0),
+            (0, 1, 0),
+            (0, 0, -1),
+            (0, 0, 1),
+        ]
+        .into_iter()
+        .all(opaque)
+}
+
 pub(super) fn cell_box(cell: VoxelPosition) -> Aabb {
     let min = cell.min_corner();
     Aabb::try_new(min, min + Vec3::new(1.0, 1.0, 1.0)).expect("a voxel cell is a valid box")
@@ -40,7 +66,8 @@ pub(super) fn cell_box(cell: VoxelPosition) -> Aabb {
 /// - overlap no block, except that an arrowhead overlaps exactly its target and also reaches out
 ///   of it, so the arrow is visibly stuck rather than floating or buried;
 /// - if resting, have every bottom face (its lowest parts) on top of its support block;
-/// - overlap no part of another prop.
+/// - overlap no part of another prop;
+/// - if sealed, lie inside one cell closed by an opaque block on each of its six faces.
 ///
 /// Parts of one prop may touch or overlap each other (shaft and head, chest walls and lid); these
 /// intentional contacts are the only intersections allowed.
@@ -111,6 +138,10 @@ pub(super) fn validate(grid: &VoxelGrid, decorations: &Decorations) -> Result<()
             if !grid.is_occupied_world(support) || bottom != top || !on_support {
                 return Err(DecorationError::Unsupported { decoration: index });
             }
+        }
+
+        if decoration.sealed && !sealed_in_one_cell(grid, parts) {
+            return Err(DecorationError::NotSealed { decoration: index });
         }
     }
 

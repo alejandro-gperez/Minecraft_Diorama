@@ -100,7 +100,8 @@ The current implementation includes:
   (eight blocks around the egg and one above it) hold 9, 7, 5, and 3 blocks, a ruined central structure with an obsidian floor inlay and two glass
   windows, and metadata (egg cells, defense slots, bridge ends, central open area) that later
   missions build on.
-- battle-aftermath props as 59 project-owned AABB objects placed from that metadata: surviving
+- battle-aftermath props placed from that metadata as 59 project-owned AABB parts, 54 of them
+  instantiated as scene objects (the sealed North egg is story metadata only): surviving
   eggs in the North and West defenses, shell fragments in East and South, two open chests in the
   central ruin, seven axis-aligned arrows stuck in blocks, and eight block fragments at the breaks,
   using seven decorative solid-color materials plus the canonical cobblestone and obsidian.
@@ -1461,7 +1462,8 @@ build_eggwars_arena(seed)                  terrain + construction (Missions 28�
        validate the whole set (below), then return Decorations { decorations, parts }
   -> eggwars_diorama_scene(grid, &decorations)
        register 7 decorative materials over one solid white texture, once
-       add one SceneObject per part (59)
+       add one SceneObject per part of every visible prop (54 of 59; the sealed North egg is
+       skipped since Mission 31.25)
   -> existing CPU renderer
 ```
 
@@ -1495,6 +1497,18 @@ open front and shaded under the cap, the West egg is clearly visible up close, a
 reflections show it on the inner faces of the ring. The North egg exists (the narrative and the
 tests require it) but its intact defense hides it completely. That is the intended reading: a
 sealed defense the attackers never broke. No obsidian was removed to reveal it.
+
+Since Mission 31.25 the North egg is placed and validated as before but marked `sealed`, and the
+diorama scene does not instantiate its five parts (`Decorations::visible` skips sealed props): it
+remains in `Decorations`, `egg_survives(Intact)` is still true, and its defense is still nine
+obsidian blocks. Validation proves the enclosure for any sealed prop: all its parts lie in one cell
+whose six face neighbors hold opaque blocks (anything but glass), here the four ring blocks beside
+it, the cap above, and the cobblestone floor below, so the underside is closed too. A ray reaches
+that cell only by crossing an opaque face, apart from the DDA's zero-measure edge convention (see
+Known Limitations). Renders of seeds 1847, 42, 2026, and 0 from 18 poses each, ten of them close
+around the North defense (sides, above, straight down, farther out), are byte-identical with and
+without the egg, so removing it changed no pixel through primary, shadow, reflected, or refracted
+rays. This is a single narrative decision, not hidden-surface removal: nothing else is culled.
 
 Broken eggs leave no intact egg and nothing egg-sized: each shell fragment is a single flat cream
 box at most 5 × 3 × 5 px, resting on the floor in the egg cell or a neighboring open cell.
@@ -1568,7 +1582,9 @@ nothing is returned:
   overlaps exactly its target and also reaches out of it (`NotEmbedded` otherwise);
 - a resting prop's lowest parts lie on the top of its support block, inside that block's column
   (`Unsupported` otherwise), so nothing floats;
-- no part of one prop overlaps a part of another (`Overlap`).
+- no part of one prop overlaps a part of another (`Overlap`);
+- a sealed prop (only North's egg) lies inside one cell with an opaque block on each of its six
+  faces (`NotSealed` otherwise).
 
 Parts of one prop may touch or overlap: these are the only intended intersections (shaft against
 head and fletching, walls around the chest interior, lid on the back wall, latch on the lid, egg
@@ -1606,7 +1622,7 @@ was added. The showcase, voxel diagnostic, and procedural-island PPMs are byte-i
 30.5. Startup adds one line:
 
 ```text
-  Decorations: 25 props (2 eggs, 6 shell fragments, 2 chests, 7 arrows, 8 remnants) as 59 AABB objects, placed in 0.023 ms, scene built in 0.758 ms
+  Decorations: 25 props (2 eggs, 6 shell fragments, 2 chests, 7 arrows, 8 remnants) as 54 AABB objects (5 parts sealed out of sight), placed in 0.023 ms, scene built in 0.758 ms
 ```
 
 The default camera, resolution (640×360 in a 1280×720 window at 2×, nearest neighbor), controls,
@@ -1661,7 +1677,9 @@ These are deliberate scope boundaries of the current diagnostic renderer, not hi
   Mission 31 by design; grouping props (for example per-site bounds or per-cell lists in the DDA) is
   the obvious next step if the cost matters.
 - Props are axis-aligned: arrows fly along ±X, ±Z, or straight down only, and the open chest lid
-  stands upright rather than tilted. The North egg is fully hidden by its intact defense. The
+  stands upright rather than tilted. The North egg is fully hidden by its intact defense and is
+  not instantiated as geometry (Mission 31.25); a camera zoomed inside its defense would not see
+  it. The
   decorative colors are diagnostic values awaiting the final lighting pass.
 - Construction is designed for `ArenaLayout::eggwars()` only; another separation would need its
   bridge damage repositioned.
@@ -2180,6 +2198,15 @@ grid, and a buried or detached arrow. Scene: one object per part with resolved, 
 blocked by arrows and the chest lid; mirror rays off obsidian reaching the egg and changing the
 render; assorted viewpoints around every prop; tiling equivalence; a small change to the initial
 view; no prop words in the renderer or the scene queries; and per-seed reproducibility.
+
+Mission 31.25 first drops the sealed North egg from the scene, adding 5 tests (710 passing): only
+North's egg is sealed, on every seed, inside a cell closed by obsidian on four sides and above and
+by the cobblestone floor below, while West's egg is not; the visible props are all but that egg,
+in placement order (24 props, 54 parts, 59 parts in total); validation rejects sealing West's egg,
+North's egg with its cap or a flank removed or its front block turned to glass, or a prop spanning
+two cells; the scene holds no object in North's egg cell but still holds West's egg and the broken
+eggs' fragments; and close renders around the North defense are pixel-identical with and without
+the egg's five boxes.
 
 The Phase 4 audit changed no runtime behavior and added no tests; the suite was unchanged at 529
 passing tests.
