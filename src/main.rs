@@ -16,7 +16,9 @@ use math::Vec3;
 use render::{Color, Framebuffer};
 use scene::{Scene, SceneObject};
 use voxel::{BlockMaterials, BlockType, Voxel, VoxelGrid, VoxelPosition};
-use world::{IslandConfig, IslandStats, generate_island};
+use world::{
+    Arena, ArenaLayout, IslandConfig, IslandId, IslandStats, generate_arena, generate_island,
+};
 
 pub mod app;
 pub mod camera;
@@ -48,6 +50,12 @@ const ISLAND_CONFIG: IslandConfig = IslandConfig::new(VoxelPosition::new(0, 0, 0
 const ISLAND_CAMERA_YAW: f32 = 1.05;
 const ISLAND_CAMERA_PITCH: f32 = 0.25;
 const ISLAND_CAMERA_RADIUS: f32 = 22.0;
+/// Initial orbit for the EggWars arena, around the central island: from the lit south-east,
+/// elevated enough to see all five grass tops and the void between them, low enough to keep the
+/// rocky undersides in view, and just far enough to keep every island inside the frame.
+const EGGWARS_CAMERA_YAW: f32 = 0.7;
+const EGGWARS_CAMERA_PITCH: f32 = 0.35;
+const EGGWARS_CAMERA_RADIUS: f32 = 68.0;
 
 /// Position, color, intensity, and radius of the one representative light for the showcase lava.
 ///
@@ -108,6 +116,21 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Some(format!(
                     "Procedural island | seed {seed} | {}x{} footprint",
                     ISLAND_CONFIG.footprint_width, ISLAND_CONFIG.footprint_depth,
+                )),
+            )
+        }
+        SceneMode::EggWars { seed } => {
+            let started = Instant::now();
+            let arena = eggwars_arena(seed);
+            let generation_ms = started.elapsed().as_secs_f64() * 1_000.0;
+            log_arena(&arena, generation_ms);
+            (
+                eggwars_camera(aspect_ratio),
+                eggwars_scene(arena.grid)?,
+                PathBuf::from(format!("output/eggwars_seed_{seed}.ppm")),
+                Some(format!(
+                    "EggWars arena | seed {seed} | {} islands",
+                    IslandId::ALL.len()
                 )),
             )
         }
@@ -347,6 +370,73 @@ fn procedural_island_camera(aspect_ratio: f32) -> OrbitalCamera {
     .expect("procedural island camera configuration must be valid")
 }
 
+/// Generates the five-island arena for `seed` into its one global grid.
+fn eggwars_arena(seed: u64) -> Arena {
+    generate_arena(&ArenaLayout::eggwars(), seed)
+        .expect("the EggWars arena grid must be allocatable")
+}
+
+/// Startup summary: one line for the arena and one per island, never per block.
+fn log_arena(arena: &Arena, generation_ms: f64) {
+    let info = &arena.info;
+    let (width, height, depth) = info.grid_dimensions;
+    let origin = info.grid_origin;
+    println!(
+        "EggWars arena seed {}: {} islands, {} blocks ({} ores) in a {width}x{height}x{depth} grid \
+         at origin ({}, {}, {}), separation {}, generated in {generation_ms:.3} ms",
+        info.global_seed,
+        info.islands.len(),
+        info.occupied_voxels,
+        info.ores(),
+        origin.x,
+        origin.y,
+        origin.z,
+        info.separation,
+    );
+    for island in &info.islands {
+        let config = island.config;
+        println!(
+            "  {:<6} {}x{} at ({}, {}, {}): island seed {:#018x}, {} blocks, {} ores",
+            island.id.name(),
+            config.footprint_width,
+            config.footprint_depth,
+            config.center.x,
+            config.center.y,
+            config.center.z,
+            island.seed,
+            island.stats.total(),
+            island.stats.ores(),
+        );
+    }
+}
+
+/// The EggWars arena: the generated grid and no AABB objects or lights beyond the shared ambient
+/// and directional light. Terrain is generated before this, exactly once.
+fn eggwars_scene(grid: VoxelGrid) -> Result<Scene, PpmLoadError> {
+    procedural_island_scene(grid)
+}
+
+/// Orbits the central island's center line at a third of its thickness below the grass, so the
+/// arena stays framed around its focal island.
+fn eggwars_camera(aspect_ratio: f32) -> OrbitalCamera {
+    let center = ArenaLayout::eggwars().config(IslandId::Center);
+    let surface_top = center.center.y as f32 + 1.0;
+    let target = Vec3::new(
+        center.center.x as f32,
+        surface_top - center.thickness as f32 / 3.0,
+        center.center.z as f32,
+    );
+    OrbitalCamera::try_new(
+        target,
+        EGGWARS_CAMERA_YAW,
+        EGGWARS_CAMERA_PITCH,
+        EGGWARS_CAMERA_RADIUS,
+        VERTICAL_FOV_DEGREES * PI / 180.0,
+        aspect_ratio,
+    )
+    .expect("EggWars camera configuration must be valid")
+}
+
 fn set_block(grid: &mut VoxelGrid, (x, y, z): (i32, i32, i32), block: BlockType) {
     grid.set_world(VoxelPosition::new(x, y, z), Voxel::Block(block))
         .expect("voxel diagnostic blocks must lie inside its grid");
@@ -368,8 +458,9 @@ mod tests {
     use std::f32::consts::FRAC_PI_4;
 
     use super::{
-        HEIGHT, ISLAND_CONFIG, WIDTH, phase2_lighting, phase2_test_scene, procedural_island_camera,
-        procedural_island_grid, procedural_island_scene, voxel_diagnostic_scene,
+        HEIGHT, ISLAND_CONFIG, WIDTH, eggwars_arena, eggwars_camera, eggwars_scene,
+        phase2_lighting, phase2_test_scene, procedural_island_camera, procedural_island_grid,
+        procedural_island_scene, voxel_diagnostic_scene,
     };
     use crate::{
         camera::OrbitalCamera,
@@ -380,6 +471,7 @@ mod tests {
         render::{Framebuffer, Renderer, renderer::tile_tests::assert_tiling_matches_reference},
         scene::{HitSource, Scene},
         voxel::{BlockType, Voxel, VoxelGrid, VoxelPosition},
+        world::{ArenaLayout, IslandId},
     };
 
     #[test]
@@ -785,5 +877,277 @@ mod tests {
             }
         }
         assert_eq!(count, stats.total());
+    }
+
+    const ARENA_SEED: u64 = 1847;
+
+    fn arena_scene() -> Scene {
+        eggwars_scene(eggwars_arena(ARENA_SEED).grid).unwrap()
+    }
+
+    /// The island whose region contains a hit voxel, if the hit is terrain.
+    fn hit_island(layout: &ArenaLayout, source: HitSource) -> Option<IslandId> {
+        let HitSource::Voxel { position, .. } = source else {
+            return None;
+        };
+        IslandId::ALL
+            .into_iter()
+            .find(|&id| layout.config(id).bounds().unwrap().contains(position))
+    }
+
+    #[test]
+    fn eggwars_scene_attaches_the_one_arena_grid_and_nothing_else() {
+        let arena = eggwars_arena(ARENA_SEED);
+        let scene = eggwars_scene(arena.grid.clone()).unwrap();
+        let showcase = phase2_test_scene().unwrap();
+
+        assert_eq!(scene.voxel_grid(), Some(&arena.grid));
+        assert_eq!(scene.len(), 0);
+        assert!(scene.point_lights().is_empty());
+        assert_eq!(scene.texture_count(), showcase.texture_count());
+        assert_eq!(scene.material_count(), showcase.material_count());
+        assert_eq!(arena.info.global_seed, ARENA_SEED);
+        assert_eq!(arena.info.grid_dimensions, (80, 16, 80));
+    }
+
+    #[test]
+    fn dda_reaches_the_grass_of_every_island_in_the_global_grid() {
+        let scene = arena_scene();
+        let layout = ArenaLayout::eggwars();
+        let materials = scene.block_materials().unwrap();
+
+        for id in IslandId::ALL {
+            let center = layout.config(id).center;
+            let origin = Vec3::new(center.x as f32 + 0.5, 30.0, center.z as f32 + 0.5);
+            let ray = Ray::try_new(origin, Vec3::new(0.0, -1.0, 0.0)).unwrap();
+
+            let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+
+            assert_eq!(
+                hit.source,
+                HitSource::Voxel {
+                    position: center,
+                    block: BlockType::Grass,
+                },
+                "{id:?}"
+            );
+            assert_eq!(hit.geometry.position.y, center.y as f32 + 1.0);
+            assert_eq!(hit.material_id, materials.grass);
+        }
+    }
+
+    #[test]
+    fn dda_crosses_the_void_between_islands() {
+        let scene = arena_scene();
+        let layout = ArenaLayout::eggwars();
+        let east = Vec3::new(1.0, 0.0, 0.0);
+        let along = |origin: Vec3, direction: Vec3| {
+            let ray = Ray::try_new(origin, direction).unwrap();
+            let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+            (hit_island(&layout, hit.source), hit.geometry.t)
+        };
+
+        // From outside the grid, through the west island first.
+        let (island, _) = along(Vec3::new(-100.0, 0.5, 0.5), east);
+        assert_eq!(island, Some(IslandId::West));
+        // From the void between west and center, either way, across the empty cells.
+        let gap = Vec3::new(-18.0, 0.5, 0.5);
+        let (island, t) = along(gap, east);
+        assert_eq!(island, Some(IslandId::Center));
+        assert!(t >= 6.0, "{t}");
+        let (island, t) = along(gap, -east);
+        assert_eq!(island, Some(IslandId::West));
+        assert!(t >= 6.0, "{t}");
+        // Straight down through the void: nothing at all.
+        let down = Ray::try_new(gap, Vec3::new(0.0, -1.0, 0.0)).unwrap();
+        assert!(scene.closest_hit(down, 0.0, f32::INFINITY).is_none());
+    }
+
+    #[test]
+    fn arena_ores_resolve_through_dda_to_their_materials() {
+        let scene = arena_scene();
+        let grid = scene.voxel_grid().unwrap();
+        let materials = scene.block_materials().unwrap();
+        let mut found = [0; 4];
+
+        for (position, block) in occupied_voxels(&scene) {
+            let Some(index) = ORES.iter().position(|&ore| ore == block) else {
+                continue;
+            };
+            let open = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                .into_iter()
+                .map(|(dx, dz)| VoxelPosition::new(position.x + dx, position.y, position.z + dz))
+                .find(|&n| !grid.is_occupied_world(n))
+                .expect("ores are only placed with an open side");
+            let start = voxel_center(open);
+            let ray = Ray::try_new(start, voxel_center(position) - start).unwrap();
+
+            let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+
+            assert_eq!(hit.source, HitSource::Voxel { position, block });
+            assert_eq!(hit.material_id, materials.material(block));
+            found[index] += 1;
+        }
+        assert!(found.iter().all(|&count| count > 0), "{found:?}");
+    }
+
+    #[test]
+    fn arena_terrain_casts_shadows_and_the_void_does_not() {
+        let scene = arena_scene();
+        let layout = ArenaLayout::eggwars();
+        let up = Vec3::new(0.0, 1.0, 0.0);
+        let sun = Vec3::new(0.6, 1.0, 0.8);
+
+        for id in IslandId::ALL {
+            let center = layout.config(id).center;
+            let below = Vec3::new(center.x as f32 + 0.5, -30.0, center.z as f32 + 0.5);
+            assert!(
+                scene.is_occluded(Ray::try_new(below, up).unwrap(), 0.0, f32::INFINITY),
+                "{id:?}"
+            );
+        }
+        // Below the central island, on the line from its center grass away from the directional
+        // light: in open air, yet shaded by the island toward the light.
+        let toward_sun = Ray::try_new(Vec3::ZERO, sun).unwrap().direction();
+        let shaded = Vec3::new(0.5, 0.5, 0.5) - toward_sun * 20.0;
+        let cell = VoxelPosition::new(
+            shaded.x.floor() as i32,
+            shaded.y.floor() as i32,
+            shaded.z.floor() as i32,
+        );
+        assert!(!scene.voxel_grid().unwrap().is_occupied_world(cell));
+        assert!(scene.is_occluded(Ray::try_new(shaded, sun).unwrap(), 0.0, f32::INFINITY));
+        // In the gaps the sky is open.
+        for gap in [Vec3::new(-18.0, -30.0, 0.5), Vec3::new(0.5, -30.0, 18.0)] {
+            assert!(!scene.is_occluded(Ray::try_new(gap, up).unwrap(), 0.0, f32::INFINITY));
+        }
+    }
+
+    #[test]
+    fn initial_eggwars_camera_frames_all_five_islands_without_clipping() {
+        let scene = arena_scene();
+        let layout = ArenaLayout::eggwars();
+        let camera = eggwars_camera(WIDTH as f32 / HEIGHT as f32);
+        let (columns, rows) = (160, 90);
+        let mut seen = [0; 5];
+
+        for row in 0..rows {
+            for column in 0..columns {
+                let u = column as f32 / (columns - 1) as f32;
+                let v = row as f32 / (rows - 1) as f32;
+                let ray = camera.ray_for_viewport(u, v).unwrap();
+                let Some(hit) = scene.closest_hit(ray, 0.0, f32::INFINITY) else {
+                    continue;
+                };
+                let island = hit_island(&layout, hit.source).expect("only terrain in the arena");
+                seen[island as usize] += 1;
+                let border = row == 0 || column == 0 || row == rows - 1 || column == columns - 1;
+                assert!(
+                    !border,
+                    "{island:?} touches the frame edge at ({column}, {row})"
+                );
+            }
+        }
+        // Every island is visible, and the central island covers more of the frame than the far
+        // outer islands behind it.
+        assert!(seen.iter().all(|&pixels| pixels > 50), "{seen:?}");
+        assert!(seen[IslandId::Center as usize] > seen[IslandId::North as usize]);
+        assert!(seen[IslandId::Center as usize] > seen[IslandId::West as usize]);
+
+        let target = camera.target();
+        assert_eq!((target.x, target.z), (0.0, 0.0));
+        assert!(
+            camera.position().y > 1.0,
+            "the camera looks down onto the grass"
+        );
+    }
+
+    #[test]
+    fn eggwars_orbit_and_zoom_render_the_same_unchanged_arena() {
+        let scene = arena_scene();
+        let generated = scene.voxel_grid().unwrap().clone();
+        let lighting = phase2_lighting();
+        let environment = Environment::sunset();
+        let mut framebuffer = Framebuffer::try_new(32, 18).unwrap();
+        let mut camera = eggwars_camera(32.0 / 18.0);
+        let initial = camera;
+        let mut renders = Vec::new();
+
+        for _ in 0..6 {
+            Renderer::render(&camera, &scene, &lighting, &environment, &mut framebuffer).unwrap();
+            assert!(framebuffer.pixels().iter().all(|color| color.is_finite()));
+            renders.push(framebuffer.pixels().to_vec());
+            camera.orbit_yaw(1.1);
+            camera.orbit_pitch(-0.1);
+            camera.adjust_radius(-9.0);
+        }
+
+        assert_ne!(camera, initial);
+        assert!(camera.radius() < initial.radius());
+        assert!(renders.windows(2).all(|pair| pair[0] != pair[1]));
+        assert_eq!(scene.voxel_grid(), Some(&generated));
+        assert_eq!(&eggwars_arena(ARENA_SEED).grid, scene.voxel_grid().unwrap());
+    }
+
+    #[test]
+    fn eggwars_arena_renders_from_assorted_viewpoints() {
+        let scene = arena_scene();
+        let lighting = phase2_lighting();
+        let environment = Environment::sunset();
+        let mut framebuffer = Framebuffer::try_new(32, 18).unwrap();
+        let target = eggwars_camera(1.0).target();
+
+        for yaw_step in 0..8 {
+            for pitch in [-1.2, -0.3, 0.35, 1.3] {
+                // Inside the central island, beside it, across the arena, and far outside.
+                for radius in [2.0, 15.0, 45.0, 120.0] {
+                    let camera = OrbitalCamera::try_new(
+                        target,
+                        yaw_step as f32 * FRAC_PI_4 + 0.2,
+                        pitch,
+                        radius,
+                        50.0_f32.to_radians(),
+                        32.0 / 18.0,
+                    )
+                    .unwrap();
+                    Renderer::render(&camera, &scene, &lighting, &environment, &mut framebuffer)
+                        .unwrap();
+                    assert!(framebuffer.pixels().iter().all(|color| color.is_finite()));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn eggwars_tiling_matches_the_sequential_reference() {
+        let scene = arena_scene();
+        let lighting = phase2_lighting();
+
+        for (width, height) in [(96, 54), (70, 41)] {
+            let camera = eggwars_camera(width as f32 / height as f32);
+            assert_tiling_matches_reference(&scene, &lighting, &camera, width, height);
+        }
+    }
+
+    #[test]
+    fn rendering_has_no_arena_specific_paths() {
+        // The arena is ordinary voxel data: nothing in the renderer, scene queries, voxel
+        // traversal, or lighting knows about islands, arenas, or EggWars.
+        let sources = [
+            include_str!("render/renderer.rs"),
+            include_str!("render/parallel.rs"),
+            include_str!("render/tile.rs"),
+            include_str!("scene/scene.rs"),
+            include_str!("voxel/traversal.rs"),
+            include_str!("voxel/grid.rs"),
+            include_str!("lighting/lighting.rs"),
+            include_str!("environment/environment.rs"),
+        ];
+        for source in sources {
+            let source = source.to_lowercase();
+            for word in ["eggwars", "arena", "islandid", "island_seed"] {
+                assert!(!source.contains(word), "renderer source mentions {word}");
+            }
+        }
     }
 }

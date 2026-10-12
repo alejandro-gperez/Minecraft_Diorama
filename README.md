@@ -15,8 +15,9 @@ derived normal map for cobblestone. Phase 4 (performance architecture) is implem
 passed its final technical audit: a dense voxel grid, 3D DDA traversal, hybrid voxel + AABB scene
 queries, and a deterministic tile renderer whose tiles scoped CPU worker threads claim dynamically.
 Phase 5 (the EggWars world) is in progress: Mission 28 added a deterministic, seeded procedural
-floating-island generator that writes one 16×16 island into the scene's voxel grid. The five-island
-arena, bridges, structures, and the final scene do not exist yet.
+floating-island generator, and Mission 29 uses it to build the five-island EggWars arena (a 24×24
+central island and four 16×16 outer islands) in one global voxel grid from one seed. Bridges,
+structures, storytelling props, and the final scene do not exist yet.
 
 ## Current Status
 
@@ -26,7 +27,7 @@ arena, bridges, structures, and the final scene do not exist yet.
 | 2 — Materials, Textures, and Lighting | Complete and audited |
 | 3 — Raytracing Effects | Complete and audited |
 | 4 — Performance Architecture | Complete and audited (see Phase 4 Audit) |
-| 5 — EggWars World | In progress: Mission 28 (procedural floating island) complete |
+| 5 — EggWars World | In progress: Missions 28 (procedural floating island) and 29 (five-island arena) complete |
 
 The rendering pipeline is: every radiance and shadow ray queries one hybrid scene (3D DDA over a
 voxel grid plus a linear scan of arbitrary AABB objects), tiles of the framebuffer are claimed
@@ -36,8 +37,8 @@ trace path; reflective materials launch recursive reflection rays and transparen
 recursive Snell refraction rays whose split with reflection follows Schlick's Fresnel
 approximation. Lava is self-luminous and lights nearby surfaces through a finite local point light.
 Cobblestone is normal mapped from a map derived offline from its own texture. The scenes that exist
-are three diagnostics: the default five-block showcase, the small voxel diagnostic scene, and one
-seeded procedural floating island.
+are the default five-block showcase, the small voxel diagnostic scene, one seeded procedural
+floating island, and the seeded five-island EggWars arena (terrain only).
 
 The current implementation includes:
 
@@ -86,6 +87,9 @@ The current implementation includes:
 - a deterministic procedural floating-island generator: a seeded 16×16 radial-mask island of
   grass, dirt, and a tapered cobblestone underside with exposed ores, generated once into the
   scene's voxel grid and selected with `--procedural-island` / `--seed <u64>`.
+- the five-island EggWars arena: a 24×24 central island and four 16×16 outer islands on the
+  cardinal axes, each with its own seed derived from one global seed, generated into one global
+  voxel grid and selected with `--eggwars [--seed <u64>]`.
 
 ## Architecture
 
@@ -1075,6 +1079,139 @@ all show a round, irregular grass top with a flat center, one-block terraces, a 
 cobblestone underside tapering to a small tip, visible ore clusters on side faces, and no holes,
 detached blocks, or square outline.
 
+## Five-Island EggWars Arena (Phase 5, Mission 29)
+
+`src/world/arena.rs` lays out the classic EggWars cross of floating islands and generates all five
+with Mission 28's `generate_island`, once per island, into one global `VoxelGrid`. There is no
+second terrain algorithm, no per-island grid, no chunking, and no AABB per block; the renderer
+traverses the arena like any other grid. Bridges, structures, chests, eggs, lava, and decorations
+are not part of this mission.
+
+### Layout
+
+```text
+                    North 16×16
+                     (0, -32)
+
+  West 16×16       Center 24×24       East 16×16
+   (-32, 0)          (0, 0)            (32, 0)
+
+                    South 16×16
+                     (0, 32)
+```
+
+| Island | Footprint | Center `(x, y, z)` | Thickness | Region (inclusive) |
+| --- | --- | --- | ---: | --- |
+| Center | 24 × 24 | (0, 0, 0) | 15 | x −12..11, y −14..1, z −12..11 |
+| North | 16 × 16 | (0, 0, −32) | 12 | x −8..7, y −11..1, z −40..−25 |
+| South | 16 × 16 | (0, 0, 32) | 12 | x −8..7, y −11..1, z 24..39 |
+| East | 16 × 16 | (32, 0, 0) | 12 | x 24..39, y −11..1, z −8..7 |
+| West | 16 × 16 | (−32, 0, 0) | 12 | x −40..−25, y −11..1, z −8..7 |
+
+Axes follow the project convention (`+X` east, `+Y` up, `+Z` south), so north is `−Z` and west
+`−X`. All five islands share the surface level `y = 0`: the flat grass of every island is at the
+same height, so future bridges can run level. The central island's underside reaches three blocks
+deeper (thickness 15 versus 12); its top does not tower over the others.
+
+**Separation.** `ISLAND_SEPARATION = 32` blocks from the center of the central island to the center
+of each outer island. The nominal gap between square footprints is `32 − 12 − 8 = 12` blocks; the
+round silhouettes (radius 0.79–1.13 of the half extent) widen the visible gap to roughly 12–17
+blocks. That reads as open void in the initial view, stays a plausible Minecraft bridge length, and
+keeps the whole arena framed without zooming far out. The layout is seed-independent: a seed
+changes terrain, never where the islands are.
+
+### API
+
+```rust
+pub enum IslandId { Center, North, South, East, West }   // Copy, Eq, Hash; IslandId::ALL
+IslandId::direction() -> (i32, i32)    // unit (dx, dz) from the arena center; (0, 0) for Center
+island_seed(global_seed: u64, IslandId) -> u64
+
+ArenaLayout::eggwars()                 // the project layout (separation 32)
+ArenaLayout::new(separation: u32) -> Result<ArenaLayout, ArenaError>
+ArenaLayout::config(IslandId) -> IslandConfig
+ArenaLayout::bounds() -> IslandBounds  // union of the five regions = the global grid
+generate_arena(&ArenaLayout, global_seed: u64) -> Result<Arena, ArenaError>
+
+pub struct Arena { pub grid: VoxelGrid, pub info: ArenaInfo }
+pub struct ArenaInfo {
+    pub global_seed: u64,
+    pub separation: u32,
+    pub islands: [ArenaIsland; 5],     // id, config, derived seed, IslandStats; index = IslandId
+    pub grid_origin: VoxelPosition,
+    pub grid_dimensions: (usize, usize, usize),
+    pub occupied_voxels: usize,
+}
+```
+
+Island identity is a five-variant enum used as a fixed array index, not a string or a registry.
+`direction()` and each island's `config.center` are the anchors later bridge and structure missions
+need: the bridge from an outer island runs along `-direction()` toward the center.
+
+### Seeds
+
+The arena takes one `u64` global seed. Each island's generator seed is
+`hash3(global_seed, island_tag, 0, 0, 0)`, Mission 28's stateless SplitMix64-based hash with a
+fixed eight-byte tag per island (`arn-cntr`, `arn-nrth`, `arn-soth`, `arn-east`, `arn-west`).
+Derivation does not depend on generation order or on array positions, and no RNG stream exists,
+so generating North before Center (or any other order) produces the identical grid, and every
+island equals a standalone generation of that island with its derived seed. Seeds `0` and
+`u64::MAX` are ordinary. Tests pin the five derived seeds and a fingerprint of the whole arena for
+global seed 1847. The four outer islands share footprint and thickness but have independent seeds,
+so they are related variations, never rotated copies.
+
+### Validation and the global grid
+
+`ArenaLayout::new` validates the complete layout before anything is allocated or written: every
+island config (`IslandConfig::bounds`: footprint, thickness, `i32` range), and every pair of island
+regions, which must leave at least `MIN_ISLAND_GAP = 1` empty cell between them. The check uses
+the regions, the boxes every possible block of each island lies in, so it never relies on the
+radial mask happening to keep islands apart. An invalid layout is an `ArenaError` (`Island`,
+`Overlap`, or `Grid` if the enclosing grid cannot be created), and grid creation precedes the first
+island write, so no partial arena ever exists. Separation 20 makes the footprints touch and is
+rejected; 21 is the closest valid layout.
+
+The global grid is exactly the union of the five regions: origin `(-40, -14, -40)`, 80 × 16 × 80 =
+102,400 cells, 100 KiB at one byte per voxel. No margin is added: future bridges run at the surface
+level between islands, inside this box. Structures that rise above `y = 1` will need the grid's top
+raised when they are built. Cells outside the five regions, including every gap corridor, stay
+`Voxel::Empty`; each island is exactly one face-connected landmass that never touches another.
+
+### Scene, CLI, and camera
+
+```bash
+cargo run --release -- --eggwars --seed 1847
+cargo run --release -- --eggwars            # default seed 42, shared with --procedural-island
+```
+
+The scene is the arena grid with block materials and no AABB objects or point lights, under the
+existing ambient and directional light and sunset environment. Startup prints the global seed,
+island count, total blocks and ores, grid size and origin, separation, and generation time, then
+one line per island with its footprint, center, derived seed, and block and ore counts. The window
+overlay shows `EggWars arena | seed <seed> | 5 islands`; derived seeds appear only in the startup
+log. The first render is written to `output/eggwars_seed_<seed>.ppm`.
+
+`--eggwars` combines only with `--seed`. Combining two of `--voxel-diagnostic`,
+`--procedural-island`, and `--eggwars`, or giving `--seed` to the voxel diagnostic, is rejected with
+the usage line and exit status 2, like every other malformed argument. `--seed` alone still selects
+the procedural island.
+
+The initial camera orbits the central island's center line, a third of its thickness below the
+grass, at yaw 0.7 (from the lit south-east), pitch 0.35, radius 68. It shows all five islands
+entirely inside the frame, the central island in the middle, the gaps between islands, the rocky
+undersides, and the sunset band above the void. Orbit and zoom behave as before; there is no
+camera collision yet, so zooming in far enough enters the central island (a known polish item).
+
+### Visual results
+
+Seeds 42, 1847, 2026, 0, 7, and `u64::MAX`, each from the initial view, orbits of 90° and 180°,
+below, above, and radii 20, 40, and 110: all five islands visible and separate, the central island
+clearly larger, the four outer islands distinct, round irregular silhouettes with no square
+platforms, grass/dirt rims, tapered cobblestone undersides, ore clusters on side faces, no
+overlapping terrain, no detached fragments, and a readable sunset/night sky. Across seeds 0–255 an
+arena holds 7,169–8,771 blocks (central island 2,394–3,558, outer islands 985–1,502) and 104–204
+ores, with mean counts per arena of 87.3 coal, 44.4 iron, 18.6 gold, and 6.0 diamond.
+
 ## Known Limitations
 
 These are deliberate scope boundaries of the current diagnostic renderer, not hidden defects:
@@ -1105,11 +1242,16 @@ These are deliberate scope boundaries of the current diagnostic renderer, not hi
   contact.
 - Materials, light colors, and the sun direction are diagnostic values. Final artistic tuning
   belongs to the EggWars scene.
-- The final EggWars scene does not exist yet: only one procedural diagnostic island, no arena of
-  five islands, no bridges, and no storytelling props. Three diagnostic scenes can be rendered.
+- The final EggWars scene does not exist yet: the five-island arena is terrain only, with no
+  bridges, structures, lava, or storytelling props, and no lighting or material tuning for it.
 - The island generator writes only the island's blocks and never clears other cells in its region;
-  overlapping islands are the caller's responsibility. Islands contain no glass or lava, and ores
-  appear only on side-exposed rock (none hidden inside, none on downward-only faces).
+  `ArenaLayout` validates that arena islands keep apart, while direct `generate_island` callers are
+  responsible for overlap. Islands contain no glass or lava, and ores appear only on side-exposed
+  rock (none hidden inside, none on downward-only faces).
+- The arena grid is tight around the islands: anything later built above `y = 1` needs the grid's
+  top raised. Most of the arena's single-threaded render cost is DDA stepping through empty cells
+  (see Performance); it is acceptable at the current resolution.
+- The orbital camera has no collision: zooming in far enough places it inside an island.
 - Changing generator constants changes what every seed produces; seeds are reproducible for a fixed
   code version only.
 
@@ -1130,8 +1272,9 @@ cargo run --release
 ```
 
 Add `-- --voxel-diagnostic` to render the small hybrid voxel diagnostic scene instead of the
-default five-block showcase, or `-- --procedural-island [--seed <u64>]` (or just `-- --seed <u64>`)
-to render one procedural floating island; see Procedural Floating Islands above.
+default five-block showcase, `-- --procedural-island [--seed <u64>]` (or just `-- --seed <u64>`)
+to render one procedural floating island, or `-- --eggwars [--seed <u64>]` to render the
+five-island arena; see Procedural Floating Islands and Five-Island EggWars Arena above.
 
 Rendering uses one CPU worker thread per available CPU; the application prints the count at
 startup. The development framebuffer is rendered at 320×180 and presented in a 960×540 window using an
@@ -1155,8 +1298,9 @@ The initial CPU render is exported to:
 output/phase1.ppm
 ```
 
-or, with `--voxel-diagnostic`, to `output/voxel_diagnostic.ppm`, or, in procedural-island mode, to
-`output/procedural_island_seed_<seed>.ppm`.
+or, with `--voxel-diagnostic`, to `output/voxel_diagnostic.ppm`, in procedural-island mode to
+`output/procedural_island_seed_<seed>.ppm`, and in EggWars mode to
+`output/eggwars_seed_<seed>.ppm`.
 
 The `output/` directory is ignored by Git so generated renders remain local debugging artifacts.
 
@@ -1364,9 +1508,51 @@ reported 0.02–0.07 ms of generation and 1.07–1.50 ms for the first render. G
 renderer needed no new acceleration. These are local development observations, not universal
 benchmarks.
 
+### EggWars arena (Mission 29)
+
+Apple M3 Pro, 11 CPUs, release build, 320×180, in one process: generation is the median of 100
+runs including the grid allocation; renders are medians of 9 (one worker) or 25 (four workers,
+automatic = 11) of the initial view. Every arena uses the same 80 × 16 × 80 grid.
+
+| Seed | Blocks | Ores | Generation | 1 worker | 4 workers | Automatic |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1847 | 8,168 | 155 | 0.107 ms | 8.99 ms | 2.59 ms | 1.35 ms |
+| 42 | 8,184 | 161 | 0.106 ms | 9.31 ms | 2.58 ms | 1.36 ms |
+| 2026 | 8,081 | 179 | 0.106 ms | 9.47 ms | 2.60 ms | 1.36 ms |
+| 0 | 7,756 | 160 | 0.103 ms | 9.51 ms | 2.62 ms | 1.35 ms |
+| 7 | 8,438 | 178 | 0.108 ms | 9.56 ms | 2.63 ms | 1.40 ms |
+| `u64::MAX` | 7,946 | 164 | 0.104 ms | 9.02 ms | 2.58 ms | 1.32 ms |
+
+Seed 1847 under orbit and zoom (one / four / automatic workers, ms): orbit +90° 8.86 / 2.54 / 1.33,
++180° 9.01 / 2.48 / 1.31, from below (pitch −0.35) 11.08 / 3.21 / 1.67, from above (pitch 1.2)
+7.20 / 2.07 / 1.13, radius 40 12.38 / 3.40 / 1.73, radius 20 15.44 / 4.39 / 2.27, radius 110
+4.60 / 1.26 / 0.77. The other seeds are within a few percent of these. Startups through
+`cargo run --release -- --eggwars --seed 1847` reported 0.39 ms of generation (a cold first run)
+and about 2 ms for the first render.
+
+**Empty-space traversal.** The dense grid is mostly air (8,168 of 102,400 cells are occupied for
+seed 1847), and the DDA steps through every empty cell a ray crosses. To isolate that cost, the same
+views were rendered with no grid, with an all-empty 80 × 16 × 80 grid, and with the arena (one /
+automatic workers, ms):
+
+| View | No grid | Empty grid | Arena |
+| --- | ---: | ---: | ---: |
+| Initial | 1.41 / 0.40 | 8.86 / 1.25 | 9.45 / 1.38 |
+| From above | 1.40 / 0.47 | 6.87 / 1.06 | 7.57 / 1.12 |
+| Radius 20 | 1.46 / 0.43 | 13.63 / 1.89 | 15.41 / 2.28 |
+| Radius 110 | 1.40 / 0.44 | 4.31 / 0.74 | 4.26 / 0.76 |
+
+Stepping through empty cells is most of the arena's cost: roughly 7.5 ms of the 9.5 ms
+single-threaded initial view (about 130 ns per primary ray on average), while terrain hits,
+shading, and shadow rays add 0.6–1.8 ms single-threaded across these views. It is not free, but at the automatic worker count the
+arena renders in about 0.8–2.3 ms in every measured view, so the dense grid remains adequate and no
+sparse grid, chunking, or empty-space skipping was added. If a later, larger grid (for example with
+headroom for structures) is measured to be too slow, empty-space skipping is the first candidate.
+These are local development observations, not universal benchmarks.
+
 ## Testing
 
-The current suite contains 529 tests covering vector arithmetic and normalization, ray invariants,
+The Phase 4 suite contained 529 tests covering vector arithmetic and normalization, ray invariants,
 AABB construction and edge cases, camera basis/ray generation/orbit limits, texture sampling and
 registration, P6 parsing and malformed input, material face selection, cube-face UV orientation,
 scene closest-hit behavior, ambient/Lambert/Blinn-Phong behavior, renderer lighting and texture
@@ -1419,6 +1605,24 @@ under orbit and zoom, an assorted-viewpoint render sweep, and tiling equivalence
 (valid, zero, and maximum seeds, missing, negative, invalid, and overflowing values, unknown and
 repeated options, and the existing modes).
 
+Mission 29 adds 36 tests, for 613 passing: the five island identities and their array indexing,
+24 × 24 and 16 × 16 footprints and thicknesses, cardinal positions at one surface level, the fixed
+separation and 12-block nominal gaps, pairwise disjoint regions, rejection of overlapping,
+touching, and unrepresentable layouts and of an unallocatable grid; pinned derived seeds and a
+pinned arena fingerprint, identical arenas for equal seeds, per-island variation across seeds with
+an unchanged layout, generation-order independence, each island equal to its standalone
+generation, distinct outer islands, and zero and maximum seeds; the global grid as the exact union
+of the regions (negative origin, 80 × 16 × 80), every block inside exactly one region, empty gap
+corridors, and each island one separate landmass; grass over dirt over rock with terrain block
+types only, ore rarity across arenas, and a larger central island with a flat middle; scene
+integration (one grid and no objects or lights, DDA hits on every island's grass, rays crossing the
+void between islands, every ore's material, terrain shadows and open sky in the gaps), the initial
+camera framing all five islands with none touching the frame edge, unchanged terrain under orbit
+and zoom, an assorted-viewpoint render sweep, tiling equivalence, and a check that the renderer,
+scene queries, voxel traversal, lighting, and environment contain no arena-specific code; and the
+`--eggwars` CLI (default, explicit, zero, and maximum seeds, missing and malformed seeds, repeats,
+and conflicting modes).
+
 The Phase 4 audit changed no runtime behavior and added no tests; the suite was unchanged at 529
 passing tests.
 
@@ -1443,11 +1647,10 @@ runs `cargo fmt --check`, `cargo test`, `cargo check`, `cargo build --release`, 
 ## Planned Features
 
 The following are not yet implemented. Phase 5 (EggWars world) is in progress; Mission 28 added
-the procedural floating-island generator:
+the procedural floating-island generator and Mission 29 the five-island arena:
 
 - transparent or colored shadows through glass, absorption, and nested or merged glass media;
 - procedural lava-region extraction into representative point lights;
-- the four outer islands and the larger central island in one shared grid;
 - bridges, structures, defenses, chests, arrows, and the EggWars battle-aftermath scene;
 - visual storytelling, the final presentation and video, and final performance and visual polish;
 - grouped acceleration for decorative AABB objects, only if the final scene's measured object count
@@ -1470,8 +1673,8 @@ intentionally in the final EggWars diorama, which does not exist yet.
 | Emissive lava | Implemented: visible self-radiance plus a local lava point light with hard shadows |
 | Normal mapping | Implemented: derived cobblestone normal map lighting with a per-face tangent basis |
 | Sunset/night skybox/environment | Procedural CPU environment implemented; shared miss path for every traced ray |
-| Procedural floating-island terrain (16×16, seeded) | Implemented (Mission 28): one seeded 16×16 radial-mask island with layered terrain and visible ores in the procedural-island diagnostic; the five-island arena is pending |
-| Voxel grid and 3D DDA | Implemented and audited; exercised only by the voxel diagnostic scene |
+| Procedural floating-island terrain (16×16, seeded) | Implemented (Missions 28–29): seeded radial-mask islands with layered terrain and visible ores; the EggWars arena has a 24×24 central island and four 16×16 outer islands from one global seed |
+| Voxel grid and 3D DDA | Implemented and audited; renders the voxel diagnostic, the procedural island, and the five-island arena in one global grid |
 | Tile-based CPU parallel rendering | Implemented and audited with scoped standard-library threads and dynamic tile claiming (about 5.8× on 11 CPUs for the default view, 6.0× for close glass); byte-identical to the sequential renderer |
 | Visually complex, visually attractive scene | Pending: the final EggWars scene does not exist |
 | Visual storytelling | Pending (Phase 5–6) |

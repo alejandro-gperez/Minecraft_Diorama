@@ -2,16 +2,18 @@
 
 use std::{error::Error, fmt};
 
-/// Seed of the procedural island when `--procedural-island` is given without `--seed`. Chosen
-/// because its initial view shows coal, iron, and diamond ore on the island's lit rock face.
-pub const DEFAULT_ISLAND_SEED: u64 = 42;
+/// Seed of the seeded modes (`--procedural-island`, `--eggwars`) when `--seed` is not given.
+/// Chosen because the procedural island's initial view shows coal, iron, and diamond ore on its
+/// lit rock face.
+pub const DEFAULT_SEED: u64 = 42;
 
 const VOXEL_DIAGNOSTIC_FLAG: &str = "--voxel-diagnostic";
 const PROCEDURAL_ISLAND_FLAG: &str = "--procedural-island";
+const EGGWARS_FLAG: &str = "--eggwars";
 const SEED_FLAG: &str = "--seed";
 
 pub const USAGE: &str = "usage: Minecraft_Diorama [--voxel-diagnostic | --procedural-island \
-                         [--seed <u64>] | --seed <u64>]";
+                         [--seed <u64>] | --eggwars [--seed <u64>] | --seed <u64>]";
 
 /// Which scene the application renders.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,6 +24,8 @@ pub enum SceneMode {
     VoxelDiagnostic,
     /// `--procedural-island`, `--seed <u64>`, or both: one generated floating island.
     ProceduralIsland { seed: u64 },
+    /// `--eggwars`, optionally with `--seed <u64>`: the five-island arena.
+    EggWars { seed: u64 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,7 +40,7 @@ pub enum CliError {
     SeedOutOfRange(String),
     /// The same option appears more than once.
     Repeated(String),
-    /// `--voxel-diagnostic` combined with the procedural island options.
+    /// More than one scene mode, or `--seed` with `--voxel-diagnostic`, which has no seed.
     ConflictingModes,
     UnknownArgument(String),
 }
@@ -60,8 +64,8 @@ impl fmt::Display for CliError {
             Self::Repeated(option) => write!(formatter, "{option} was given more than once"),
             Self::ConflictingModes => write!(
                 formatter,
-                "{VOXEL_DIAGNOSTIC_FLAG} cannot be combined with {PROCEDURAL_ISLAND_FLAG} or \
-                 {SEED_FLAG}"
+                "choose one of {VOXEL_DIAGNOSTIC_FLAG}, {PROCEDURAL_ISLAND_FLAG}, and \
+                 {EGGWARS_FLAG}; {SEED_FLAG} applies only to the last two"
             ),
             Self::UnknownArgument(argument) => write!(formatter, "unknown argument `{argument}`"),
         }
@@ -72,7 +76,8 @@ impl Error for CliError {}
 
 /// Parses the arguments after the program name.
 ///
-/// No arguments selects the showcase. `--seed` alone implies `--procedural-island`. Every
+/// No arguments selects the showcase. `--seed` alone implies `--procedural-island`; with
+/// `--eggwars` it seeds the arena. At most one mode flag may be given. Every
 /// malformed or unknown argument is an error: an explicitly supplied seed is never silently
 /// replaced by the default.
 pub fn parse_args<I>(arguments: I) -> Result<SceneMode, CliError>
@@ -81,6 +86,7 @@ where
 {
     let mut voxel_diagnostic = false;
     let mut procedural_island = false;
+    let mut eggwars = false;
     let mut seed = None;
     let mut arguments = arguments.into_iter();
 
@@ -88,6 +94,7 @@ where
         match argument.as_str() {
             VOXEL_DIAGNOSTIC_FLAG => set_once(&mut voxel_diagnostic, &argument)?,
             PROCEDURAL_ISLAND_FLAG => set_once(&mut procedural_island, &argument)?,
+            EGGWARS_FLAG => set_once(&mut eggwars, &argument)?,
             SEED_FLAG => {
                 if seed.is_some() {
                     return Err(CliError::Repeated(argument));
@@ -102,14 +109,27 @@ where
         }
     }
 
-    match (voxel_diagnostic, procedural_island || seed.is_some()) {
-        (true, true) => Err(CliError::ConflictingModes),
-        (true, false) => Ok(SceneMode::VoxelDiagnostic),
-        (false, true) => Ok(SceneMode::ProceduralIsland {
-            seed: seed.unwrap_or(DEFAULT_ISLAND_SEED),
-        }),
-        (false, false) => Ok(SceneMode::Showcase),
+    let mode_flags = [voxel_diagnostic, procedural_island, eggwars];
+    if mode_flags.into_iter().filter(|&flag| flag).count() > 1
+        || (voxel_diagnostic && seed.is_some())
+    {
+        return Err(CliError::ConflictingModes);
     }
+
+    let seed_or_default = seed.unwrap_or(DEFAULT_SEED);
+    Ok(if voxel_diagnostic {
+        SceneMode::VoxelDiagnostic
+    } else if eggwars {
+        SceneMode::EggWars {
+            seed: seed_or_default,
+        }
+    } else if procedural_island || seed.is_some() {
+        SceneMode::ProceduralIsland {
+            seed: seed_or_default,
+        }
+    } else {
+        SceneMode::Showcase
+    })
 }
 
 fn set_once(flag: &mut bool, argument: &str) -> Result<(), CliError> {
@@ -134,7 +154,7 @@ fn parse_seed(value: String) -> Result<u64, CliError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CliError, DEFAULT_ISLAND_SEED, SceneMode, parse_args};
+    use super::{CliError, DEFAULT_SEED, SceneMode, parse_args};
 
     fn parse(arguments: &[&str]) -> Result<SceneMode, CliError> {
         parse_args(arguments.iter().map(|argument| argument.to_string()))
@@ -155,7 +175,7 @@ mod tests {
 
     #[test]
     fn procedural_island_uses_the_documented_default_seed() {
-        assert_eq!(parse(&["--procedural-island"]), island(DEFAULT_ISLAND_SEED));
+        assert_eq!(parse(&["--procedural-island"]), island(DEFAULT_SEED));
     }
 
     #[test]
@@ -252,6 +272,70 @@ mod tests {
             parse(&["--voxel-diagnostic", "--seed", "3"]),
             Err(CliError::ConflictingModes)
         );
+    }
+
+    fn eggwars(seed: u64) -> Result<SceneMode, CliError> {
+        Ok(SceneMode::EggWars { seed })
+    }
+
+    #[test]
+    fn eggwars_uses_the_shared_default_seed() {
+        assert_eq!(parse(&["--eggwars"]), eggwars(DEFAULT_SEED));
+    }
+
+    #[test]
+    fn eggwars_seeds_are_parsed_exactly_in_either_order() {
+        assert_eq!(parse(&["--eggwars", "--seed", "1847"]), eggwars(1847));
+        assert_eq!(parse(&["--seed", "1847", "--eggwars"]), eggwars(1847));
+        assert_eq!(parse(&["--eggwars", "--seed", "0"]), eggwars(0));
+        assert_eq!(
+            parse(&["--eggwars", "--seed", "18446744073709551615"]),
+            eggwars(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn eggwars_rejects_missing_and_malformed_seeds() {
+        assert_eq!(
+            parse(&["--eggwars", "--seed"]),
+            Err(CliError::MissingSeedValue)
+        );
+        assert_eq!(
+            parse(&["--seed", "--eggwars"]),
+            Err(CliError::MissingSeedValue)
+        );
+        assert_eq!(
+            parse(&["--eggwars", "--seed", "-1"]),
+            Err(CliError::NegativeSeed("-1".into()))
+        );
+        assert_eq!(
+            parse(&["--eggwars", "--seed", "abc"]),
+            Err(CliError::InvalidSeed("abc".into()))
+        );
+        assert_eq!(
+            parse(&["--eggwars", "--seed", "18446744073709551616"]),
+            Err(CliError::SeedOutOfRange("18446744073709551616".into()))
+        );
+        assert_eq!(
+            parse(&["--eggwars", "--eggwars"]),
+            Err(CliError::Repeated("--eggwars".into()))
+        );
+    }
+
+    #[test]
+    fn eggwars_does_not_combine_with_other_modes() {
+        for arguments in [
+            &["--eggwars", "--procedural-island"][..],
+            &["--procedural-island", "--eggwars", "--seed", "5"],
+            &["--eggwars", "--voxel-diagnostic"],
+            &["--voxel-diagnostic", "--eggwars", "--seed", "5"],
+        ] {
+            assert_eq!(
+                parse(arguments),
+                Err(CliError::ConflictingModes),
+                "{arguments:?}"
+            );
+        }
     }
 
     #[test]

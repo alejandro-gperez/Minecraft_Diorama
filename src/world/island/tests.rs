@@ -41,7 +41,7 @@ fn island(config: &IslandConfig, seed: u64) -> VoxelGrid {
 }
 
 /// Every world position of a grid, in storage order (Y, then Z, then X).
-fn positions(grid: &VoxelGrid) -> Vec<VoxelPosition> {
+pub(crate) fn positions(grid: &VoxelGrid) -> Vec<VoxelPosition> {
     let origin = grid.origin();
     let mut positions = Vec::with_capacity(grid.volume());
     for y in 0..grid.height() as i32 {
@@ -55,7 +55,7 @@ fn positions(grid: &VoxelGrid) -> Vec<VoxelPosition> {
 }
 
 /// Occupied voxels in deterministic storage order.
-fn blocks(grid: &VoxelGrid) -> Vec<(VoxelPosition, BlockType)> {
+pub(crate) fn blocks(grid: &VoxelGrid) -> Vec<(VoxelPosition, BlockType)> {
     positions(grid)
         .into_iter()
         .filter_map(|p| grid.get_world(p).unwrap().block().map(|b| (p, b)))
@@ -71,7 +71,7 @@ fn relative_blocks(grid: &VoxelGrid, reference: VoxelPosition) -> Vec<(i32, i32,
 }
 
 /// Test-only FNV-1a fingerprint of a grid's placement and contents in storage order.
-fn fingerprint(grid: &VoxelGrid) -> u64 {
+pub(crate) fn fingerprint(grid: &VoxelGrid) -> u64 {
     let mut hash = 0xCBF2_9CE4_8422_2325_u64;
     let mut feed = |byte: u8| {
         hash ^= u64::from(byte);
@@ -101,7 +101,7 @@ fn is_ore(block: BlockType) -> bool {
 }
 
 /// The column of blocks at a world `(x, z)`, top to bottom, with the top position.
-fn column_blocks(grid: &VoxelGrid, x: i32, z: i32) -> Vec<(i32, BlockType)> {
+pub(crate) fn column_blocks(grid: &VoxelGrid, x: i32, z: i32) -> Vec<(i32, BlockType)> {
     let origin = grid.origin();
     (0..grid.height() as i32)
         .rev()

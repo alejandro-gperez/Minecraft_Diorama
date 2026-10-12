@@ -23,7 +23,7 @@ use super::noise::{
 use crate::voxel::{BlockType, Voxel, VoxelGrid, VoxelPosition};
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// Footprint side length of a standard outer island, the course's 16×16 terrain requirement.
 pub const DEFAULT_FOOTPRINT: u32 = 16;

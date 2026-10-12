@@ -20,8 +20,30 @@ player entity or gameplay system.
 - Phase 2 — Materials, Textures, and Lighting: complete.
 - Phase 3 — Raytracing Effects: complete (missions 14–20).
 - Phase 4 — Performance Architecture: complete and audited (missions 21–27B).
-- Phase 5 — Procedural EggWars Diorama: in progress (`AGENTS.md` names it current). Mission 28
-  complete; Mission 29 is next and needs its own prompt.
+- Phase 5 — Procedural EggWars Diorama: in progress (`AGENTS.md` names it current). Missions 28
+  and 29 complete; Mission 30 (bridges and structures) is next and needs its own prompt.
+- Mission 29 five-island arena: complete. `src/world/arena.rs`: `IslandId` enum
+  (Center/North/South/East/West, `ALL`, index = discriminant, `direction()` = unit `(dx, dz)`
+  outward, north `-Z`, east `+X`); `island_seed(global, id) = hash3(global, tag, 0, 0, 0)` with
+  fixed tags `arn-cntr/nrth/soth/east/west` (order-independent, no RNG); `ArenaLayout::new(sep)`
+  validates every config and every region pair (gap >= `MIN_ISLAND_GAP` = 1, region boxes, not the
+  mask) before allocating; `ArenaLayout::eggwars()` = separation 32. Center 24×24 thickness 15 at
+  the origin, outer 16×16 thickness 12 at ±32 on X/Z, all at surface `y = 0`; nominal gap 12
+  (visible 12–17). `generate_arena(&layout, seed) -> Result<Arena { grid, info: ArenaInfo }>`
+  allocates one grid exactly the regions' union — origin (-40, -14, -40), 80×16×80, 100 KiB, no
+  margin (structures above `y = 1` will need the top raised) — then calls `generate_island` once
+  per island. Pinned derived seeds and arena fingerprint for seed 1847.
+- EggWars mode: `--eggwars [--seed <u64>]` (default 42, `cli::DEFAULT_SEED`, renamed from
+  `DEFAULT_ISLAND_SEED`); two mode flags, or `--seed` with `--voxel-diagnostic`, exit 2; `--seed`
+  alone is still the procedural island. Scene = arena grid, no objects/lights. Camera targets the
+  central island (yaw 0.7, pitch 0.35, radius 68; all five islands fully in frame). Startup log has
+  one arena line plus one line per island (derived seed); overlay shows only the global seed; PPM
+  `output/eggwars_seed_<seed>.ppm`. Existing mode PPMs byte-identical to Mission 28.
+- Mission 29 measurements (M3 Pro, 320×180, release): generation ~0.10 ms warm, 7,169–8,771 blocks
+  over seeds 0–255; initial view ~9.0–9.6 ms at 1 worker, ~2.6 ms at 4, ~1.35 ms automatic; all
+  measured views 0.8–2.3 ms automatic. An empty 80×16×80 grid alone costs 8.9 ms of the 9.5 ms
+  single-threaded initial view (no grid: 1.4 ms): empty-cell DDA stepping dominates but is
+  acceptable; empty-space skipping is the first candidate only if a larger grid measures too slow.
 - Mission 28 procedural floating island: complete. `src/world/noise.rs`: stateless SplitMix64-style
   `hash3(seed, Domain, x, y, z)`, smooth 2D value noise, periodic 1D noise, and a "diamond angle"
   (no `atan2`/`sin`/`pow`: only exactly rounded float ops, so seeds are bit-reproducible across
@@ -141,12 +163,12 @@ player entity or gameplay system.
 - Important known limitations: opaque glass/lava shadows; no medium tracking (touching glass is
   glass → air → glass; glass on a block exposes that block's interior face); `1e-4` biases assume
   unit scale; edge/corner contact follows the DDA's half-open conventions; AABB objects are scanned
-  linearly (group them only if the real scene's measured object count warrants it); the final
-  EggWars scene does not exist (one diagnostic island only). The window title in
-  `src/app/app.rs` still says "Phase 3".
+  linearly (group them only if the real scene's measured object count warrants it); the arena is
+  terrain only (no bridges, structures, lava, or props); no camera collision (zoom can enter an
+  island). The window title in `src/app/app.rs` still says "Phase 3".
 - Rubric: all raytracing effects, DDA, and parallel rendering exist in code and diagnostic scenes
   only; they count only when visibly and intentionally used in the final diorama (Phase 5–6).
-- Current suite: 577 passing tests. The showcase PPM is byte-identical to the Mission 21 render.
+- Current suite: 613 passing tests. The showcase PPM is byte-identical to the Mission 21 render.
 - Development resolution: 320×180, presented at 960×540.
 - Pre-Phase-4 baseline (local, single-threaded, brute-force AABB traversal): default view about
   4.9 ms, close cobblestone about 10.7 ms, close lava about 18 ms, close glass about 30 ms. These
@@ -156,16 +178,17 @@ player entity or gameplay system.
   showcase through the release app binary: test-binary layout shifted it by ~10% with no code cause.
 - Compiler state: no rustc warnings; clippy reports only the known `clippy::module_inception`
   warnings (plus two pre-existing `assertions_on_constants` warnings in test code).
-- Next work: Mission 29, from the user's exact prompt. Not authorized by this checkpoint.
+- Next work: Mission 30 (bridges and structures), from the user's exact prompt. Not authorized by
+  this checkpoint.
 
 The repository is expected to begin each mission from a clean checkpoint. Verify the actual
 repository state instead of assuming this section is current.
 
 ## Mission boundary
 
-Phase 4 is complete and audited; Phase 5 is in progress with Mission 28 complete. Do not start
-further Phase 4 optimization (SIMD, persistent pools, BVH, reciprocal DDA), Mission 29, the
-five-island arena, bridges, or structures from this handoff. The user and planning assistant
+Phase 4 is complete and audited; Phase 5 is in progress with Missions 28 and 29 complete. Do not
+start further Phase 4 optimization (SIMD, persistent pools, BVH, reciprocal DDA), Mission 30,
+bridges, structures, lava, or decorations from this handoff. The user and planning assistant
 will provide the exact prompt and API for each future mission. Do not implement future missions
 early. Stop at mission boundaries.
 
