@@ -21,7 +21,30 @@ player entity or gameplay system.
 - Phase 3 — Raytracing Effects: complete (missions 14–20).
 - Phase 4 — Performance Architecture: complete and audited (missions 21–27B).
 - Phase 5 — Procedural EggWars Diorama: in progress (`AGENTS.md` names it current). Missions 28,
-  29, 30, and 30.5 complete; Mission 31 (battle aftermath details) is next and needs its own prompt.
+  29, 30, 30.5, and 31 complete; Mission 32 (artistic composition and lighting) is next and needs
+  its own prompt.
+- Mission 31 battle-aftermath decorations: `src/world/decorations.rs` (+ `models.rs`,
+  `validation.rs`, `tests.rs`). `place_decorations(&EggWarsArena) -> Result<Decorations,
+  DecorationError>` reads `ConstructionInfo` and the grid (never writes it), builds 25 props as 59
+  AABB parts, validates (inside grid; no block overlap except an arrowhead in exactly its target and
+  sticking out; resting props' bottoms on their support; no cross-prop overlap), then returns.
+  Props: eggs (5 stepped courses, 12×14 px, 2 px clear of ring and cap) in North (sealed, invisible)
+  and West (`egg_survives`: Intact/Damaged); 3 shell fragments each in East/South; 2 open chests (7
+  boxes: 4 walls, dark interior, upright lid, latch) in `open_area` against the north wall (x 1) and
+  west wall (z −1); 7 arrows (head/shaft/fletching, `ArrowHeading` ±X/±Z/Down, all five used): West,
+  East, South defense fronts, East bridge break, center north wall (between panes), west wall, lawn;
+  8 remnants (7 px obsidian / 8 px cobblestone cubes) at West/East/South bases, East/South bridge
+  breaks, center. Placement uses a quarter-turn `Frame` matching the construction frame; seed only
+  via terrain/break edges and `dec-shrd`/`dec-rmnt`/`dec-arrw` 0–2 px offsets. Materials:
+  `material/decorative.rs`, 7 solid-color materials over one shared 1×1 white texture,
+  `Scene::add_decorative_materials` (EggWars only); `DecorationMaterials` maps parts (fragments
+  reuse canonical cobblestone/obsidian). App scene: `eggwars_diorama_scene(grid, &decorations)`
+  (17 materials, 13 textures, 59 objects); `eggwars_scene` stays the undecorated stage used by voxel
+  tests. `Scene::objects()` accessor added. Other modes' PPMs byte-identical to Mission 30.5;
+  fingerprints unchanged. Measured cost (M3 Pro, 640×360, seed 1847, 1 / 4 / auto workers): initial
+  47.4 / 12.9 / 6.4 → 142.4 / 37.4 / 20.4 ms; ruin close-up 11.7 → 47.6 ms and West egg close-up
+  12.0 → 49.3 ms auto, so about 3× from the linear object scan. The user chose to keep the 59 AABBs
+  without acceleration; object grouping is the first candidate if a later mission approves it.
 - Mission 30.5 (two commits): (A) nine-block egg defenses, (B) 640×360 internal resolution.
   (A) `DEFENSE_TEMPLATE: [(side, forward, up); 9]` (`DEFENSE_SLOTS = 9`): the eight cells around
   the egg at `EGG_Y` (front row, flanks, back row) plus one cap at `(0, 0, 1)` (slot index 8);
@@ -210,12 +233,14 @@ player entity or gameplay system.
 - Important known limitations: opaque glass/lava shadows; no medium tracking (touching glass is
   glass → air → glass; glass on a block exposes that block's interior face); `1e-4` biases assume
   unit scale; edge/corner contact follows the DDA's half-open conventions; AABB objects are scanned
-  linearly (group them only if the real scene's measured object count warrants it); the arena has
-  terrain, bridges, bases, defenses, and the central ruin but no eggs, chests, arrows, lava, or
-  props; no camera collision (zoom can enter an island).
+  linearly, and the 59 Mission 31 prop AABBs make EggWars renders about 3× slower (grouping needs
+  approval); the arena has terrain, bridges, bases, defenses, the central ruin, and props, but no
+  lava; props are axis-aligned (no tilted lids or angled arrows) and the North egg is fully hidden;
+  no camera collision (zoom can enter an island).
 - Rubric: all raytracing effects, DDA, and parallel rendering exist in code and diagnostic scenes
   only; they count only when visibly and intentionally used in the final diorama (Phase 5–6).
-- Current suite: 665 passing tests (Mission 30.5 added 14 net; Mission 30 added 38). PPMs are no longer byte-identical to the Mission 21 render because the resolution changed; at a fixed resolution output is deterministic.
+- Current suite: 705 passing tests (Mission 31 added 40; Mission 30.5 added 14 net; Mission 30
+  added 38). PPMs are no longer byte-identical to the Mission 21 render because the resolution changed; at a fixed resolution output is deterministic.
 - Development resolution: 640×360, presented at 1280×720 (exact 2×, nearest-neighbor); it was 320×180 / 960×540 through Mission 30.
 - Pre-Phase-4 baseline (local, single-threaded, brute-force AABB traversal): default view about
   4.9 ms, close cobblestone about 10.7 ms, close lava about 18 ms, close glass about 30 ms. These
@@ -225,18 +250,17 @@ player entity or gameplay system.
   showcase through the release app binary: test-binary layout shifted it by ~10% with no code cause.
 - Compiler state: no rustc warnings; clippy reports only the known `clippy::module_inception`
   warnings (plus two pre-existing `assertions_on_constants` warnings in test code).
-- Next work: Mission 31 (battle aftermath details: eggs per `EggBase::egg` — the cell under each
-  defense cap — chests in `CentralStructure::open_area`, arrows, props), from the user's exact
-  prompt. Not authorized by this checkpoint.
+- Next work: Mission 32 (artistic composition and lighting), from the user's exact prompt. Not
+  authorized by this checkpoint.
 
 The repository is expected to begin each mission from a clean checkpoint. Verify the actual
 repository state instead of assuming this section is current.
 
 ## Mission boundary
 
-Phase 4 is complete and audited; Phase 5 is in progress with Missions 28, 29, 30, and 30.5 complete. Do
-not start further Phase 4 optimization (SIMD, persistent pools, BVH, reciprocal DDA), Mission 31,
-eggs, chests, arrows, lava, or decorations from this handoff. The user and planning assistant
+Phase 4 is complete and audited; Phase 5 is in progress with Missions 28, 29, 30, 30.5, and 31
+complete. Do not start further Phase 4 optimization (SIMD, persistent pools, BVH, reciprocal DDA),
+object acceleration, Mission 32, lava, lighting, or composition changes from this handoff. The user and planning assistant
 will provide the exact prompt and API for each future mission. Do not implement future missions
 early. Stop at mission boundaries.
 

@@ -11,14 +11,16 @@ use cli::{SceneMode, USAGE};
 use environment::Environment;
 use geometry::Aabb;
 use lighting::{AmbientLight, DirectionalLight, Lighting, PointLight};
-use material::{AuxiliaryTextureIds, CanonicalTextureIds, PpmLoadError, TextureId, load_ppm};
+use material::{
+    AuxiliaryTextureIds, CanonicalTextureIds, PpmLoadError, Texture, TextureId, load_ppm,
+};
 use math::Vec3;
 use render::{Color, Framebuffer};
 use scene::{Scene, SceneObject};
 use voxel::{BlockMaterials, BlockType, Voxel, VoxelGrid, VoxelPosition};
 use world::{
-    ArenaLayout, EggWarsArena, IslandConfig, IslandId, IslandStats, build_eggwars_arena,
-    generate_island,
+    ArenaLayout, DecorationKind, DecorationMaterials, Decorations, EggWarsArena, IslandConfig,
+    IslandId, IslandStats, build_eggwars_arena, generate_island, place_decorations,
 };
 
 pub mod app;
@@ -126,9 +128,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             let arena = eggwars_world(seed);
             let generation_ms = started.elapsed().as_secs_f64() * 1_000.0;
             log_arena(&arena, generation_ms);
+            let started = Instant::now();
+            let decorations = eggwars_decorations(&arena);
+            let placement_ms = started.elapsed().as_secs_f64() * 1_000.0;
+            let started = Instant::now();
+            let scene = eggwars_diorama_scene(arena.grid, &decorations)?;
+            let scene_ms = started.elapsed().as_secs_f64() * 1_000.0;
+            log_decorations(&decorations, placement_ms, scene_ms);
             (
                 eggwars_camera(aspect_ratio),
-                eggwars_scene(arena.grid)?,
+                scene,
                 PathBuf::from(format!("output/eggwars_seed_{seed}.ppm")),
                 Some(format!(
                     "EggWars arena | seed {seed} | {} islands",
@@ -442,10 +451,58 @@ fn log_arena(arena: &EggWarsArena, generation_ms: f64) {
     }
 }
 
-/// The EggWars arena: the generated grid and no AABB objects or lights beyond the shared ambient
-/// and directional light. Terrain is generated before this, exactly once.
+/// Places the battle-aftermath props on the constructed arena, once, before the scene exists.
+fn eggwars_decorations(arena: &EggWarsArena) -> Decorations {
+    place_decorations(arena).expect("the EggWars decorations must fit the constructed arena")
+}
+
+/// One startup line for the props, never one per prop.
+fn log_decorations(decorations: &Decorations, placement_ms: f64, scene_ms: f64) {
+    println!(
+        "  Decorations: {} props ({} eggs, {} shell fragments, {} chests, {} arrows, {} remnants) \
+         as {} AABB objects, placed in {placement_ms:.3} ms, scene built in {scene_ms:.3} ms",
+        decorations.decorations().len(),
+        decorations.count(DecorationKind::Egg),
+        decorations.count(DecorationKind::ShellFragment),
+        decorations.count(DecorationKind::Chest),
+        decorations.count(DecorationKind::Arrow),
+        decorations.count(DecorationKind::Remnant),
+        decorations.parts().len(),
+    );
+}
+
+/// The EggWars arena stage: the generated grid and no AABB objects or lights beyond the shared
+/// ambient and directional light. Terrain is generated before this, exactly once.
 fn eggwars_scene(grid: VoxelGrid) -> Result<Scene, PpmLoadError> {
     procedural_island_scene(grid)
+}
+
+/// The EggWars diorama the app renders: the arena stage plus one AABB `SceneObject` per prop part.
+///
+/// The decorative materials are registered here, once, over one shared solid white texture; prop
+/// fragments of cobblestone and obsidian reuse the canonical materials. Props add no lights.
+fn eggwars_diorama_scene(
+    grid: VoxelGrid,
+    decorations: &Decorations,
+) -> Result<Scene, PpmLoadError> {
+    let mut scene = eggwars_scene(grid)?;
+    let blocks = scene
+        .block_materials()
+        .expect("the arena scene registers block materials");
+    let white = scene
+        .add_texture(Texture::solid(Color::WHITE))
+        .expect("texture count must fit TextureId");
+    let decorative = scene
+        .add_decorative_materials(white)
+        .expect("decorative materials must be valid and fit MaterialId");
+    let materials = DecorationMaterials::new(blocks, decorative);
+    for part in decorations.parts() {
+        scene.add(SceneObject::new(
+            part.bounds,
+            materials.material(part.material),
+        ));
+    }
+    Ok(scene)
 }
 
 /// Orbits the central island's center line at a third of its thickness below the grass, so the
@@ -490,22 +547,27 @@ mod tests {
     use std::{f32::consts::FRAC_PI_4, process};
 
     use super::{
-        HEIGHT, ISLAND_CONFIG, WIDTH, eggwars_arena, eggwars_camera, eggwars_scene, eggwars_world,
-        phase2_lighting, phase2_test_scene, procedural_island_camera, procedural_island_grid,
-        procedural_island_scene, voxel_diagnostic_scene,
+        HEIGHT, ISLAND_CONFIG, WIDTH, eggwars_arena, eggwars_camera, eggwars_decorations,
+        eggwars_diorama_scene, eggwars_scene, eggwars_world, phase2_lighting, phase2_test_scene,
+        procedural_island_camera, procedural_island_grid, procedural_island_scene,
+        voxel_diagnostic_scene,
     };
     use crate::{
         app::app::{WINDOW_SCALE, window_size},
         camera::OrbitalCamera,
         environment::Environment,
-        material::TextureSelection,
+        material::{DecorativeMaterials, MaterialId, TextureSelection},
         math::Vec3,
         output::write_ppm,
         ray::Ray,
         render::{Framebuffer, Renderer, renderer::tile_tests::assert_tiling_matches_reference},
         scene::{HitSource, Scene},
         voxel::{BlockType, Voxel, VoxelGrid, VoxelPosition},
-        world::{ArenaLayout, BridgeState, IslandId, construction::OUTER_ISLANDS},
+        world::{
+            ArenaLayout, ArrowHeading, BridgeState, DecorationKind, DecorationMaterial,
+            DecorationMaterials, Decorations, EggWarsArena, IslandId, Mount,
+            construction::OUTER_ISLANDS,
+        },
     };
 
     #[test]
@@ -1469,6 +1531,346 @@ mod tests {
         }
     }
 
+    // ---- Mission 31 battle-aftermath decorations ----
+
+    fn diorama(seed: u64) -> (EggWarsArena, Decorations, Scene) {
+        let world = eggwars_world(seed);
+        let decorations = eggwars_decorations(&world);
+        let scene = eggwars_diorama_scene(world.grid.clone(), &decorations).unwrap();
+        (world, decorations, scene)
+    }
+
+    fn diorama_scene() -> Scene {
+        diorama(ARENA_SEED).2
+    }
+
+    fn decoration_materials(scene: &Scene) -> DecorationMaterials {
+        // The decorative materials are the last seven registered, after the ten block materials.
+        let id = |index: u32| MaterialId::new(index);
+        DecorationMaterials::new(
+            scene.block_materials().unwrap(),
+            DecorativeMaterials {
+                egg_shell: id(10),
+                chest_wood: id(11),
+                chest_interior: id(12),
+                chest_latch: id(13),
+                arrow_shaft: id(14),
+                arrow_head: id(15),
+                arrow_fletching: id(16),
+            },
+        )
+    }
+
+    #[test]
+    fn diorama_adds_one_aabb_object_per_decoration_part_over_the_same_grid() {
+        let (world, decorations, scene) = diorama(ARENA_SEED);
+
+        assert_eq!(scene.voxel_grid(), Some(&world.grid));
+        assert_eq!(scene.len(), decorations.parts().len());
+        assert_eq!(scene.len(), 59);
+        assert!(scene.point_lights().is_empty(), "props add no lights");
+        // Ten block materials plus seven decorative ones; one shared white texture.
+        assert_eq!(scene.material_count(), 17);
+        assert_eq!(scene.texture_count(), 13);
+        let materials = decoration_materials(&scene);
+        for (object, part) in scene.objects().iter().zip(decorations.parts()) {
+            assert_eq!(object.bounds, part.bounds);
+            assert_eq!(object.material_id, materials.material(part.material));
+            assert!(scene.material(object.material_id).is_some());
+        }
+        // Materials are shared: 59 objects use only nine distinct materials.
+        let mut used: Vec<_> = scene.objects().iter().map(|o| o.material_id).collect();
+        used.sort_by_key(|id| id.index());
+        used.dedup();
+        assert_eq!(used.len(), 9);
+        // Fragments reuse the canonical cobblestone and obsidian, unchanged.
+        let blocks = scene.block_materials().unwrap();
+        assert!(used.contains(&blocks.cobblestone) && used.contains(&blocks.obsidian));
+        let obsidian = scene.material(blocks.obsidian).unwrap();
+        assert_eq!(obsidian.reflectivity(), 0.35);
+        let glass = scene.material(blocks.glass).unwrap();
+        assert_eq!(glass.ior(), 1.5);
+    }
+
+    #[test]
+    fn the_construction_stage_scene_is_unchanged_by_decorations() {
+        let world = eggwars_world(ARENA_SEED);
+        let stage = eggwars_scene(world.grid.clone()).unwrap();
+        assert_eq!(stage.len(), 0);
+        assert_eq!(stage.material_count(), 10);
+        assert_eq!(stage.texture_count(), 12);
+    }
+
+    #[test]
+    fn closest_hit_finds_the_west_egg_through_its_damaged_defense() {
+        let (world, _, scene) = diorama(ARENA_SEED);
+        let materials = decoration_materials(&scene);
+        let base = world.construction.base(IslandId::West).unwrap();
+        let (fx, fz) = base.attack_direction;
+        let forward = Vec3::new(fx as f32, 0.0, fz as f32);
+        // From three cells in front, at the egg's belly height, straight back through the notch.
+        let belly = base.egg.min_corner() + Vec3::new(0.5, 0.25, 0.5);
+        let ray = Ray::try_new(belly + forward * 3.0, -forward).unwrap();
+
+        let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+        assert_eq!(hit.source, HitSource::Object);
+        assert_eq!(
+            hit.material_id,
+            materials.material(DecorationMaterial::EggShell)
+        );
+        // The belly course is 12 px wide, so its front face is 2 px inside the cell.
+        assert_eq!(hit.geometry.t, 3.0 - 6.0 / 16.0);
+        assert_eq!(hit.geometry.normal, forward);
+        // The same ray in the undecorated arena reaches the back of the defense.
+        let stage = eggwars_scene(world.grid.clone()).unwrap();
+        let behind = stage.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+        assert_eq!(
+            behind.source,
+            HitSource::Voxel {
+                position: base.defense[6].position,
+                block: BlockType::Obsidian,
+            }
+        );
+    }
+
+    #[test]
+    fn closest_hit_resolves_every_decoration_material_from_above() {
+        let (_, decorations, scene) = diorama(ARENA_SEED);
+        let materials = decoration_materials(&scene);
+        let mut seen = Vec::new();
+        for decoration in decorations.decorations() {
+            // Straight down onto the top of each prop's highest part.
+            let parts = decorations.parts_of(decoration);
+            let top = parts
+                .iter()
+                .max_by(|a, b| a.bounds.max().y.total_cmp(&b.bounds.max().y))
+                .unwrap();
+            let middle = (top.bounds.min() + top.bounds.max()) * 0.5;
+            let ray = Ray::try_new(
+                Vec3::new(middle.x, top.bounds.max().y + 0.5, middle.z),
+                Vec3::new(0.0, -1.0, 0.0),
+            )
+            .unwrap();
+            let hit = scene.closest_hit(ray, 0.0, f32::INFINITY).unwrap();
+            if decoration.kind == DecorationKind::Egg && hit.source != HitSource::Object {
+                // North's egg is sealed under its cap: the ray stops on the obsidian.
+                continue;
+            }
+            assert_eq!(hit.source, HitSource::Object, "{decoration:?}");
+            assert_eq!(hit.material_id, materials.material(top.material));
+            assert_eq!(hit.geometry.normal, Vec3::new(0.0, 1.0, 0.0));
+            seen.push(top.material);
+        }
+        for material in [
+            DecorationMaterial::EggShell,
+            DecorationMaterial::ChestWood,
+            DecorationMaterial::ArrowFletching,
+            DecorationMaterial::Cobblestone,
+            DecorationMaterial::Obsidian,
+        ] {
+            assert!(seen.contains(&material), "{material:?}");
+        }
+    }
+
+    #[test]
+    fn decorations_cast_shadows_through_is_occluded() {
+        let (world, decorations, scene) = diorama(ARENA_SEED);
+        let stage = eggwars_scene(world.grid.clone()).unwrap();
+        // A short horizontal segment through each arrow's shaft, all in open air: only the arrow
+        // can block it.
+        for arrow in decorations.of_kind(DecorationKind::Arrow) {
+            let shaft = decorations.parts_of(arrow)[1].bounds;
+            let middle = (shaft.min() + shaft.max()) * 0.5;
+            let Mount::Embedded { heading, .. } = arrow.mount else {
+                unreachable!()
+            };
+            let across = if heading == ArrowHeading::Down {
+                Vec3::new(1.0, 0.0, 0.0)
+            } else {
+                Vec3::new(0.0, 1.0, 0.0)
+            };
+            let ray = Ray::try_new(middle - across * 0.05, across).unwrap();
+            assert!(scene.is_occluded(ray, 0.0, 0.1), "{arrow:?}");
+            assert!(!stage.is_occluded(ray, 0.0, 0.1));
+        }
+        // Sunlight on the open chest's dark interior floor is blocked by nothing but the chest's
+        // own walls and lid; under the lid it is in shadow.
+        let chest = decorations.of_kind(DecorationKind::Chest).next().unwrap();
+        let lid = decorations.parts_of(chest)[5].bounds;
+        let under_lid = Vec3::new(
+            (lid.min().x + lid.max().x) * 0.5,
+            lid.min().y - 0.01,
+            (lid.min().z + lid.max().z) * 0.5,
+        );
+        let up = Ray::try_new(under_lid, Vec3::new(0.0, 1.0, 0.0)).unwrap();
+        assert!(scene.is_occluded(up, 0.0, f32::INFINITY));
+        assert!(!stage.is_occluded(up, 0.0, f32::INFINITY));
+    }
+
+    #[test]
+    fn reflected_rays_off_obsidian_reach_the_west_egg() {
+        let (world, _, scene) = diorama(ARENA_SEED);
+        let stage = eggwars_scene(world.grid.clone()).unwrap();
+        let materials = decoration_materials(&scene);
+        let shell = materials.material(DecorationMaterial::EggShell);
+        let base = world.construction.base(IslandId::West).unwrap();
+        let target = base.egg.min_corner() + Vec3::new(0.5, 0.4, 0.5);
+        let camera =
+            OrbitalCamera::try_new(target, 1.57, 0.08, 2.4, 50.0_f32.to_radians(), 16.0 / 9.0)
+                .unwrap();
+        let (width, height) = (96, 54);
+        let lighting = phase2_lighting();
+        let environment = Environment::sunset();
+        let render = |scene: &Scene| {
+            let mut framebuffer = Framebuffer::try_new(width, height).unwrap();
+            Renderer::render(&camera, scene, &lighting, &environment, &mut framebuffer).unwrap();
+            framebuffer
+        };
+        let (decorated, plain) = (render(&scene), render(&stage));
+
+        // Pixels whose primary ray hits obsidian in both scenes and whose mirror ray then hits
+        // the egg: the recursive reflection, traced by the unchanged renderer, shows the egg.
+        let mut reflections = 0;
+        for y in 0..height {
+            for x in 0..width {
+                let u = (x as f32 + 0.5) / width as f32;
+                let v = (y as f32 + 0.5) / height as f32;
+                let ray = camera.ray_for_viewport(u, v).unwrap();
+                let Some(hit) = scene.closest_hit(ray, 0.0, f32::INFINITY) else {
+                    continue;
+                };
+                let HitSource::Voxel {
+                    block: BlockType::Obsidian,
+                    ..
+                } = hit.source
+                else {
+                    continue;
+                };
+                assert_eq!(stage.closest_hit(ray, 0.0, f32::INFINITY), Some(hit));
+                let mirror = ray.direction().reflect(hit.geometry.normal);
+                let bounce =
+                    Ray::try_new(hit.geometry.position + hit.geometry.normal * 1e-4, mirror)
+                        .unwrap();
+                if scene
+                    .closest_hit(bounce, 0.0, f32::INFINITY)
+                    .is_some_and(|hit| hit.material_id == shell)
+                    && decorated.pixel(x, y) != plain.pixel(x, y)
+                {
+                    reflections += 1;
+                }
+            }
+        }
+        assert!(reflections > 10, "{reflections}");
+    }
+
+    #[test]
+    fn diorama_renders_from_assorted_viewpoints_around_the_props() {
+        let (world, decorations, scene) = diorama(ARENA_SEED);
+        let lighting = phase2_lighting();
+        let environment = Environment::sunset();
+        let mut framebuffer = Framebuffer::try_new(32, 18).unwrap();
+        let mut targets = vec![eggwars_camera(1.0).target()];
+        targets.extend(decorations.decorations().iter().map(|decoration| {
+            let parts = decorations.parts_of(decoration);
+            (parts[0].bounds.min() + parts[0].bounds.max()) * 0.5
+        }));
+        for target in targets {
+            for yaw_step in 0..4 {
+                for (pitch, radius) in [(-0.5, 3.0), (0.4, 0.5), (0.9, 12.0)] {
+                    let camera = OrbitalCamera::try_new(
+                        target,
+                        yaw_step as f32 * 2.0 * FRAC_PI_4 + 0.3,
+                        pitch,
+                        radius,
+                        50.0_f32.to_radians(),
+                        32.0 / 18.0,
+                    )
+                    .unwrap();
+                    Renderer::render(&camera, &scene, &lighting, &environment, &mut framebuffer)
+                        .unwrap();
+                    assert!(framebuffer.pixels().iter().all(|color| color.is_finite()));
+                }
+            }
+        }
+        assert_eq!(scene.voxel_grid(), Some(&world.grid));
+    }
+
+    #[test]
+    fn diorama_tiling_matches_the_sequential_reference() {
+        let scene = diorama_scene();
+        let lighting = phase2_lighting();
+        for (width, height) in [(96, 54), (70, 41)] {
+            let camera = eggwars_camera(width as f32 / height as f32);
+            assert_tiling_matches_reference(&scene, &lighting, &camera, width, height);
+        }
+    }
+
+    #[test]
+    fn decorations_change_the_initial_view_only_slightly() {
+        let (world, _, scene) = diorama(ARENA_SEED);
+        let stage = eggwars_scene(world.grid.clone()).unwrap();
+        let camera = eggwars_camera(WIDTH as f32 / HEIGHT as f32);
+        let lighting = phase2_lighting();
+        let environment = Environment::sunset();
+        let render = |scene: &Scene| {
+            let mut framebuffer = Framebuffer::try_new(WIDTH, HEIGHT).unwrap();
+            Renderer::render(&camera, scene, &lighting, &environment, &mut framebuffer).unwrap();
+            framebuffer
+        };
+        let (decorated, plain) = (render(&scene), render(&stage));
+        let changed = decorated
+            .pixels()
+            .iter()
+            .zip(plain.pixels())
+            .filter(|(a, b)| a != b)
+            .count();
+        // Visible from the default camera, but small details rather than a new landmark.
+        assert!(changed > 0 && changed < WIDTH * HEIGHT / 100, "{changed}");
+    }
+
+    #[test]
+    fn rendering_has_no_decoration_specific_paths() {
+        let render_sources = [
+            include_str!("render/renderer.rs"),
+            include_str!("render/parallel.rs"),
+            include_str!("render/tile.rs"),
+            include_str!("voxel/traversal.rs"),
+            include_str!("voxel/grid.rs"),
+            include_str!("lighting/lighting.rs"),
+            include_str!("environment/environment.rs"),
+        ];
+        let words = ["decorat", "egg", "chest", "arrow", "shell", "remnant"];
+        for source in render_sources {
+            let source = source.to_lowercase();
+            for word in words {
+                assert!(!source.contains(word), "renderer source mentions {word}");
+            }
+        }
+        // The scene's queries treat props as ordinary objects; only material registration names
+        // them.
+        let scene = include_str!("scene/scene.rs");
+        let queries =
+            &scene[scene.find("pub fn closest_hit").unwrap()..scene.find("fn voxels").unwrap()];
+        for word in words {
+            assert!(
+                !queries.to_lowercase().contains(word),
+                "scene queries mention {word}"
+            );
+        }
+    }
+
+    #[test]
+    fn diorama_decorations_are_reproducible_per_seed() {
+        for seed in [42, 2026, 0] {
+            let (world, decorations, scene) = diorama(seed);
+            let (again_world, again, again_scene) = diorama(seed);
+            assert_eq!(world, again_world);
+            assert_eq!(decorations, again);
+            assert_eq!(scene.objects(), again_scene.objects());
+            assert_eq!(decorations.parts().len(), 59);
+        }
+    }
+
     // ---- 640x360 development resolution ----
 
     #[test]
@@ -1546,7 +1948,7 @@ mod tests {
             ),
             (island_scene(), procedural_island_camera(aspect)),
             (
-                eggwars_scene(world.grid.clone()).unwrap(),
+                eggwars_diorama_scene(world.grid.clone(), &eggwars_decorations(&world)).unwrap(),
                 eggwars_camera(aspect),
             ),
         ];
@@ -1568,7 +1970,9 @@ mod tests {
     #[test]
     fn eggwars_640x360_output_ignores_workers_tile_size_and_repetition() {
         let world = eggwars_world(ARENA_SEED);
-        let scene = eggwars_scene(world.grid.clone()).unwrap();
+        // The decorated diorama the app renders: voxels and AABB props together.
+        let scene =
+            eggwars_diorama_scene(world.grid.clone(), &eggwars_decorations(&world)).unwrap();
         let lighting = phase2_lighting();
         let environment = Environment::sunset();
         let camera = eggwars_camera(WIDTH as f32 / HEIGHT as f32);

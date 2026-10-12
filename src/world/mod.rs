@@ -6,6 +6,7 @@
 
 pub mod arena;
 pub mod construction;
+pub mod decorations;
 pub mod island;
 pub mod noise;
 
@@ -16,6 +17,11 @@ pub use arena::{
 pub use construction::{
     BridgeState, ConstructionError, ConstructionInfo, DefenseState, EggWarsArena,
     build_eggwars_arena,
+};
+pub use decorations::{
+    ArrowHeading, Decoration, DecorationError, DecorationKind, DecorationMaterial,
+    DecorationMaterials, DecorationPart, DecorationSite, Decorations, Mount, egg_survives,
+    place_decorations,
 };
 pub use island::{
     DEFAULT_FOOTPRINT, IslandBounds, IslandConfig, IslandError, IslandStats, generate_island,

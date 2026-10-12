@@ -30,7 +30,7 @@ final lighting and composition do not exist yet.
 | 2 — Materials, Textures, and Lighting | Complete and audited |
 | 3 — Raytracing Effects | Complete and audited |
 | 4 — Performance Architecture | Complete and audited (see Phase 4 Audit) |
-| 5 — EggWars World | In progress: Missions 28 (procedural floating island), 29 (five-island arena), 30 (bridges, structures, and egg defenses), and 30.5 (nine-block egg defenses and a 640×360 internal resolution) complete |
+| 5 — EggWars World | In progress: Missions 28 (procedural floating island), 29 (five-island arena), 30 (bridges, structures, and egg defenses), 30.5 (nine-block egg defenses and a 640×360 internal resolution), and 31 (battle-aftermath decorations) complete |
 
 The rendering pipeline is: every radiance and shadow ray queries one hybrid scene (3D DDA over a
 voxel grid plus a linear scan of arbitrary AABB objects), tiles of the framebuffer are claimed
@@ -41,8 +41,9 @@ recursive Snell refraction rays whose split with reflection follows Schlick's Fr
 approximation. Lava is self-luminous and lights nearby surfaces through a finite local point light.
 Cobblestone is normal mapped from a map derived offline from its own texture. The scenes that exist
 are the default five-block showcase, the small voxel diagnostic scene, one seeded procedural
-floating island, and the seeded five-island EggWars arena with its bridges, bases, egg defenses, and
-central ruin (no eggs, props, or lava yet).
+floating island, and the seeded five-island EggWars arena with its bridges, bases, egg defenses,
+central ruin, and battle-aftermath props: two surviving eggs, shell fragments, open chests, arrows,
+and block fragments (no lava yet; final lighting and composition are pending).
 
 The current implementation includes:
 
@@ -97,8 +98,12 @@ The current implementation includes:
 - deterministic EggWars construction on that terrain: four terrain-attached cobblestone bridges
   (complete, damaged, severed, incomplete), outer bases whose nine-position obsidian egg defenses
   (eight blocks around the egg and one above it) hold 9, 7, 5, and 3 blocks, a ruined central structure with an obsidian floor inlay and two glass
-  windows, and metadata (future egg cells, defense slots, bridge ends, central open area) for the
-  next mission.
+  windows, and metadata (egg cells, defense slots, bridge ends, central open area) that later
+  missions build on.
+- battle-aftermath props as 59 project-owned AABB objects placed from that metadata: surviving
+  eggs in the North and West defenses, shell fragments in East and South, two open chests in the
+  central ruin, seven axis-aligned arrows stuck in blocks, and eight block fragments at the breaks,
+  using seven decorative solid-color materials plus the canonical cobblestone and obsidian.
 
 ## Architecture
 
@@ -1329,8 +1334,9 @@ every breach opens the egg toward the attack direction (the center).
 The ring blocks stand on the floor with open tops, so obsidian's reflection stays visible, and
 obsidian reflectivity is unchanged (0.35). An intact cap sits one block above the empty egg cell and
 touches the ring only along edges, so it is the one construction block that is not face-connected
-to a landmass (tests assert exactly the intact caps are such blocks). Eggs are not placed: their
-cells are empty and recorded for Mission 31.
+to a landmass (tests assert exactly the intact caps are such blocks). The egg cells stay empty in
+the grid; Mission 31 places the two surviving eggs in them as AABB props (see Battle Aftermath
+Decorations).
 
 ### Central ruin and glass
 
@@ -1434,6 +1440,189 @@ responsive at the 60 FPS target (the application's first render, which includes 
 the island). No optimization was added; the single-threaded 45–73 ms is why the multithreaded renderer
 matters at this resolution.
 
+## Battle Aftermath Decorations (Phase 5, Mission 31)
+
+`src/world/decorations.rs` (with `decorations/models.rs` and `decorations/validation.rs`) adds the
+small props that tell the story of the finished match: two surviving eggs, the shell of the two
+broken ones, two open chests in the central ruin, seven arrows stuck in blocks, and eight displaced
+block fragments. Props are smaller than a block and do not align with the grid, so they are
+project-owned AABBs, not voxels: the one global `VoxelGrid` is unchanged, and each prop is a handful
+of `SceneObject`s that `Scene::closest_hit` and `Scene::is_occluded` scan alongside the DDA, exactly
+like the showcase's objects. There are no meshes, no rotation system, no entity framework, and
+nothing in the renderer, scene queries, DDA, or lighting knows about props.
+
+### Pipeline
+
+```text
+build_eggwars_arena(seed)                  terrain + construction (Missions 28–30.5), unchanged
+  -> place_decorations(&arena)             reads ConstructionInfo and the grid; never writes it
+       anchors: egg cells, defense slots, bridge break edges, the ruin's open area, surface anchors
+       models:  egg, chest, arrow, shell fragment, block fragment, built in the anchor's frame
+       validate the whole set (below), then return Decorations { decorations, parts }
+  -> eggwars_diorama_scene(grid, &decorations)
+       register 7 decorative materials over one solid white texture, once
+       add one SceneObject per part (59)
+  -> existing CPU renderer
+```
+
+`place_decorations(&EggWarsArena) -> Result<Decorations, DecorationError>` runs once during scene
+construction. Every prop is placed relative to metadata or a measured surface, never at a hardcoded
+world position in `main.rs`: eggs at `EggBase::egg`, base arrows in `EggBase::defense` blocks, debris
+in the base frame (origin the egg cell, forward = `attack_direction`, the construction's own
+quarter-turn convention), bridge debris at the break edges found by walking each lane's deck from
+`BridgeLane::outer_end`/`center_end`, chests and wall arrows from `CentralStructure::open_area`, and
+everything on grass at `surface_anchor`. A model is a list of boxes in sixteenths of a block in a
+local `(side, up, forward)` frame; a quarter turn maps axis-aligned boxes to axis-aligned boxes, so
+one model serves every orientation. The coordinates are multiples of 1/32, so they are exact in
+`f32`.
+
+### Eggs
+
+| Island | Defense | Egg |
+| --- | --- | --- |
+| North | `Intact` (9/9) | survives, sealed: fully enclosed by the eight ring blocks, the cap, and the floor, so no ray reaches it |
+| West | `Damaged` (7/9) | survives, visible through the broken front-left and front blocks under its standing cap |
+| East | `Breached` (5/9) | destroyed: three shell fragments in the egg cell and the open front cell |
+| South | `Destroyed` (3/9) | destroyed: three shell fragments scattered over the opened side of the enclosure |
+
+`egg_survives(DefenseState)` is true exactly for `Intact` and `Damaged`. An egg is five stacked
+square courses (pixel half-widths 4, 6, 5, 4, 2; heights 1, 5, 3, 3, 2), 12 px wide and 14 px tall
+and widest in its lower third. It reads as the stepped pixel-art oval of the era, not a sphere or a
+cube. It stands on the base floor inside its reserved cell, 2 px clear of every ring block and of
+the cap, so it touches nothing but the floor. Its material is a pale warm cream (albedo
+0.93, 0.88, 0.76) with a soft highlight (specular 0.25) and no reflection. Lit by the sun from the
+open front and shaded under the cap, the West egg is clearly visible up close, and obsidian
+reflections show it on the inner faces of the ring. The North egg exists (the narrative and the
+tests require it) but its intact defense hides it completely. That is the intended reading: a
+sealed defense the attackers never broke. No obsidian was removed to reveal it.
+
+Broken eggs leave no intact egg and nothing egg-sized: each shell fragment is a single flat cream
+box at most 5 × 3 × 5 px, resting on the floor in the egg cell or a neighboring open cell.
+
+### Chests
+
+Two open chests stand on the central ruin's floor inside `open_area`: one against the north wall
+east of both glass panes, facing south (so it never covers a pane), and one against the west wall,
+facing east. Both fronts face the open south-east side and the default camera. Each is seven boxes:
+four 2 px wooden walls (14 × 10 × 14 px outside) around a dark interior whose floor sits 3 px below
+the rim, so the open top shows a recess; an upright lid, 14 px tall, standing on the back wall (an
+axis-aligned stand-in for a lid swung open, since there is no rotation); and a small iron latch near
+the top of the lid's front face. The lid reaches 1.5 blocks above the floor. Both chests stay within
+their own cells, 1 px clear of the walls behind them. Materials: warm wood (0.62, 0.42, 0.20),
+dark interior (0.20, 0.12, 0.06), and a pale iron latch with specular 0.6 and reflectivity 0.2,
+the only reflective decorative material. It covers a few pixels, so its recursive rays are rare.
+
+### Arrows
+
+An arrow is three boxes along one axis: a 2.5 px flint head from 3 px inside the struck face to 1 px
+outside it, a 1.5 px wooden shaft, and 2.5 px light fletching at the tail, 13 px from the face. The
+head overlaps exactly its target block and also reaches out of it (visibly stuck, never buried),
+while the shaft and fletching stay in the empty cell in front of the struck face. Arrows are
+axis-aligned: `ArrowHeading` is `PositiveX`, `NegativeX`, `PositiveZ`, `NegativeZ`, or `Down` (an
+arrow from a high shot stuck in the top of a block), and there is no arbitrary rotation. All five
+headings appear:
+
+| Site | Target | Heading |
+| --- | --- | --- |
+| West base | front-right defense block (obsidian), front face | from the bridge (`−X`) |
+| East base | left flank (obsidian), front face, beside the breach | from the bridge (`+X`) |
+| South base | last flank (obsidian), front face | from the bridge (`+Z`) |
+| East bridge | island-side edge of the gap (cobblestone deck), top | `Down` |
+| Center | north wall between the two panes (cobblestone), inner face | `−Z` |
+| Center | west wall (cobblestone), inner face | `−X` |
+| Center | grass south-east of the ruin, top | `Down` |
+
+### Battle remnants
+
+Eight fragments, cubes 7 px (obsidian) or 8 px (cobblestone) on a side, rest on block tops where the
+fighting was: West, one obsidian piece in front of its notch; East, one obsidian piece in front of
+the breach; South, an obsidian piece in front of the lost front row and a cobblestone piece in the
+crater of its blasted floor (on the grass, at whatever height it has); the damaged East bridge, one
+on the far edge of the gap; the severed South bridge, one on each side of the break; the center, one
+beside the crumbled south-east pillar. They reuse the canonical cobblestone (normal mapped) and
+obsidian (reflective) materials unchanged.
+
+### Narrative placement
+
+| Site | Eggs | Shell fragments | Arrows | Remnants |
+| --- | ---: | ---: | ---: | ---: |
+| North base (intact) | 1 | 0 | 0 | 0 |
+| West base (damaged) | 1 | 0 | 1 | 1 |
+| East base (breached) | 0 | 3 | 1 | 1 |
+| South base (destroyed) | 0 | 3 | 1 | 2 |
+| North bridge (complete), West bridge (abandoned) | 0 | 0 | 0 | 0 |
+| East bridge (damaged) | 0 | 0 | 1 | 1 |
+| South bridge (severed) | 0 | 0 | 0 | 2 |
+| Center (contested; plus both chests) | 0 | 0 | 3 | 1 |
+
+Damage grows from North to South, the abandoned and intact bridges stay clean, and the center
+carries the loot and most of the arrows. Nothing is spread uniformly.
+
+### Validation
+
+Before returning, `place_decorations` checks the whole set; any failure is a `DecorationError` and
+nothing is returned:
+
+- every part is a finite, ordered box inside the grid;
+- no part overlaps a block (touching faces is resting, not overlapping), except that an arrowhead
+  overlaps exactly its target and also reaches out of it (`NotEmbedded` otherwise);
+- a resting prop's lowest parts lie on the top of its support block, inside that block's column
+  (`Unsupported` otherwise), so nothing floats;
+- no part of one prop overlaps a part of another (`Overlap`).
+
+Parts of one prop may touch or overlap: these are the only intended intersections (shaft against
+head and fletching, walls around the chest interior, lid on the back wall, latch on the lid, egg
+courses on each other), and tests check that every prop's parts form one connected piece.
+
+### Materials
+
+`material/decorative.rs` defines seven decorative materials: egg shell, chest wood, chest interior,
+chest latch, arrow shaft, arrow head, and arrow fletching. They are separate from the canonical and
+auxiliary sets, all opaque and non-emissive, with no normal map. `Scene::add_decorative_materials`
+registers them once, in EggWars mode only, over one shared 1 × 1 white texture (`Texture::solid`):
+each material's color is its albedo, and no image asset or loader was added.
+`DecorationMaterials` resolves a part's `DecorationMaterial` to a `MaterialId` with an exhaustive
+match, like `BlockMaterials`: no strings and no lookups during rendering. Shell fragments share the
+egg's material, and block fragments share the canonical cobblestone and obsidian materials. The
+59 objects use nine materials in total. The canonical materials are untouched: grass, cobblestone,
+and obsidian reflectivity, glass IOR, and lava emission are the same. No light was added, and the
+lighting and environment are not retuned.
+
+### Determinism and seeds
+
+Placement is a pure function of the constructed arena. The seed reaches it through terrain heights
+(the crater fragment, the lawn arrow, the center fragment), bridge break positions (East gap shift,
+ragged lanes), and three stateless hashes on their own domains (`dec-shrd`, `dec-rmnt`, `dec-arrw`)
+that move each shell fragment, block fragment, and arrow by 0–2 px. Every seed has the same 25 props
+at the same sites, with the same kinds, part counts, and headings. Tests check this over 64 seeds,
+and placement succeeds on seeds 0–255. The grid is borrowed immutably: terrain and construction
+fingerprints are unchanged (constructed seed 1847 is still `0x9B34_718C_2742_6F74`).
+
+### Scene, CLI, and camera
+
+`--eggwars [--seed <u64>]` now renders the decorated diorama (`eggwars_diorama_scene`). The
+undecorated `eggwars_scene` remains as the arena stage that the voxel-level tests use. No CLI mode
+was added. The showcase, voxel diagnostic, and procedural-island PPMs are byte-identical to Mission
+30.5. Startup adds one line:
+
+```text
+  Decorations: 25 props (2 eggs, 6 shell fragments, 2 chests, 7 arrows, 8 remnants) as 59 AABB objects, placed in 0.023 ms, scene built in 0.758 ms
+```
+
+The default camera, resolution (640×360 in a 1280×720 window at 2×, nearest neighbor), controls,
+and lighting are unchanged. From the default camera the props are small details (fewer than 1% of
+the pixels change). Close-ups reveal the story.
+
+### Visual results
+
+Seeds 1847, 42, 2026, and 0 were inspected close to each base (front, sides, behind, low and high),
+along the East and South bridges, in the ruin, and on the lawn beside it. The West egg reads clearly
+through its notch and in the obsidian reflections. The East and South egg cells hold only small pale
+shards, East's partly in the shadow of the U. The chests read as open Minecraft chests, with dark
+recesses and upright lids. Arrows read as shaft, head, and fletching, with hard shadows on the walls
+and floor. Fragments sit on the decks at the breaks and in the South crater. Nothing floats or is
+buried, and on every seed the props follow the terrain.
+
 ## Known Limitations
 
 These are deliberate scope boundaries of the current diagnostic renderer, not hidden defects:
@@ -1464,9 +1653,16 @@ These are deliberate scope boundaries of the current diagnostic renderer, not hi
   contact.
 - Materials, light colors, and the sun direction are diagnostic values. Final artistic tuning
   belongs to the EggWars scene.
-- The final EggWars scene does not exist yet: the arena has terrain, bridges, bases, defenses, and
-  the central ruin, but no eggs, chests, arrows, lava, or other props, and no lighting or material
-  tuning for it.
+- The final EggWars scene is not finished: the arena has terrain, bridges, bases, defenses, the
+  central ruin, and the battle-aftermath props, but no lava, and no final lighting, composition, or
+  material tuning for it.
+- The 59 decorative AABBs are scanned linearly by every ray, shadow rays included, which makes an
+  EggWars render about 3× slower than Mission 30.5 (see Performance). No acceleration was added in
+  Mission 31 by design; grouping props (for example per-site bounds or per-cell lists in the DDA) is
+  the obvious next step if the cost matters.
+- Props are axis-aligned: arrows fly along ±X, ±Z, or straight down only, and the open chest lid
+  stands upright rather than tilted. The North egg is fully hidden by its intact defense. The
+  decorative colors are diagnostic values awaiting the final lighting pass.
 - Construction is designed for `ArenaLayout::eggwars()` only; another separation would need its
   bridge damage repositioned.
 - The island generator writes only the island's blocks and never clears other cells in its region;
@@ -1815,6 +2011,38 @@ every measured view renders in 1.1–3.2 ms, so no new acceleration structure wa
 empty-space skipping remains the first candidate if a later scene measures too slow. These are
 local development observations, not universal benchmarks.
 
+### Decorations (Mission 31)
+
+Apple M3 Pro, 11 CPUs, release, 640×360. One process renders the Mission 30.5 scene (the same grid,
+no objects) and the decorated diorama alternately, 5 warm-up and 15–20 measured rounds each; the
+values are medians (1 / 4 / automatic workers, ms), seed 1847, run twice with agreeing results:
+
+| View | Mission 30.5 | With 59 decorative AABBs | Change |
+| --- | ---: | ---: | ---: |
+| Initial (radius 68) | 47.4 / 12.9 / 6.4 | 142.4 / 37.4 / 20.4 | +200% / +191% / +218% |
+| Orbit +1.2 rad, radius 48 | 60.9 / 16.1 / 8.1 | 180.2 / 47.2 / 25.8 | +196% / +193% / +220% |
+| Close (radius 28) | 77.7 / 20.9 / 10.4 | 201.1 / 53.8 / 29.1 | +159% / +158% / +181% |
+| Ruin and chests (radius 9) | 83.5 / 22.6 / 11.7 | 319.2 / 84.7 / 47.6 | +282% / +274% / +306% |
+| West egg close-up (radius 2.4) | 87.2 / 23.1 / 12.0 | 343.1 / 89.8 / 49.3 | +294% / +289% / +310% |
+
+Seeds 42, 2026, and 0 measure within 3% of these (initial view, automatic workers: 20.0, 20.4, and
+20.3 ms). Placement takes about 4–5 µs warm (23 µs in the cold startup); registering the decorative
+materials and adding the 59 objects is negligible next to loading the textures (both scene builds
+take about 0.1–0.8 ms, dominated by file reads). There are 59 objects, 17 materials (10 + 7), and
+13 textures (12 + 1).
+
+The props are cheap to build and expensive to trace. `Scene::closest_hit` slab-tests every object
+before the DDA, and `Scene::is_occluded` tests every object for each shadow ray, so the 59 boxes add
+about 95 ms of single-threaded work to the initial view (about 1.6 ms per box per frame, roughly
+4 ns per ray-box test). Every ray pays this, although most of a frame's rays never come near a prop.
+Close views cost more because more of their rays hit geometry and cast shadow rays. The cost scales
+with the object count: about 35 boxes would still roughly double the render time. At the automatic
+worker count the diorama renders in 20–50 ms, so orbiting stays interactive but falls below the
+60 FPS target, especially up close. As the mission required, no BVH, grouping, batching, or new
+traversal was added. The decision to keep the 59 boxes and document the cost was made explicitly;
+grouped acceleration for objects is the first candidate for a future, separately approved change.
+These are local development observations, not universal benchmarks.
+
 ## Testing
 
 The Phase 4 suite contained 529 tests covering vector arithmetic and normalization, ray invariants,
@@ -1926,6 +2154,33 @@ and exact payload, finite non-blank renders of all four scene modes, the 920-til
 8-pixel last row, pixel coverage at 640×360, and byte-identical EggWars output across repeats,
 worker counts, and tile sizes. Smaller framebuffer sizes in the existing tests were left unchanged.
 
+Mission 31 adds 40 tests, for 705 passing; the 665 earlier tests are kept, and two app-level tests
+(finite renders of every mode at 640×360, and byte-identical EggWars output across repeats, worker
+counts, and tile sizes) now render the decorated scene the app shows. Decorative materials: seven
+distinct materials over one shared texture, opaque, non-emissive, only the latch reflective, a pale
+warm shell, and a chest interior darker than its wood. Eggs: exactly two, in North and West; none in
+East or South, whose egg cells hold only small shell fragments; each egg inside its reserved cell
+on the floor, clear of (not even touching) every ring block and the cap with 2 px of air; the
+stepped-oval profile; identical geometry in both bases and across runs. Chests: two, inside the
+ruin's open area on the floor, overlapping no block; hollow walls around a recess below the rim, an
+upright lid at the back in all four orientations, an open column above the interior, the latch on
+the lid; lids against the walls; only chest materials; identical on every seed. Arrows: seven, all
+five headings, head, shaft, and fletching end to end along the flight axis; each head embedded in
+exactly its target and not buried; shaft and fletching in the open cell in front; base arrows from
+the attack side into surviving defense blocks; cobblestone, obsidian, and grass targets. Remnants:
+eight cubic cobblestone or obsidian fragments resting on their supports. Narrative: per-site tallies
+for every base and bridge state, unchanged defense counts (9/3/5/7) and bridge states, and the
+center's chests and arrows. Validity: the same story over 64 seeds, with offsets varying; 25 props
+of 59 finite parts inside the grid; connected parts and no overlap between props; placement leaving
+the arena and its fingerprint unchanged; decoration frames agreeing with the construction frames;
+and validation rejecting an egg in obsidian, a lifted egg, two eggs in one cell, a prop outside the
+grid, and a buried or detached arrow. Scene: one object per part with resolved, shared materials
+(17 materials, 13 textures, no lights) over the same grid; the construction-stage scene unchanged;
+`closest_hit` reaching the West egg through the notch and every prop from above; `is_occluded`
+blocked by arrows and the chest lid; mirror rays off obsidian reaching the egg and changing the
+render; assorted viewpoints around every prop; tiling equivalence; a small change to the initial
+view; no prop words in the renderer or the scene queries; and per-seed reproducibility.
+
 The Phase 4 audit changed no runtime behavior and added no tests; the suite was unchanged at 529
 passing tests.
 
@@ -1950,16 +2205,15 @@ runs `cargo fmt --check`, `cargo test`, `cargo check`, `cargo build --release`, 
 ## Planned Features
 
 The following are not yet implemented. Phase 5 (EggWars world) is in progress; Mission 28 added
-the procedural floating-island generator, Mission 29 the five-island arena, and Mission 30 its
-bridges, structures, and egg defenses:
+the procedural floating-island generator, Mission 29 the five-island arena, Mission 30 its
+bridges, structures, and egg defenses, and Mission 31 its battle-aftermath props:
 
 - transparent or colored shadows through glass, absorption, and nested or merged glass media;
 - procedural lava-region extraction into representative point lights;
-- eggs, chests, arrows, and the other battle-aftermath details (Mission 31), lava, and the final
-  EggWars scene;
+- lava and the final EggWars composition and lighting;
 - visual storytelling, the final presentation and video, and final performance and visual polish;
-- grouped acceleration for decorative AABB objects, only if the final scene's measured object count
-  warrants it.
+- grouped acceleration for decorative AABB objects: the measured cost of the 59 Mission 31 objects
+  (about 3× per render) makes this the first candidate, pending approval.
 
 ## Course Rubric Mapping
 
@@ -1982,7 +2236,7 @@ intentionally in the final EggWars diorama, which does not exist yet.
 | Voxel grid and 3D DDA | Implemented and audited; renders the voxel diagnostic, the procedural island, and the constructed five-island arena in one global grid |
 | Tile-based CPU parallel rendering | Implemented and audited with scoped standard-library threads and dynamic tile claiming (about 5.8× on 11 CPUs for the default view, 6.0× for close glass); byte-identical to the sequential renderer |
 | Visually complex, visually attractive scene | Pending: the final EggWars scene does not exist |
-| Visual storytelling | In progress: bridge damage and egg-defense states (Mission 30); props pending |
+| Visual storytelling | In progress: bridge damage and egg-defense states (Mission 30); surviving and broken eggs, open chests, arrows, and debris (Mission 31); final composition pending |
 | Final presentation and video | Pending (Phase 6) |
 | Final performance and visual polish | Pending (Phase 6) |
 | Final EggWars aftermath scene | Planned (Phase 5–6) |

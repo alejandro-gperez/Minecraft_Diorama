@@ -4,9 +4,10 @@ use crate::{
     geometry::{Aabb, SurfaceHit},
     lighting::PointLight,
     material::{
-        AuxiliaryMaterials, AuxiliaryTextureIds, CanonicalMaterials, CanonicalTextureIds, Material,
-        MaterialId, Texture, TextureId, TextureRegistry, auxiliary_material_definitions,
-        canonical_material_definitions,
+        AuxiliaryMaterials, AuxiliaryTextureIds, CanonicalMaterials, CanonicalTextureIds,
+        DecorativeMaterials, Material, MaterialId, Texture, TextureId, TextureRegistry,
+        auxiliary_material_definitions, canonical_material_definitions,
+        decorative_material_definitions,
     },
     ray::Ray,
     voxel::{BlockMaterials, BlockType, VoxelGrid, VoxelHit, VoxelPosition},
@@ -190,6 +191,20 @@ impl Scene {
         })
     }
 
+    /// Registers the decorative prop materials, all sharing the one solid `white` texture.
+    pub fn add_decorative_materials(&mut self, white: TextureId) -> Option<DecorativeMaterials> {
+        let definitions = decorative_material_definitions(white)?;
+        Some(DecorativeMaterials {
+            egg_shell: self.add_material(definitions.egg_shell)?,
+            chest_wood: self.add_material(definitions.chest_wood)?,
+            chest_interior: self.add_material(definitions.chest_interior)?,
+            chest_latch: self.add_material(definitions.chest_latch)?,
+            arrow_shaft: self.add_material(definitions.arrow_shaft)?,
+            arrow_head: self.add_material(definitions.arrow_head)?,
+            arrow_fletching: self.add_material(definitions.arrow_fletching)?,
+        })
+    }
+
     pub fn material(&self, id: MaterialId) -> Option<&Material> {
         self.materials.get(id.index())
     }
@@ -250,6 +265,11 @@ impl Scene {
 
     pub fn add(&mut self, object: SceneObject) {
         self.objects.push(object);
+    }
+
+    /// The AABB objects, in insertion order.
+    pub fn objects(&self) -> &[SceneObject] {
+        &self.objects
     }
 
     /// Nearest hit in `[t_min, t_max]` across both geometry sources: the AABB objects (linear
