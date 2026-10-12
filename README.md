@@ -1,37 +1,46 @@
 # Minecraft EggWars Diorama
 
-Diorama estático inspirado en Minecraft 1.8, renderizado con un CPU raytracer propio escrito en Rust.
+A static, Minecraft 1.8-inspired diorama rendered with a custom CPU raytracer written in Rust.
 
-**Autor:** Alejandro Pérez — **Carné:** 24136
+**Author:** Alejandro Pérez — **Student ID (Carné):** 24136
 
-[English version](README.en.md)
+## Description
 
-## Descripción
+This project renders the aftermath of an EggWars match: five procedurally generated floating
+islands, partially destroyed bridges, broken obsidian defenses, open chests, embedded arrows,
+surviving and destroyed eggs, and lava under a sunset-to-night sky.
 
-Este proyecto renderiza el resultado de una partida de EggWars: cinco islas flotantes generadas
-proceduralmente, puentes parcialmente destruidos, defensas de obsidiana rotas, cofres abiertos,
-flechas clavadas, huevos sobrevivientes y destruidos, y lava bajo un cielo de atardecer a noche.
+**It is not a playable Minecraft clone.** There is no player, physics or gameplay. The scene is
+static and is explored from the outside with an orbital camera or a free spectator camera. All
+image computation (ray generation, intersections, shadows, reflection, refraction) runs on the
+CPU; no GPU is used.
 
-**No es un clon jugable de Minecraft.** No hay jugador, física ni mecánicas de juego. La escena es
-estática y se explora desde fuera con una cámara orbital o una cámara espectador libre. Todo el
-cálculo de imagen (generación de rayos, intersecciones, sombras, reflexión, refracción) ocurre en
-la CPU; no se usa GPU.
+## Preview
 
-## Vista previa
+![Diorama preview](assets/preview.png)
 
-![Vista previa del diorama](assets/preview.png)
+## Demonstration video
 
-## Tecnologías utilizadas
+[![Demonstration video](https://img.youtube.com/vi/FagbaJLKZds/maxresdefault.jpg)](https://youtu.be/FagbaJLKZds)
 
-- Rust estable (edición 2024); sin `unsafe` en el renderer.
-- Única dependencia: `raylib` 6.0.0, usada solo para ventana, entrada, tiempo y para mostrar el
-  framebuffer ya calculado en CPU (`src/app/app.rs`). No se usa para ningún cálculo de render.
-- CPU raytracer propio: `Vec3`, `Ray`, AABB, `VoxelGrid`, materiales, iluminación y entorno.
-- Multithreading con la biblioteca estándar (`std::thread::scope`, `AtomicUsize`, `Mutex`).
-- Texturas de 16×16 en PPM P6, cargadas por código propio. Los PNG originales de estilo
-  Minecraft clásico se convierten offline con `scripts/prepare_assets.sh`.
+Link: <https://youtu.be/FagbaJLKZds>
 
-## Arquitectura
+The video shows the initial view of the five islands, orbiting and zooming, a close-up of the
+central ruin (lava, chests, arrows, glass and obsidian), the damaged bridges and defenses,
+switching to the free camera, and variation between seeds.
+
+## Technologies
+
+- Stable Rust (2024 edition); no `unsafe` code.
+- Only dependency: `raylib` 6.0.0, used solely for the window, input, timing and for displaying
+  the framebuffer already computed on the CPU (`src/app/app.rs`). It is not used for any
+  rendering computation.
+- Custom CPU raytracer: `Vec3`, `Ray`, AABB, `VoxelGrid`, materials, lighting and environment.
+- Multithreading with the standard library (`std::thread::scope`, `AtomicUsize`, `Mutex`).
+- 16×16 PPM P6 textures loaded by project code. The original classic Minecraft-style PNG files
+  are converted offline with `scripts/prepare_assets.sh`.
+
+## Architecture
 
 ```text
 Procedural World
@@ -52,96 +61,96 @@ Framebuffer
 Raylib Window
 ```
 
-| Módulo | Responsabilidad |
+| Module | Responsibility |
 | --- | --- |
-| `math`, `ray`, `geometry` | `Vec3`, `Ray`, AABB con intersección por slabs |
-| `voxel` | `VoxelGrid` denso global, `BlockType`, traversal 3D DDA |
-| `world` | Ruido determinista, islas, arena de cinco islas, puentes, estructuras y decoraciones |
-| `scene` | Consultas híbridas voxel + AABB (hit más cercano y oclusión) |
-| `material` | Materiales canónicos, texturas PPM, mapa normal, `MaterialId`/`TextureId` |
-| `lighting`, `environment` | Luz ambiental, direccional y puntual; cielo procedural |
-| `render` | Trazado recursivo, tiles y trabajadores en paralelo, framebuffer |
-| `camera` | `OrbitalCamera`, `FreeCamera` y el trait `ViewCamera` |
-| `app` | Ventana, entrada y presentación con Raylib |
+| `math`, `ray`, `geometry` | `Vec3`, `Ray`, AABB with slab intersection |
+| `voxel` | Global dense `VoxelGrid`, `BlockType`, 3D DDA traversal |
+| `world` | Deterministic noise, islands, five-island arena, bridges, structures and decorations |
+| `scene` | Hybrid voxel + AABB queries (closest hit and occlusion) |
+| `material` | Canonical materials, PPM textures, normal map, `MaterialId`/`TextureId` |
+| `lighting`, `environment` | Ambient, directional and point lights; procedural sky |
+| `render` | Recursive tracing, tiles and parallel workers, framebuffer |
+| `camera` | `OrbitalCamera`, `FreeCamera` and the `ViewCamera` trait |
+| `app` | Window, input and presentation with Raylib |
 
-## Decisiones de diseño
+## Design decisions
 
-| Decisión | Justificación |
+| Decision | Rationale |
 | --- | --- |
-| `Vec3` y `Ray` propios | Control de convenciones numéricas y sin dependencias externas. |
-| Geometría AABB-first | Los bloques, cofres, flechas y huevos son cajas alineadas a los ejes; encaja con el estilo pixelado. |
-| Un `VoxelGrid` denso global | Una sola estructura contigua para las cinco islas; almacena solo la identidad del bloque (1 byte). |
-| Traversal 3D DDA | Recorre únicamente las celdas cruzadas por el rayo, en lugar de probar cada bloque. |
-| Renderizado híbrido voxel/AABB | Terreno y construcciones en voxels; props pequeños como AABB. Gana el hit más cercano. |
-| Seeds deterministas | Hash sin estado por dominio (sin RNG compartido): la misma seed produce la misma escena. |
-| Texturas en CPU, nearest-neighbor | Conserva el aspecto pixelado; el muestreo no depende de Raylib. |
-| `MaterialId` / `TextureId` | Los materiales y texturas se comparten por identificador, sin duplicar datos por bloque. |
-| Reflexión recursiva acotada | Profundidad máxima fija (`MAX_RAY_DEPTH = 3`) para controlar el costo. |
-| Refracción de Snell y Fresnel | El vidrio (IOR 1.5) mezcla reflexión y refracción con la aproximación de Schlick. |
-| Luz direccional y puntual | Sol direccional más luces puntuales finitas para la lava. |
-| Sombras duras | Un rayo de sombra por luz; simple y predecible. |
-| Lava emisiva | Emisión propia del material más una luz puntual representativa (no una por voxel). |
-| Normal mapping de cobblestone | Mapa normal derivado offline de su propia textura; solo afecta la iluminación local. |
-| Skybox procedural | Atardecer a noche evaluado en espacio de mundo; es el único camino de rayos que fallan. |
-| Renderizado por tiles determinista | Cada píxel usa sus coordenadas globales; la imagen no depende del orden ni del número de hilos. |
-| Multithreading con `std::thread::scope` | Los hilos reclaman tiles de 16×16 con un contador atómico; sin pools ni `unsafe`. |
-| Agrupación espacial de AABB decorativos | 8 grupos con bounds exactos descartan rayos que no los tocan; resultado idéntico al escaneo lineal. |
-| Cámara orbital y espectador libre | Ambas implementan `ViewCamera`; el renderer es el mismo para las dos. |
+| Project-owned `Vec3` and `Ray` | Control over numerical conventions and no external dependencies. |
+| AABB-first geometry | Blocks, chests, arrows and eggs are axis-aligned boxes, which suits the pixelated style. |
+| One global dense `VoxelGrid` | A single contiguous structure for all five islands; it stores only the block identity (1 byte). |
+| 3D DDA traversal | Visits only the cells a ray crosses instead of testing every block. |
+| Hybrid voxel/AABB rendering | Terrain and structures are voxels; small props are AABBs. The closest hit wins. |
+| Deterministic seeds | Stateless per-domain hashing (no shared RNG): the same seed always produces the same scene. |
+| CPU-owned textures, nearest-neighbor | Preserves the pixelated look; sampling does not depend on Raylib. |
+| `MaterialId` / `TextureId` | Materials and textures are shared by identifier, with no per-block data duplication. |
+| Bounded recursive reflection | Fixed maximum depth (`MAX_RAY_DEPTH = 3`) to control cost. |
+| Snell refraction and Fresnel | Glass (IOR 1.5) blends reflection and refraction using Schlick's approximation. |
+| Directional and point lighting | A directional sun plus finite point lights for the lava. |
+| Hard shadows | One shadow ray per light; simple and predictable. |
+| Emissive lava | Material-owned emission plus one representative point light (not one per voxel). |
+| Cobblestone normal mapping | Normal map derived offline from its own texture; affects local lighting only. |
+| Procedural skybox | Sunset-to-night evaluated in world space; it is the single miss path for all rays. |
+| Deterministic tile rendering | Each pixel uses its global coordinates; the image does not depend on order or thread count. |
+| Multithreading with `std::thread::scope` | Threads claim 16×16 tiles with an atomic counter; no pools and no `unsafe`. |
+| Spatial grouping of decorative AABBs | 8 groups with exact bounds skip rays that miss them; output is identical to the linear scan. |
+| Orbital and free spectator cameras | Both implement `ViewCamera`; the renderer is the same for both. |
 
-## Escena EggWars
+## EggWars scene
 
-- Cuatro islas exteriores de 16×16 y una isla central de 24×24, con terreno procedural de pasto,
-  tierra y roca, y minerales (carbón, hierro, oro, diamante) distribuidos de forma determinista.
-- Cuatro puentes en distintos estados: completo (Norte), dañado (Este), incompleto (Oeste) y
-  cortado (Sur).
-- Defensas de obsidiana de nueve bloques alrededor de cada huevo: intacta (Norte), dañada (Oeste),
-  perforada (Este) y destruida (Sur).
-- Huevos: uno sobrevive en la isla Oeste; el de la isla Norte está sellado dentro de su defensa
-  intacta. Fragmentos de cascarón en las islas Este y Sur.
-- Una ruina central con piso de obsidiana, muros parciales, ventanas de vidrio, dos cofres abiertos
-  y flechas clavadas en muros, defensas y puentes; escombros repartidos por la arena.
-- Un pozo de lava de 2×2 en la ruina, con una luz puntual cálida, y un derrame de lava sobre el
-  borde sur de la isla central.
-- Cielo procedural de atardecer a noche.
+- Four 16×16 outer islands and one 24×24 central island, with procedural grass, dirt and rock
+  terrain and deterministically distributed ores (coal, iron, gold, diamond).
+- Four bridges in different states: complete (North), damaged (East), incomplete (West) and
+  severed (South).
+- Nine-block obsidian egg defenses: intact (North), damaged (West), breached (East) and
+  destroyed (South).
+- Eggs: one survives on the West island; the North island's egg is sealed inside its intact
+  defense. Shell fragments lie on the East and South islands.
+- A central ruin with an obsidian-inlaid floor, partial walls, glass windows, two open chests and
+  arrows embedded in walls, defenses and bridges; debris is scattered across the arena.
+- A 2×2 lava pool in the ruin, with a warm point light, and a lava spill over the central
+  island's south edge.
+- Procedural sunset-to-night sky.
 
-La narrativa es ambiental: los puentes rotos, las defensas perforadas y los objetos abandonados
-sugieren un asalto que ya terminó, con un huevo que resistió y otros que no.
+The storytelling is environmental: broken bridges, breached defenses and abandoned objects imply
+an assault that has already ended, with one egg that held out and others that did not.
 
-## Materiales
+## Materials
 
-| Material | Efecto que demuestra |
+| Material | Effect it demonstrates |
 | --- | --- |
-| Grass | Texturas por cara (superior, lateral, inferior) con color de bioma aplicado offline. |
-| Cobblestone | Normal mapping derivado de su propia textura. |
-| Obsidian | Reflexión recursiva sobre una superficie oscura. |
-| Glass | Refracción de Snell con composición de Fresnel. |
-| Lava | Emisión propia e iluminación local mediante luz puntual. |
+| Grass | Per-face textures (top, side, bottom) with the biome tint applied offline. |
+| Cobblestone | Normal mapping derived from its own texture. |
+| Obsidian | Recursive reflection on a dark surface. |
+| Glass | Snell refraction with Fresnel composition. |
+| Lava | Self-emission and local lighting through a point light. |
 
-Son aproximaciones de tiempo real razonable, no una simulación físicamente exacta.
+These are reasonable real-time approximations, not a physically exact simulation.
 
-## Requisitos de la rúbrica
+## Rubric requirements
 
-| Requisito | Implementación | Estado |
+| Requirement | Implementation | Status |
 | --- | --- | --- |
-| CPU raytracing | Renderer propio, sin GPU | Implementado |
-| Terreno procedural de al menos 16×16 | Islas 16×16 y 24×24 con seed `u64` | Implementado |
-| Cinco materiales con textura | Grass, cobblestone, obsidian, glass, lava | Implementado |
-| Reflexión | Obsidian, recursiva | Implementado |
-| Refracción | Glass, Snell + Fresnel | Implementado |
-| Normal mapping | Cobblestone | Implementado |
-| Material emisivo | Lava, con luz puntual | Implementado |
-| Skybox | Entorno procedural atardecer/noche | Implementado |
-| Rotación orbital y zoom | `OrbitalCamera` | Implementado |
-| Cámara libre (adicional) | `FreeCamera` espectador | Implementado |
-| Renderizado paralelo y optimización | Tiles + hilos, `VoxelGrid` + 3D DDA, agrupación espacial | Implementado |
-| Escena compleja y atractiva | Diorama EggWars de cinco islas | Implementado |
-| Video de demostración | [YouTube](https://youtu.be/FagbaJLKZds) | Entregado |
+| CPU raytracing | Custom renderer, no GPU | Implemented |
+| Procedural terrain of at least 16×16 | 16×16 and 24×24 islands from a `u64` seed | Implemented |
+| Five textured materials | Grass, cobblestone, obsidian, glass, lava | Implemented |
+| Reflection | Obsidian, recursive | Implemented |
+| Refraction | Glass, Snell + Fresnel | Implemented |
+| Normal mapping | Cobblestone | Implemented |
+| Emissive material | Lava, with a point light | Implemented |
+| Skybox | Procedural sunset/night environment | Implemented |
+| Orbital rotation and zoom | `OrbitalCamera` | Implemented |
+| Free camera (extra) | `FreeCamera` spectator | Implemented |
+| Parallel rendering and optimization | Tiles + threads, `VoxelGrid` + 3D DDA, spatial grouping | Implemented |
+| Complex, attractive scene | Five-island EggWars diorama | Implemented |
+| Demonstration video | [YouTube](https://youtu.be/FagbaJLKZds) | Delivered |
 
-## Ejecución
+## Running
 
-Requiere Rust estable y Cargo (macOS; Raylib se compila como dependencia). Los PPM de texturas ya
-están en `assets/textures/`; solo se necesita `scripts/prepare_assets.sh` para regenerarlos desde
-`assets/source/` (usa `sips` de macOS).
+Requires stable Rust and Cargo (macOS; Raylib is built as a dependency). The texture PPM files
+are already in `assets/textures/`; `scripts/prepare_assets.sh` is only needed to regenerate them
+from `assets/source/` (it uses macOS `sips`).
 
 ```bash
 cargo run --release -- --eggwars --seed 1847
@@ -149,71 +158,63 @@ cargo run --release -- --eggwars --seed 42
 cargo test
 ```
 
-La seed por defecto de `--eggwars` es 42. La misma seed genera siempre la misma escena. Al iniciar,
-la imagen inicial se guarda en `output/eggwars_seed_<seed>.ppm`. Otros modos de diagnóstico:
-`cargo run --release` (showcase de cinco bloques), `-- --voxel-diagnostic` y
+The default `--eggwars` seed is 42. The same seed always generates the same scene. On startup,
+the initial image is saved to `output/eggwars_seed_<seed>.ppm`. Other diagnostic modes:
+`cargo run --release` (five-block showcase), `-- --voxel-diagnostic` and
 `-- --procedural-island [--seed <u64>]`.
 
-## Controles
+## Controls
 
-| Cámara orbital (por defecto) | |
+| Orbital camera (default) | |
 | --- | --- |
-| Flechas | Orbitar (horizontal y elevación) |
-| `W` / `S` o rueda del mouse | Acercar / alejar |
-| `C` | Cambiar a cámara libre |
-| `Esc` | Salir |
+| Arrow keys | Orbit (horizontal and elevation) |
+| `W` / `S` or mouse wheel | Zoom in / out |
+| `C` | Switch to the free camera |
+| `Esc` | Quit |
 
-| Cámara libre (espectador, noclip) | |
+| Free camera (spectator, noclip) | |
 | --- | --- |
-| `W` / `S` | Avanzar / retroceder |
-| `A` / `D` | Desplazar a izquierda / derecha |
-| `Espacio` / `Shift` | Subir / bajar |
-| Mouse | Mirar (el cursor se captura solo en este modo) |
-| `C` | Volver a la cámara orbital, restaurada tal como estaba |
-| `Esc` | Salir |
+| `W` / `S` | Move forward / backward |
+| `A` / `D` | Strafe left / right |
+| `Space` / `Shift` | Move up / down |
+| Mouse | Look around (the cursor is captured only in this mode) |
+| `C` | Return to the orbital camera, restored exactly as it was |
+| `Esc` | Quit |
 
-La cámara libre comienza en la posición y dirección exactas de la orbital. No tiene física,
-gravedad ni colisiones.
+The free camera starts at the orbital camera's exact position and direction. It has no physics,
+gravity or collision.
 
-## Rendimiento
+## Performance
 
-Mediciones locales (Apple M3 Pro, 11 CPUs, modo release, seed 1847); no son benchmarks universales.
+Local measurements (Apple M3 Pro, 11 CPUs, release mode, seed 1847); not universal benchmarks.
 
-| Concepto | Valor |
+| Item | Value |
 | --- | --- |
-| Resolución interna / ventana | 640×360 / 1280×720 (escala 2×, nearest-neighbor) |
-| Vista inicial, hilos automáticos | ≈ 10 ms |
-| Vista inicial antes del pozo y derrame de lava, 1 / 4 / auto hilos | 61 / 16 / 8 ms |
-| Tests automatizados | 743 pasando |
+| Internal / window resolution | 640×360 / 1280×720 (2× scale, nearest-neighbor) |
+| Initial view, automatic thread count | ≈ 10 ms |
+| Initial view before the lava pool and spill, 1 / 4 / auto threads | 61 / 16 / 8 ms |
+| Automated tests | 743 passing |
 
-Los fotogramas sin cambios de cámara no se vuelven a renderizar. Más detalle histórico en
+Frames with no camera change are not re-rendered. More historical detail in
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
-## Limitaciones conocidas
+## Known limitations
 
-- El vidrio y la lava proyectan sombras opacas; no hay seguimiento de medios anidados (el vidrio
-  junto a otro bloque puede mostrar su cara interior).
-- Profundidad de recursión fija (3).
-- La geometría decorativa está alineada a los ejes (sin tapas inclinadas ni flechas en ángulo).
-- Sin antialiasing.
-- Sin gameplay, por diseño.
-- Sin colisión de cámara: la orbital puede entrar en una isla y la libre atraviesa todo (noclip).
-- El huevo de la isla Norte está sellado y no se instancia en la escena.
+- Glass and lava cast opaque shadows; there is no nested-medium tracking (glass touching another
+  block can show that block's interior face).
+- Fixed recursion depth (3).
+- Decorative geometry is axis-aligned (no tilted lids or angled arrows).
+- No antialiasing.
+- No gameplay, by design.
+- No camera collision: the orbital camera can enter an island and the free camera passes through
+  everything (noclip).
+- The North island's egg is sealed and is not instantiated in the scene.
 
-## Video de demostración
+## Development history
 
-[![Video de demostración](https://img.youtube.com/vi/FagbaJLKZds/maxresdefault.jpg)](https://youtu.be/FagbaJLKZds)
+Mission summaries, decisions and historical measurements (in English, with the project's original
+notes): [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
-Enlace: <https://youtu.be/FagbaJLKZds>
+## Authorship
 
-El video muestra la vista inicial con las cinco islas, la órbita y el zoom, un acercamiento a la
-ruina central (lava, cofres, flechas, vidrio y obsidiana), los puentes y defensas dañados, el cambio
-a la cámara libre y la variación entre seeds.
-
-## Historial de desarrollo
-
-Resúmenes de misiones, decisiones y mediciones históricas: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
-
-## Autoría
-
-Alejandro Pérez — Carné: 24136. Proyecto académico de Computación Gráfica.
+Alejandro Pérez — Student ID (Carné): 24136. Academic computer graphics project.
